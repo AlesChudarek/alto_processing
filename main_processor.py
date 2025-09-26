@@ -12,6 +12,17 @@ import html
 import re
 import sys
 import argparse
+import statistics
+
+# Heuristické multiplikátory pro dělení bloků; úprava na jednom místě usnadní ladění.
+VERTICAL_GAP_MULTIPLIER = 2.5  # Kolikrát musí být mezera mezi řádky větší než typická mezera, aby vznikl nový blok.
+VERTICAL_HEIGHT_RATIO = 0.85   # Poměr k mediánu výšky řádku, přispívá k prahu pro rozdělení bloku.
+VERTICAL_MAX_FACTOR = 3        # Horní limit pro vertikální práh v násobcích mediánu výšky řádku.
+HORIZONTAL_WIDTH_RATIO = 0.2   # Část typické šířky řádku, kterou musí horizontální posun překročit, aby vznikl nový blok.
+HORIZONTAL_SHIFT_MULTIPLIER = 2.5  # Násobek typického horizontálního posunu mezi řádky.
+HORIZONTAL_MIN_THRESHOLD = 12  # Minimální povolený práh pro horizontální dělení (v ALTO jednotkách).
+NEGATIVE_SHIFT_MULTIPLIER = 1.0  # Násobek horizontálního prahu pro detekci návratu k levému okraji (retroaktivní dělení).
+FALLBACK_THRESHOLD = 40        # Záložní hodnota, pokud nelze heuristiku spočítat.
 
 class AltoProcessor:
     def __init__(self, iiif_base_url: str = "https://kramerius5.nkp.cz/search/iiif"):
@@ -251,6 +262,12 @@ class AltoProcessor:
         ah = alto_height if alto_height > 0 and alto_width > 0 else alto_height2
 
         blocks = []
+
+        def finalize_block(block_data):
+            """Pomocná funkce pro převod seznamu řádků na text a přidání do výstupu."""
+            text_content = ' '.join(block_data['lines']).strip()
+            if text_content:
+                blocks.append({'text': text_content, 'tag': block_data['tag']})
         # Během průchodu skládáme aktuální blok; bbox slouží pro případné zvýraznění
         block = {'text': '', 'hMin': 0, 'hMax': 0, 'vMin': 0, 'vMax': 0, 'width': aw, 'height': ah}
 
@@ -392,12 +409,7 @@ class AltoProcessor:
             if not text_lines:
                 text_lines = block_elem.findall('.//{http://www.loc.gov/standards/alto/ns-v2#}TextLine')
 
-            current_block = {'text': '', 'tag': tag}
-            lines = 0
-            last_bottom = 0
-            last_left = 0
-            all_bold = True
-
+            line_records = []
             for text_line in text_lines:
                 text_line_width = int(text_line.get('WIDTH', '0'))
                 if text_line_width < 50:
@@ -406,25 +418,118 @@ class AltoProcessor:
                 text_line_height = int(text_line.get('HEIGHT', '0'))
                 text_line_vpos = int(text_line.get('VPOS', '0'))
                 text_line_hpos = int(text_line.get('HPOS', '0'))
-                bottom = text_line_vpos + text_line_height
-                v_diff = text_line_vpos - last_bottom
 
-                if last_bottom > 0 and v_diff > 40:
-                    # Velká vertikální mezera = nový blok textu
-                    if current_block['text']:
-                        blocks.append(current_block)
-                    current_block = {'text': '', 'tag': tag}
-                    lines = 0
+                line_records.append({
+                    'element': text_line,
+                    'width': text_line_width,
+                    'height': text_line_height,
+                    'vpos': text_line_vpos,
+                    'hpos': text_line_hpos,
+                    'bottom': text_line_vpos + text_line_height
+                })
+
+            if not line_records:
+                continue
+
+            line_heights = [record['height'] for record in line_records]
+            line_widths = [record['width'] for record in line_records]
+
+            vertical_gaps = []
+            horizontal_shifts = []
+            previous_bottom = None
+            previous_left = None
+
+            for record in line_records:
+                if previous_bottom is not None:
+                    gap = record['vpos'] - previous_bottom
+                    if gap > 0:
+                        vertical_gaps.append(gap)
+
+                if previous_left is not None:
+                    shift = record['hpos'] - previous_left
+                    if shift > 0:
+                        horizontal_shifts.append(shift)
+
+                previous_bottom = record['bottom']
+                previous_left = record['hpos']
+
+            median_height = statistics.median(line_heights) if line_heights else 0
+            positive_gaps = [gap for gap in vertical_gaps if gap > 0]
+            median_gap = statistics.median(positive_gaps) if positive_gaps else 0
+
+            vertical_threshold_candidates = []
+            if median_gap:
+                vertical_threshold_candidates.append(median_gap * VERTICAL_GAP_MULTIPLIER)
+            if median_height:
+                vertical_threshold_candidates.append(median_height * VERTICAL_HEIGHT_RATIO)
+
+            if vertical_threshold_candidates:
+                vertical_threshold = max(int(round(value)) for value in vertical_threshold_candidates)
+                vertical_threshold = max(vertical_threshold, 1)
+                if median_height:
+                    vertical_threshold = min(vertical_threshold, int(round(median_height * VERTICAL_MAX_FACTOR)))
+            else:
+                vertical_threshold = FALLBACK_THRESHOLD
+
+            median_width = statistics.median(line_widths) if line_widths else 0
+            trimmed_shifts = []
+            if horizontal_shifts:
+                sorted_shifts = sorted(horizontal_shifts)
+                cutoff = max(1, int(len(sorted_shifts) * 0.5))
+                trimmed_shifts = sorted_shifts[:cutoff]
+
+            median_shift = statistics.median(trimmed_shifts) if trimmed_shifts else 0
+            if median_width and median_shift and median_shift > median_width * 0.6:
+                median_shift = 0
+
+            horizontal_threshold_candidates = []
+            if median_width:
+                horizontal_threshold_candidates.append(median_width * HORIZONTAL_WIDTH_RATIO)
+            if median_shift:
+                horizontal_threshold_candidates.append(median_shift * HORIZONTAL_SHIFT_MULTIPLIER)
+
+            if horizontal_threshold_candidates:
+                horizontal_threshold = max(int(round(value)) for value in horizontal_threshold_candidates)
+                horizontal_threshold = max(horizontal_threshold, HORIZONTAL_MIN_THRESHOLD)
+            else:
+                horizontal_threshold = FALLBACK_THRESHOLD
+
+            current_block = {'lines': [], 'tag': tag}
+            lines = 0
+            last_bottom = None
+            last_left = None
+
+            for record in line_records:
+                text_line = record['element']
+                text_line_vpos = record['vpos']
+                text_line_hpos = record['hpos']
+                bottom = record['bottom']
+
+                if last_bottom is not None:
+                    v_diff = text_line_vpos - last_bottom
+                    if v_diff > vertical_threshold:
+                        # Velká vertikální mezera = nový blok textu
+                        if current_block['lines']:
+                            finalize_block(current_block)
+                        current_block = {'lines': [], 'tag': tag}
+                        lines = 0
 
                 last_bottom = bottom
 
-                h_diff = text_line_hpos - last_left
-                if last_left > 0 and h_diff > 40:
-                    # Podobně reagujeme na výrazný horizontální posun (např. tabulky, sloupce)
-                    if current_block['text']:
-                        blocks.append(current_block)
-                    current_block = {'text': '', 'tag': tag}
-                    lines = 0
+                if last_left is not None:
+                    h_diff = text_line_hpos - last_left
+                    if h_diff > horizontal_threshold:
+                        # Podobně reagujeme na výrazný horizontální posun (např. tabulky, sloupce)
+                        if current_block['lines']:
+                            finalize_block(current_block)
+                        current_block = {'lines': [], 'tag': tag}
+                        lines = 0
+                    elif h_diff < 0 and abs(h_diff) > horizontal_threshold * NEGATIVE_SHIFT_MULTIPLIER and current_block['lines']:
+                        if len(current_block['lines']) > 1:
+                            for previous_line in current_block['lines'][:-1]:
+                                finalize_block({'lines': [previous_line], 'tag': current_block['tag']})
+                            current_block = {'lines': [current_block['lines'][-1]], 'tag': current_block['tag']}
+                        lines = len(current_block['lines'])
 
                 last_left = text_line_hpos
 
@@ -432,10 +537,13 @@ class AltoProcessor:
                 if not strings:
                     strings = text_line.findall('.//{http://www.loc.gov/standards/alto/ns-v2#}String')
 
+                line_parts = []
+                line_all_bold = True
+
                 for string_el in strings:
                     style = string_el.get('STYLE', '')
                     if not style or 'bold' not in style:
-                        all_bold = False
+                        line_all_bold = False
 
                     content = string_el.get('CONTENT', '')
                     subs_content = string_el.get('SUBS_CONTENT', '')
@@ -450,21 +558,29 @@ class AltoProcessor:
                     elif subs_type == 'HypPart2':
                         continue
 
-                    current_block['text'] += content + ' '
+                    if content:
+                        line_parts.append(content)
 
-                lines += 1
+                line_text = ' '.join(line_parts).strip()
+                if not line_text:
+                    continue
+
+                prospective_count = lines + 1
 
                 # Logika pro <h3> - shodná s původní TypeScript implementací
-                if lines == 1 and all_bold and current_block['text']:
-                    current_block['tag'] = 'h3'
-                    blocks.append(current_block)
-                    current_block = {'text': '', 'tag': tag}
+                if prospective_count == 1 and line_all_bold:
+                    finalize_block({'lines': [line_text], 'tag': 'h3'})
+                    current_block = {'lines': [], 'tag': tag}
                     lines = 0
-                else:
-                    all_bold = True
+                    last_left = text_line_hpos
+                    last_bottom = bottom
+                    continue
 
-            if current_block['text']:
-                blocks.append(current_block)
+                current_block['lines'].append(line_text)
+                lines = len(current_block['lines'])
+
+            if current_block['lines']:
+                finalize_block(current_block)
 
         # Generování HTML - přesně jako v TypeScript
         result = ""

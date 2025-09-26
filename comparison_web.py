@@ -25,6 +25,8 @@ from main_processor import AltoProcessor
 
 ROOT_DIR = Path(__file__).resolve().parent
 TS_DIST_PATH = ROOT_DIR / 'dist' / 'run_original.js'
+DEFAULT_WIDTH = 800
+DEFAULT_HEIGHT = 1200
 
 class ComparisonHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -81,6 +83,10 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         button:hover {
             background-color: #0056b3;
         }
+        button:disabled {
+            background-color: #9aa0a6;
+            cursor: not-allowed;
+        }
         .results {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -90,38 +96,117 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         .action-row {
             display: flex;
             align-items: center;
-            justify-content: space-between;
+            justify-content: flex-start;
             gap: 20px;
+            flex-wrap: wrap;
         }
-        .preview-wrapper {
+        .tools-row {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            flex-wrap: wrap;
+            margin-top: 15px;
+            width: 100%;
+            justify-content: center;
             position: relative;
         }
-        .preview-wrapper button {
-            background-color: #6c757d;
+        .navigation-controls {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            justify-content: center;
+            margin: 0 auto;
         }
-        .preview-wrapper button:hover {
-            background-color: #545b62;
+        .navigation-controls button {
+            padding: 8px 12px;
         }
-        .preview-container {
-            display: none;
-            position: absolute;
-            top: calc(100% + 2px);
-            right: 0;
+        .navigation-controls span {
+            min-width: 60px;
             text-align: center;
-            background: white;
-            padding: 10px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            box-shadow: 0 2px 6px rgba(0,0,0,0.1);
-            max-width: min(600px, 45vw);
-            z-index: 10;
+            font-weight: bold;
+            color: #333;
         }
-        .preview-container img {
-            max-width: min(580px, 42vw);
-            max-height: min(800px, 80vh);
+        .page-info-layout {
+            display: flex;
+            align-items: stretch;
+            gap: 16px;
+            position: relative;
+        }
+        .page-details {
+            flex: 1 1 auto;
+            min-width: 0;
+        }
+        .page-preview {
+            flex: 0 0 auto;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            justify-content: flex-start;
+            gap: 8px;
+            overflow: visible;
+            min-width: 140px;
+            margin-left: auto;
+            align-self: flex-start;
+            height: auto;
+            min-height: 120px;
+        }
+        .page-preview.preview-visible {
+            display: flex;
+        }
+        .page-preview img {
+            border-radius: 4px;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.2);
+            max-height: 100%;
+        }
+        #preview-image-thumb {
+            display: block;
+            width: auto;
+            height: auto;
+            max-width: 100%;
+            max-height: 180px;
+            object-fit: contain;
+            opacity: 0;
+            transition: opacity 0.2s ease;
+        }
+        .preview-error #preview-image-thumb {
+            display: none;
+        }
+        .preview-error #preview-status {
+            color: red;
+            font-weight: bold;
+        }
+        .preview-large {
+            pointer-events: none;
+            position: absolute;
+            top: 0;
+            right: 0;
+            transform-origin: top right;
+            transform: scale(0.35);
+            opacity: 0;
+            visibility: hidden;
+            background: white;
             border: 1px solid #ddd;
             border-radius: 4px;
-            box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+            padding: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+            z-index: 30;
+            transition: transform 0.5s ease, opacity 0.5s ease;
+        }
+        .page-preview.preview-loaded:hover .preview-large {
+            transform: scale(1);
+            opacity: 1;
+            visibility: visible;
+        }
+        .preview-large img {
+            display: block;
+            width: 100%;
+            height: auto;
+            max-height: 60vh;
+            border-radius: 4px;
+        }
+        #preview-status {
+            text-align: right;
+            max-width: 220px;
         }
         .result-box {
             background: white;
@@ -152,6 +237,35 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             border-radius: 4px;
             margin: 10px 0;
         }
+        .info-section {
+            margin-top: 20px;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background: #fafafa;
+        }
+
+        .info-section h2 {
+            margin-top: 0;
+            color: #333;
+        }
+        .metadata-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 8px 16px;
+            margin: 0;
+        }
+        .metadata-grid dt {
+            font-weight: bold;
+            color: #333;
+        }
+        .metadata-grid dd {
+            margin: 0 0 8px 0;
+            color: #555;
+        }
+        .muted {
+            color: #555;
+        }
         pre {
             background: #f8f9fa;
             padding: 10px;
@@ -168,28 +282,45 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         <p>Porovnání původního TypeScript a nového Python zpracování ALTO XML</p>
 
         <div class="form-group">
-            <label for="uuid">UUID dokumentu:</label>
+            <label for="uuid">UUID stránky nebo dokumentu:</label>
             <input type="text" id="uuid" placeholder="Zadejte UUID (např. 673320dd-0071-4a03-bf82-243ee206bc0b)" value="673320dd-0071-4a03-bf82-243ee206bc0b">
         </div>
 
-        <div class="form-group">
-            <label for="width">Šířka:</label>
-            <input type="number" id="width" value="800">
-        </div>
-
-        <div class="form-group">
-            <label for="height">Výška:</label>
-            <input type="number" id="height" value="1200">
-        </div>
-
         <div class="action-row">
-            <button onclick="processAlto()">Zpracovat a porovnat</button>
-            <div class="preview-wrapper" onmouseenter="showPreview()" onmouseleave="hidePreview()">
-                <button id="preview-button" type="button">Náhled stránky</button>
-                <div id="preview-container" class="preview-container">
-                    <p id="preview-status" style="margin-bottom: 10px; color: #555;"></p>
-                    <img id="preview-image" alt="Náhled stránky">
+            <button id="load-button" type="button" onclick="processAlto()">Načíst stránku</button>
+        </div>
+
+        <div id="book-info" class="info-section" style="display: none;">
+            <h2 id="book-title">Informace o knize</h2>
+            <p id="book-handle" class="muted"></p>
+            <div id="book-metadata-empty" class="muted" style="display: none;">Metadata se nepodařilo načíst.</div>
+            <dl id="book-metadata" class="metadata-grid"></dl>
+        </div>
+
+        <div id="page-info" class="info-section" style="display: none;">
+            <div class="page-info-layout">
+                <div class="page-details">
+                    <h2>Informace o straně</h2>
+                    <p id="page-summary" class="muted"></p>
+                    <p id="page-side" class="muted"></p>
+                    <p id="page-uuid" class="muted"></p>
+                    <p id="page-handle" class="muted"></p>
                 </div>
+                <div id="page-preview" class="page-preview">
+                    <div id="preview-status" class="muted"></div>
+                    <img id="preview-image-thumb" alt="Náhled stránky">
+                    <div id="preview-large" class="preview-large">
+                        <img id="preview-image-large" alt="Náhled stránky ve větší velikosti">
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="page-tools" class="tools-row" style="display: none;">
+            <div class="navigation-controls">
+                <button id="prev-page" type="button" aria-label="Předchozí stránka">◀</button>
+                <span id="page-position">-</span>
+                <button id="next-page" type="button" aria-label="Další stránka">▶</button>
             </div>
         </div>
 
@@ -210,15 +341,27 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
     </div>
 
     <script>
-        let previewVisible = false;
         let previewObjectUrl = null;
-        let previewFetching = false;
+        let previewFetchToken = null;
         let previewImageUuid = null;
 
+        let currentBook = null;
+        let currentPage = null;
+        let navigationState = null;
+
+        function setToolsVisible(show) {
+            const tools = document.getElementById("page-tools");
+            if (tools) {
+                tools.style.display = show ? "flex" : "none";
+            }
+        }
+
         function resetPreview() {
-            const container = document.getElementById('preview-container');
-            const img = document.getElementById('preview-image');
-            const status = document.getElementById('preview-status');
+            const container = document.getElementById("page-preview");
+            const thumb = document.getElementById("preview-image-thumb");
+            const largeImg = document.getElementById("preview-image-large");
+            const largeBox = document.getElementById("preview-large");
+            const status = document.getElementById("preview-status");
 
             if (previewObjectUrl) {
                 URL.revokeObjectURL(previewObjectUrl);
@@ -226,136 +369,561 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             }
 
             previewImageUuid = null;
-            previewFetching = false;
-            previewVisible = false;
+            previewFetchToken = null;
 
-            if (img) {
-                img.src = '';
+            if (thumb) {
+                thumb.onload = null;
+                thumb.onerror = null;
+                thumb.src = "";
+                thumb.style.display = "none";
+                thumb.style.width = "";
+                thumb.style.height = "";
+                thumb.style.maxWidth = "";
+                thumb.style.maxHeight = "";
+                thumb.style.minHeight = "";
+                thumb.style.opacity = "";
             }
+
+            if (largeImg) {
+                largeImg.src = "";
+                largeImg.style.width = "";
+                largeImg.style.height = "";
+            }
+
+            if (largeBox) {
+                largeBox.style.width = "";
+                largeBox.style.maxWidth = "";
+            }
+
             if (status) {
-                status.textContent = '';
+                status.textContent = "";
+                status.style.display = "none";
             }
+
             if (container) {
-                container.style.display = 'none';
+                container.style.display = "none";
+                container.classList.remove("preview-visible", "preview-loaded", "preview-error");
+                delete container.dataset.previewStream;
             }
         }
 
-        async function showPreview() {
-            const uuid = document.getElementById('uuid').value;
-            const container = document.getElementById('preview-container');
-            const img = document.getElementById('preview-image');
-            const status = document.getElementById('preview-status');
+        function computeThumbMaxHeight() {
+            const layout = document.querySelector('.page-info-layout');
+            if (layout) {
+                const rect = layout.getBoundingClientRect();
+                if (rect && rect.height > 0) {
+                    return rect.height;
+                }
+            }
+            const details = document.querySelector('.page-details');
+            if (details) {
+                const rect = details.getBoundingClientRect();
+                if (rect && rect.height > 0) {
+                    return rect.height;
+                }
+            }
+            const section = document.getElementById("page-info");
+            if (section) {
+                const rect = section.getBoundingClientRect();
+                if (rect && rect.height > 0) {
+                    return rect.height;
+                }
+            }
+            return 260;
+        }
 
-            if (!container || !img || !status) {
+        function computeLargePreviewWidth() {
+            const resultBox = document.querySelector('#results .result-box');
+            if (resultBox && resultBox.offsetWidth) {
+                return Math.min(resultBox.offsetWidth, window.innerWidth * 0.9);
+            }
+            return Math.min(window.innerWidth * 0.55, 900);
+        }
+
+        function sizeThumbnail(thumb, maxWidth) {
+            const computedHeight = computeThumbMaxHeight();
+            const safeHeight = Math.min(Math.max(Number.isFinite(computedHeight) ? computedHeight : 0, 120), 180);
+            const safeWidth = Math.max(Number.isFinite(maxWidth) ? maxWidth : 0, 220);
+
+            thumb.style.height = "auto";
+            thumb.style.maxHeight = `${Math.round(safeHeight)}px`;
+            thumb.style.width = "auto";
+            thumb.style.maxWidth = `${Math.round(safeWidth)}px`;
+            thumb.style.minHeight = "120px";
+            thumb.style.opacity = "1";
+            thumb.style.display = "block";
+        }
+
+        async function fetchPreviewImage(uuid) {
+            const streamOrder = ["AUTO", "IMG_PREVIEW", "IMG_THUMB", "IMG_FULL"];
+            let lastError = null;
+
+            for (const requestedStream of streamOrder) {
+                try {
+                    const response = await fetch(`/preview?uuid=${encodeURIComponent(uuid)}&stream=${requestedStream}`, { cache: "no-store" });
+                    if (!response.ok) {
+                        lastError = new Error(`HTTP ${response.status} (${requestedStream})`);
+                        continue;
+                    }
+
+                    const contentTypeHeader = response.headers.get("Content-Type") || "";
+                    const contentType = contentTypeHeader.toLowerCase();
+
+                    if (!contentType.startsWith("image/")) {
+                        lastError = new Error(`Neočekávaný obsah (${requestedStream}): ${contentTypeHeader || 'bez Content-Type'}`);
+                        continue;
+                    }
+
+                    if (contentType.includes("jp2")) {
+                        lastError = new Error(`Formát ${contentTypeHeader} není prohlížečem podporovaný (${requestedStream}).`);
+                        continue;
+                    }
+
+                    const blob = await response.blob();
+                    const actualStream = response.headers.get("X-Preview-Stream") || requestedStream;
+
+                    return {
+                        blob,
+                        stream: actualStream,
+                        contentType: contentTypeHeader,
+                    };
+                } catch (error) {
+                    lastError = error;
+                }
+            }
+
+            throw lastError || new Error("Náhled se nepodařilo načíst.");
+        }
+
+        function showPreviewFromCache() {
+            const container = document.getElementById("page-preview");
+            const thumb = document.getElementById("preview-image-thumb");
+            const largeImg = document.getElementById("preview-image-large");
+            const largeBox = document.getElementById("preview-large");
+            const status = document.getElementById("preview-status");
+
+            if (!container || !thumb || !largeImg || !largeBox || !status || !previewObjectUrl) {
                 return;
             }
 
-            if (!uuid) {
-                status.textContent = 'Zadejte UUID';
-                container.style.display = 'block';
-                previewVisible = true;
+            const largeWidth = computeLargePreviewWidth();
+            largeBox.style.width = `${largeWidth}px`;
+            largeBox.style.maxWidth = `${largeWidth}px`;
+            largeImg.style.width = "100%";
+            largeImg.style.height = "auto";
+            largeImg.src = previewObjectUrl;
+
+            const finalize = () => {
+                thumb.style.opacity = "1";
+                thumb.onload = null;
+            };
+
+    if (thumb.src !== previewObjectUrl) {
+        thumb.style.opacity = "0";
+        thumb.onload = finalize;
+        thumb.src = previewObjectUrl;
+        thumb.onerror = () => {
+            status.textContent = "Náhled se nepodařilo načíst.";
+            status.style.display = "block";
+            container.classList.add("preview-error");
+            container.classList.remove("preview-loaded");
+        };
+        if (thumb.complete && thumb.naturalWidth > 0) {
+            finalize();
+        } else if (thumb.complete) {
+            status.textContent = "Náhled se nepodařilo načíst.";
+            status.style.display = "block";
+            container.classList.add("preview-error");
+            container.classList.remove("preview-loaded");
+        }
+    } else if (thumb.naturalWidth > 0) {
+        finalize();
+    } else {
+        thumb.style.opacity = "0";
+        thumb.onload = finalize;
+        thumb.onerror = () => {
+            status.textContent = "Náhled se nepodařilo načíst.";
+            status.style.display = "block";
+            container.classList.add("preview-error");
+            container.classList.remove("preview-loaded");
+        };
+    }
+
+            container.style.display = "flex";
+            container.classList.add("preview-visible", "preview-loaded");
+            container.classList.remove("preview-error");
+            status.textContent = "";
+            status.style.display = "none";
+        }
+
+        async function loadPreview(uuid) {
+            const container = document.getElementById("page-preview");
+            const thumb = document.getElementById("preview-image-thumb");
+            const largeImg = document.getElementById("preview-image-large");
+            const largeBox = document.getElementById("preview-large");
+            const status = document.getElementById("preview-status");
+
+            if (!container || !thumb || !largeImg || !largeBox || !status || !uuid) {
                 return;
             }
 
-            previewVisible = true;
-            container.style.display = 'block';
-
-            if (previewObjectUrl && previewImageUuid !== uuid) {
-                URL.revokeObjectURL(previewObjectUrl);
-                previewObjectUrl = null;
-                previewImageUuid = null;
-            }
-
-            if (previewObjectUrl) {
-                img.src = previewObjectUrl;
-                status.textContent = '';
+            if (previewImageUuid === uuid && previewObjectUrl) {
+                showPreviewFromCache();
                 return;
             }
 
-            if (previewFetching) {
-                status.textContent = 'Načítám náhled...';
+            if (previewFetchToken === uuid) {
                 return;
             }
 
-            previewFetching = true;
-            status.textContent = 'Načítám náhled...';
+            previewFetchToken = uuid;
+            previewImageUuid = uuid;
 
-            const requestUuid = uuid;
+            container.style.display = "flex";
+            container.classList.add("preview-visible");
+            container.classList.remove("preview-loaded", "preview-error");
+            status.textContent = "Načítám náhled...";
+            status.style.display = "block";
+            thumb.style.display = "block";
+            thumb.style.opacity = "0";
+
+            let handleLoad;
 
             try {
-                const response = await fetch(`/preview?uuid=${encodeURIComponent(uuid)}&stream=IMG_FULL`, { cache: 'no-store' });
-                if (!response.ok) {
-                    throw new Error(`HTTP ${response.status}`);
-                }
-                const blob = await response.blob();
+                const result = await fetchPreviewImage(uuid);
 
-                const currentUuid = document.getElementById('uuid').value;
-                if (!previewVisible || currentUuid !== requestUuid) {
+                if (previewImageUuid !== uuid) {
                     return;
                 }
 
                 if (previewObjectUrl) {
                     URL.revokeObjectURL(previewObjectUrl);
                 }
-                previewObjectUrl = URL.createObjectURL(blob);
-                previewImageUuid = requestUuid;
 
-                img.src = previewObjectUrl;
-                img.alt = 'Náhled stránky';
-                status.textContent = '';
+                previewObjectUrl = URL.createObjectURL(result.blob);
+
+                const largeWidth = computeLargePreviewWidth();
+                largeBox.style.width = `${largeWidth}px`;
+                largeBox.style.maxWidth = `${largeWidth}px`;
+                largeImg.style.width = "100%";
+                largeImg.style.height = "auto";
+                largeImg.src = previewObjectUrl;
+
+                handleLoad = () => {
+                    thumb.style.opacity = "1";
+                };
+
+                thumb.addEventListener("load", handleLoad, { once: true });
+                thumb.onerror = () => {
+                    if (previewImageUuid === uuid) {
+                        console.error("Chyba při načítání obrázku náhledu");
+                        status.textContent = "Náhled se nepodařilo načíst.";
+                        status.style.display = "block";
+                        container.classList.add("preview-error");
+                        container.classList.remove("preview-loaded");
+                    }
+                };
+                thumb.src = previewObjectUrl;
+                thumb.style.opacity = "1";  // Set opacity immediately to make visible
+
+                if (thumb.complete && thumb.naturalWidth === 0) {
+                    if (previewImageUuid === uuid) {
+                        status.textContent = "Náhled se nepodařilo načíst.";
+                        status.style.display = "block";
+                        container.classList.add("preview-error");
+                        container.classList.remove("preview-loaded");
+                    }
+                }
+
+                container.dataset.previewStream = result.stream;
+
+                container.classList.add("preview-loaded");
+                status.textContent = "";
+                status.style.display = "none";
             } catch (error) {
-                console.error('Chyba při načítání náhledu:', error);
-                status.textContent = 'Náhled se nepodařilo načíst.';
+                if (previewImageUuid === uuid) {
+                    console.error("Chyba při načítání náhledu:", error);
+                    status.textContent = "Náhled se nepodařilo načíst.";
+                    status.style.display = "block";
+                    container.classList.add("preview-error");
+                }
             } finally {
-                previewFetching = false;
+                if (previewFetchToken === uuid) {
+                    previewFetchToken = null;
+                }
+                if (handleLoad) {
+                    thumb.removeEventListener("load", handleLoad);
+                }
             }
         }
 
-        function hidePreview() {
-            const container = document.getElementById('preview-container');
-            if (container) {
-                container.style.display = 'none';
+        function refreshPagePosition() {
+            const position = document.getElementById("page-position");
+            if (!position) {
+                return;
             }
-            previewVisible = false;
+            if (currentPage && typeof currentPage.index === "number" && navigationState && typeof navigationState.total === "number" && navigationState.total > 0) {
+                position.textContent = `${currentPage.index + 1} / ${navigationState.total}`;
+            } else if (currentPage && typeof currentPage.index === "number") {
+                position.textContent = `${currentPage.index + 1}`;
+            } else {
+                position.textContent = "-";
+            }
         }
 
-        async function processAlto() {
-            const uuid = document.getElementById('uuid').value;
-            const width = document.getElementById('width').value;
-            const height = document.getElementById('height').value;
+        function updateNavigationControls(nav) {
+            const prevBtn = document.getElementById("prev-page");
+            const nextBtn = document.getElementById("next-page");
 
-            if (!uuid) {
-                alert('Zadejte UUID');
+            navigationState = nav || null;
+
+            if (!prevBtn || !nextBtn) {
                 return;
             }
 
-            resetPreview();
-            document.getElementById('loading').style.display = 'block';
-            document.getElementById('results').style.display = 'none';
+            if (!navigationState) {
+                prevBtn.disabled = true;
+                nextBtn.disabled = true;
+                refreshPagePosition();
+                return;
+            }
 
-            try {
-                const response = await fetch(`/process?uuid=${encodeURIComponent(uuid)}&width=${width}&height=${height}`);
-                const data = await response.json();
+            prevBtn.disabled = !navigationState.hasPrev;
+            nextBtn.disabled = !navigationState.hasNext;
+            refreshPagePosition();
+        }
 
-                document.getElementById('loading').style.display = 'none';
+        function updateBookInfo() {
+            const section = document.getElementById("book-info");
+            const titleEl = document.getElementById("book-title");
+            const handleEl = document.getElementById("book-handle");
+            const metadataList = document.getElementById("book-metadata");
+            const metadataEmpty = document.getElementById("book-metadata-empty");
 
-                if (data.error) {
-                    alert('Chyba: ' + data.error);
-                    return;
-                }
+            if (!section || !titleEl || !handleEl || !metadataList || !metadataEmpty) {
+                return;
+            }
 
-                document.getElementById('python-result').innerHTML = '<pre>' + data.python + '</pre>';
-                document.getElementById('typescript-result').innerHTML = '<pre>' + data.typescript + '</pre>';
-                document.getElementById('results').style.display = 'grid';
+            if (!currentBook) {
+                section.style.display = "none";
+                handleEl.textContent = "";
+                metadataList.innerHTML = "";
+                metadataEmpty.style.display = "none";
+                return;
+            }
 
-            } catch (error) {
-                document.getElementById('loading').style.display = 'none';
-                alert('Chyba při zpracování: ' + error);
+            section.style.display = "block";
+            titleEl.textContent = currentBook.title || "(bez názvu)";
+
+            if (currentBook.handle) {
+                handleEl.innerHTML = `<a href="${currentBook.handle}" target="_blank" rel="noopener">Otevřít v Krameriovi</a>`;
+            } else {
+                handleEl.textContent = "";
+            }
+
+            metadataList.innerHTML = "";
+            const mods = Array.isArray(currentBook.mods) ? currentBook.mods : [];
+
+            if (!mods.length) {
+                metadataEmpty.style.display = "block";
+                metadataEmpty.textContent = "Metadata se nepodařilo načíst.";
+            } else {
+                metadataEmpty.style.display = "none";
+                mods.forEach(entry => {
+                    const dt = document.createElement("dt");
+                    dt.textContent = entry.label || "---";
+                    const dd = document.createElement("dd");
+                    dd.textContent = entry.value || "";
+                    metadataList.appendChild(dt);
+                    metadataList.appendChild(dd);
+                });
             }
         }
 
-        // Automatické zpracování při načtení stránky
-        window.onload = function() {
+        function updatePageInfo() {
+            const section = document.getElementById("page-info");
+            const summary = document.getElementById("page-summary");
+            const side = document.getElementById("page-side");
+            const uuidEl = document.getElementById("page-uuid");
+            const handleEl = document.getElementById("page-handle");
+
+            if (!section || !summary || !side || !uuidEl || !handleEl) {
+                return;
+            }
+
+            if (!currentPage) {
+                section.style.display = "none";
+                summary.textContent = "";
+                side.textContent = "";
+                uuidEl.textContent = "";
+                handleEl.textContent = "";
+                resetPreview();
+                setToolsVisible(false);
+                refreshPagePosition();
+                return;
+            }
+
+            section.style.display = "block";
+
+            const parts = [];
+            if (currentPage.pageNumber) {
+                parts.push(`Strana: ${currentPage.pageNumber}`);
+            }
+            if (currentPage.pageType) {
+                parts.push(`Typ: ${currentPage.pageType}`);
+            }
+            summary.textContent = parts.length ? parts.join(" • ") : "Informace o straně nejsou k dispozici.";
+
+            if (currentPage.pageSide) {
+                side.textContent = `Pozice: ${currentPage.pageSide}`;
+            } else {
+                side.textContent = "Pozice: neznámá (API neposkytuje údaj).";
+            }
+
+            uuidEl.textContent = currentPage.uuid ? `UUID: ${currentPage.uuid}` : "";
+
+            if (currentPage.handle) {
+                handleEl.innerHTML = `<a href="${currentPage.handle}" target="_blank" rel="noopener">Otevřít stránku v Krameriovi</a>`;
+            } else {
+                handleEl.textContent = "";
+            }
+
+            const previewContainer = document.getElementById("page-preview");
+            if (previewContainer) {
+                previewContainer.style.display = "flex";
+                previewContainer.classList.add("preview-visible");
+            }
+
+            setToolsVisible(true);
+            refreshPagePosition();
+        }
+
+        function goToAdjacent(direction) {
+            if (!navigationState) {
+                return;
+            }
+            const targetUuid = direction === "prev" ? navigationState.prevUuid : navigationState.nextUuid;
+            if (!targetUuid) {
+                return;
+            }
+            const uuidField = document.getElementById("uuid");
+            if (uuidField) {
+                uuidField.value = targetUuid;
+            }
+            processAlto();
+        }
+
+        async function processAlto() {
+            const uuidField = document.getElementById("uuid");
+            const uuid = uuidField ? uuidField.value.trim() : "";
+
+            if (!uuid) {
+                alert("Zadejte UUID");
+                return;
+            }
+
+            const previousScrollY = window.pageYOffset || window.scrollY || 0;
+            const toolsElement = document.getElementById("page-tools");
+
+            resetPreview();
+            setToolsVisible(false);
+            currentBook = null;
+            currentPage = null;
+            navigationState = null;
+            updateNavigationControls(null);
+
+            const loading = document.getElementById("loading");
+            const results = document.getElementById("results");
+            if (loading) {
+                loading.style.display = "block";
+            }
+            if (results) {
+                results.style.display = "none";
+            }
+
+            const bookSection = document.getElementById("book-info");
+            const pageSection = document.getElementById("page-info");
+            if (bookSection) {
+                bookSection.style.display = "none";
+            }
+            if (pageSection) {
+                pageSection.style.display = "none";
+            }
+
+            try {
+                const response = await fetch(`/process?uuid=${encodeURIComponent(uuid)}`, { cache: "no-store" });
+                const data = await response.json();
+
+                if (loading) {
+                    loading.style.display = "none";
+                }
+
+                if (!response.ok || data.error) {
+                    alert(`Chyba: ${data.error || response.statusText}`);
+                    window.requestAnimationFrame(() => {
+                        window.scrollTo(0, previousScrollY);
+                    });
+                    return;
+                }
+
+                currentBook = data.book || null;
+                currentPage = data.currentPage || null;
+                updateBookInfo();
+                updatePageInfo();
+                updateNavigationControls(data.navigation || null);
+                if (currentPage && currentPage.uuid) {
+                    loadPreview(currentPage.uuid);
+                } else {
+                    resetPreview();
+                }
+
+                const pythonResult = document.getElementById("python-result");
+                const tsResult = document.getElementById("typescript-result");
+
+                if (pythonResult) {
+                    pythonResult.innerHTML = `<pre>${data.python || ""}</pre>`;
+                }
+                if (tsResult) {
+                    tsResult.innerHTML = `<pre>${data.typescript || ""}</pre>`;
+                }
+                if (results) {
+                    results.style.display = "grid";
+                }
+
+                if (uuidField && currentPage && currentPage.uuid) {
+                    uuidField.value = currentPage.uuid;
+                }
+
+                window.requestAnimationFrame(() => {
+                    if (toolsElement && toolsElement.style.display !== "none") {
+                        const rect = toolsElement.getBoundingClientRect();
+                        const absoluteTop = window.pageYOffset + rect.top;
+                        window.scrollTo(0, Math.max(absoluteTop - 10, 0));
+                    } else {
+                        window.scrollTo(0, previousScrollY);
+                    }
+                });
+            } catch (error) {
+                if (loading) {
+                    loading.style.display = "none";
+                }
+                console.error("Chyba při zpracování:", error);
+                alert("Chyba při zpracování: " + error);
+                window.requestAnimationFrame(() => {
+                    window.scrollTo(0, previousScrollY);
+                });
+            }
+        }
+
+        window.onload = function () {
+            const prev = document.getElementById("prev-page");
+            const next = document.getElementById("next-page");
+            if (prev) {
+                prev.addEventListener("click", () => goToAdjacent("prev"));
+            }
+            if (next) {
+                next.addEventListener("click", () => goToAdjacent("next"));
+            }
             processAlto();
         };
     </script>
@@ -372,31 +940,86 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             query_params = parse_qs(parsed_url.query)
 
             uuid = query_params.get('uuid', [''])[0]
-            width = int(query_params.get('width', ['800'])[0])
-            height = int(query_params.get('height', ['1200'])[0])
 
             if not uuid:
                 self.wfile.write(json.dumps({'error': 'UUID je povinný'}).encode('utf-8'))
                 return
 
             try:
-                # Python zpracování
                 processor = AltoProcessor()
-                alto_xml = processor.get_alto_data(uuid)
+                context = processor.get_book_context(uuid)
 
+                if not context:
+                    self.wfile.write(json.dumps({'error': 'Nepodařilo se načíst metadata pro zadané UUID'}).encode('utf-8'))
+                    return
+
+                page_uuid = context.get('page_uuid')
+                if not page_uuid:
+                    self.wfile.write(json.dumps({'error': 'Nepodařilo se určit konkrétní stránku pro zadané UUID'}).encode('utf-8'))
+                    return
+
+                alto_xml = processor.get_alto_data(page_uuid)
                 if not alto_xml:
                     self.wfile.write(json.dumps({'error': 'Nepodařilo se stáhnout ALTO data'}).encode('utf-8'))
                     return
 
-                python_result = processor.get_formatted_text(alto_xml, uuid, width, height)
+                python_result = processor.get_formatted_text(alto_xml, page_uuid, DEFAULT_WIDTH, DEFAULT_HEIGHT)
+                typescript_result = simulate_typescript_processing(alto_xml, page_uuid, DEFAULT_WIDTH, DEFAULT_HEIGHT)
 
-                # Simulace TypeScript výsledku (pro demonstraci)
-                # V reálném scénáři byste zavolali původní TypeScript službu
-                typescript_result = simulate_typescript_processing(alto_xml, uuid, width, height)
+                pages = context.get('pages', [])
+                current_index = context.get('current_index', -1)
+                total_pages = len(pages)
+                has_prev = current_index > 0
+                has_next = current_index >= 0 and current_index < total_pages - 1
+
+                prev_uuid = pages[current_index - 1]['uuid'] if has_prev else None
+                next_uuid = pages[current_index + 1]['uuid'] if has_next else None
+
+                book_data = context.get('book') or {}
+                mods_metadata = context.get('mods') or []
+
+                def clean(value: str) -> str:
+                    if not value:
+                        return ''
+                    return ' '.join(value.replace('\xa0', ' ').split())
+
+                page_summary = context.get('page') or {}
+                page_item = context.get('page_item') or {}
+
+                page_info = {
+                    'uuid': page_uuid,
+                    'title': clean(page_summary.get('title') or page_item.get('title') or ''),
+                    'pageNumber': clean(page_summary.get('pageNumber') or (page_item.get('details') or {}).get('pagenumber') or ''),
+                    'pageType': clean(page_summary.get('pageType') or (page_item.get('details') or {}).get('type') or ''),
+                    'pageSide': clean(page_summary.get('pageSide') or (page_item.get('details') or {}).get('pageposition') or (page_item.get('details') or {}).get('pagePosition') or (page_item.get('details') or {}).get('pagerole') or ''),
+                    'index': current_index,
+                    'iiif': page_item.get('iiif'),
+                    'handle': (page_item.get('handle') or {}).get('href'),
+                }
+
+                book_info = {
+                    'uuid': context.get('book_uuid'),
+                    'title': clean(book_data.get('title') or ''),
+                    'model': book_data.get('model'),
+                    'handle': (book_data.get('handle') or {}).get('href'),
+                    'mods': mods_metadata,
+                }
+
+                navigation = {
+                    'hasPrev': has_prev,
+                    'hasNext': has_next,
+                    'prevUuid': prev_uuid,
+                    'nextUuid': next_uuid,
+                    'total': total_pages,
+                }
 
                 response_data = {
                     'python': python_result,
-                    'typescript': typescript_result
+                    'typescript': typescript_result,
+                    'book': book_info,
+                    'pages': pages,
+                    'currentPage': page_info,
+                    'navigation': navigation,
                 }
 
                 self.wfile.write(json.dumps(response_data, ensure_ascii=False).encode('utf-8'))
@@ -409,8 +1032,8 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             query_params = parse_qs(parsed_url.query)
 
             uuid = query_params.get('uuid', [''])[0]
-            stream = query_params.get('stream', ['IMG_FULL'])[0]
-            allowed_streams = {'IMG_THUMB', 'IMG_PREVIEW', 'IMG_FULL'}
+            stream = query_params.get('stream', ['IMG_PREVIEW'])[0]
+            allowed_streams = {'IMG_THUMB', 'IMG_PREVIEW', 'IMG_FULL', 'AUTO'}
 
             if not uuid:
                 self.send_response(400)
@@ -420,27 +1043,50 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 return
 
             if stream not in allowed_streams:
-                stream = 'IMG_FULL'
+                stream = 'IMG_PREVIEW'
 
-            upstream_url = f"https://kramerius5.nkp.cz/search/api/v5.0/item/uuid:{uuid}/streams/{stream}"
+            candidate_streams = [stream]
+            if stream == 'AUTO':
+                candidate_streams = ['IMG_FULL', 'IMG_PREVIEW', 'IMG_THUMB']
+
+            def upstream_url_for(candidate: str) -> str:
+                return f"https://kramerius5.nkp.cz/search/api/v5.0/item/uuid:{uuid}/streams/{candidate}"
+
+            last_error = None
 
             try:
-                response = requests.get(upstream_url, timeout=20)
-                if response.status_code != 200 or not response.content:
-                    self.send_response(502)
-                    self.send_header('Content-type', 'application/json; charset=utf-8')
+                for candidate in candidate_streams:
+                    upstream_url = upstream_url_for(candidate)
+                    response = requests.get(upstream_url, timeout=20)
+
+                    if response.status_code != 200 or not response.content:
+                        last_error = f'Nepodařilo se načíst náhled (status {response.status_code} pro {candidate})'
+                        response.close()
+                        continue
+
+                    content_type = response.headers.get('Content-Type', 'image/jpeg')
+                    if 'jp2' in content_type.lower():
+                        last_error = f'Stream {candidate} vrací nepodporovaný formát {content_type}'
+                        response.close()
+                        if stream == 'AUTO':
+                            continue
+                        break
+
+                    self.send_response(200)
+                    self.send_header('Content-type', content_type)
+                    self.send_header('Content-Length', str(len(response.content)))
+                    self.send_header('Cache-Control', 'no-store')
+                    self.send_header('X-Preview-Stream', candidate)
                     self.end_headers()
-                    message = f'Nepodařilo se načíst náhled (status {response.status_code})'
-                    self.wfile.write(json.dumps({'error': message}).encode('utf-8'))
+                    self.wfile.write(response.content)
+                    response.close()
                     return
 
-                content_type = response.headers.get('Content-Type', 'image/jpeg')
-                self.send_response(200)
-                self.send_header('Content-type', content_type)
-                self.send_header('Content-Length', str(len(response.content)))
-                self.send_header('Cache-Control', 'no-store')
+                self.send_response(502)
+                self.send_header('Content-type', 'application/json; charset=utf-8')
                 self.end_headers()
-                self.wfile.write(response.content)
+                message = last_error or 'Nepodařilo se načíst náhled.'
+                self.wfile.write(json.dumps({'error': message}).encode('utf-8'))
 
             except Exception as e:
                 self.send_response(500)

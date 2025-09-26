@@ -7,7 +7,7 @@ Podporuje české znaky a formátovaný výstup
 
 import requests
 import xml.etree.ElementTree as ET
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional, Any
 import html
 import re
 import sys
@@ -15,18 +15,314 @@ import argparse
 import statistics
 
 # Heuristické multiplikátory pro dělení bloků; úprava na jednom místě usnadní ladění.
-VERTICAL_GAP_MULTIPLIER = 2.5  # Kolikrát musí být mezera mezi řádky větší než typická mezera, aby vznikl nový blok.
-VERTICAL_HEIGHT_RATIO = 0.85   # Poměr k mediánu výšky řádku, přispívá k prahu pro rozdělení bloku.
-VERTICAL_MAX_FACTOR = 3        # Horní limit pro vertikální práh v násobcích mediánu výšky řádku.
-HORIZONTAL_WIDTH_RATIO = 0.2   # Část typické šířky řádku, kterou musí horizontální posun překročit, aby vznikl nový blok.
-HORIZONTAL_SHIFT_MULTIPLIER = 2.5  # Násobek typického horizontálního posunu mezi řádky.
-HORIZONTAL_MIN_THRESHOLD = 12  # Minimální povolený práh pro horizontální dělení (v ALTO jednotkách).
-NEGATIVE_SHIFT_MULTIPLIER = 1.0  # Násobek horizontálního prahu pro detekci návratu k levému okraji (retroaktivní dělení).
+VERTICAL_GAP_MULTIPLIER = 2.5   # Kolikrát musí být mezera mezi řádky větší než typická mezera, aby vznikl nový blok.
+VERTICAL_HEIGHT_RATIO = 0.85    # Poměr k mediánu výšky řádku, přispívá k prahu pro rozdělení bloku.
+VERTICAL_MAX_FACTOR = 3         # Horní limit pro vertikální práh v násobcích mediánu výšky řádku.
+HORIZONTAL_WIDTH_RATIO = 0.012  # Kandidát prahu = medián šířek řádků * tato hodnota (nižší = citlivější).
+HORIZONTAL_SHIFT_MULTIPLIER = 0.85  # Kandidát prahu = medián kladných posunů * tato hodnota.
+HORIZONTAL_MIN_THRESHOLD = 12   # Minimální povolený práh pro horizontální dělení (v ALTO jednotkách).
+NEGATIVE_SHIFT_MULTIPLIER = 0.85  # Negativní hranice = horizontální práh * tato hodnota (víc citlivá než pozitivní).
 FALLBACK_THRESHOLD = 40        # Záložní hodnota, pokud nelze heuristiku spočítat.
 
 class AltoProcessor:
-    def __init__(self, iiif_base_url: str = "https://kramerius5.nkp.cz/search/iiif"):
+    def __init__(
+        self,
+        iiif_base_url: str = "https://kramerius5.nkp.cz/search/iiif",
+        api_base_url: str = "https://kramerius5.nkp.cz/search/api/v5.0",
+    ):
         self.iiif_base_url = iiif_base_url
+        self.api_base_url = api_base_url
+
+    @staticmethod
+    def _strip_uuid_prefix(value: Optional[str]) -> str:
+        if not value:
+            return ""
+        return value.split(":", 1)[1] if value.startswith("uuid:") else value
+
+    @staticmethod
+    def _clean_text(value: Optional[str]) -> str:
+        if not value:
+            return ""
+        cleaned = value.replace("\xa0", " ")
+        cleaned = " ".join(cleaned.split())
+        return cleaned.strip()
+
+    def get_item_json(self, uuid: str) -> Dict[str, Any]:
+        normalized = self._strip_uuid_prefix(uuid)
+        if not normalized:
+            return {}
+
+        url = f"{self.api_base_url}/item/uuid:{normalized}"
+        try:
+            response = requests.get(url, timeout=20)
+            response.raise_for_status()
+            return response.json()
+        except Exception as exc:
+            print(f"Chyba při načítání metadat objektu {uuid}: {exc}")
+            return {}
+
+    def get_children(self, uuid: str) -> List[Dict[str, Any]]:
+        normalized = self._strip_uuid_prefix(uuid)
+        if not normalized:
+            return []
+
+        url = f"{self.api_base_url}/item/uuid:{normalized}/children"
+        try:
+            response = requests.get(url, timeout=25)
+            response.raise_for_status()
+            data = response.json()
+            return data if isinstance(data, list) else []
+        except Exception as exc:
+            print(f"Chyba při načítání potomků objektu {uuid}: {exc}")
+            return []
+
+    def get_mods_metadata(self, uuid: str) -> List[Dict[str, str]]:
+        normalized = self._strip_uuid_prefix(uuid)
+        if not normalized:
+            return []
+
+        url = f"{self.api_base_url}/item/uuid:{normalized}/streams/BIBLIO_MODS"
+        try:
+            response = requests.get(url, timeout=25)
+            response.raise_for_status()
+        except Exception as exc:
+            print(f"Chyba při načítání MODS metadat {uuid}: {exc}")
+            return []
+
+        try:
+            root = ET.fromstring(response.content)
+        except ET.ParseError as exc:
+            print(f"Chyba při parsování MODS metadat {uuid}: {exc}")
+            return []
+
+        ns = {"mods": "http://www.loc.gov/mods/v3"}
+        record = root.find('.//mods:mods', ns)
+        if record is None and root.tag.endswith('mods'):
+            record = root
+        if record is None:
+            return []
+
+        metadata: List[Dict[str, str]] = []
+
+        def add_entry(label: str, value: str) -> None:
+            cleaned = self._clean_text(value)
+            if cleaned:
+                metadata.append({"label": label, "value": cleaned})
+
+        titles = []
+        for title_info in record.findall('mods:titleInfo', ns):
+            main_title = (title_info.findtext('mods:title', default='', namespaces=ns) or '').strip()
+            subtitle = (title_info.findtext('mods:subTitle', default='', namespaces=ns) or '').strip()
+            part_number = (title_info.findtext('mods:partNumber', default='', namespaces=ns) or '').strip()
+            part_name = (title_info.findtext('mods:partName', default='', namespaces=ns) or '').strip()
+            segments = [seg for seg in [main_title, subtitle] if seg]
+            if part_number or part_name:
+                part_segments = " ".join(filter(None, [part_number, part_name])).strip()
+                if part_segments:
+                    segments.append(part_segments)
+            title_text = " - ".join(segments).strip()
+            if title_text:
+                titles.append(title_text)
+        if titles:
+            add_entry("Název", '; '.join(dict.fromkeys(titles)))
+
+        authors = []
+        for name_el in record.findall('mods:name', ns):
+            name_parts = []
+            dates = []
+            for part in name_el.findall('mods:namePart', ns):
+                text = (part.text or '').strip()
+                if not text:
+                    continue
+                if part.attrib.get('type') == 'date':
+                    dates.append(text)
+                else:
+                    name_parts.append(text)
+            if not name_parts:
+                continue
+            author_text = ' '.join(name_parts)
+            if dates:
+                author_text = f"{author_text} ({', '.join(dates)})"
+            role_terms = []
+            for role_term in name_el.findall('.//mods:roleTerm', ns):
+                term_text = (role_term.text or '').strip()
+                if term_text:
+                    role_terms.append(term_text)
+            if role_terms:
+                author_text = f"{author_text} [{', '.join(dict.fromkeys(role_terms))}]"
+            authors.append(author_text)
+        if authors:
+            add_entry("Autoři", '; '.join(dict.fromkeys(authors)))
+
+        for origin_info in record.findall('mods:originInfo', ns):
+            publisher = (origin_info.findtext('mods:publisher', default='', namespaces=ns) or '').strip()
+            place = (origin_info.findtext('mods:place/mods:placeTerm', default='', namespaces=ns) or '').strip()
+            date_issued = (origin_info.findtext('mods:dateIssued', default='', namespaces=ns) or '').strip()
+            edition = (origin_info.findtext('mods:edition', default='', namespaces=ns) or '').strip()
+            if edition:
+                add_entry("Edice", edition)
+            publication_segments = [segment for segment in [place, publisher, date_issued] if segment]
+            if publication_segments:
+                add_entry("Publikační údaje", ', '.join(publication_segments))
+
+        languages = []
+        for language in record.findall('mods:language/mods:languageTerm', ns):
+            lang_text = (language.text or '').strip()
+            if lang_text:
+                languages.append(lang_text)
+        if languages:
+            add_entry("Jazyk", ', '.join(dict.fromkeys(languages)))
+
+        extents = []
+        for extent in record.findall('mods:physicalDescription/mods:extent', ns):
+            text = (extent.text or '').strip()
+            if text:
+                extents.append(text)
+        if extents:
+            add_entry("Rozsah", '; '.join(dict.fromkeys(extents)))
+
+        identifiers = []
+        for identifier in record.findall('mods:identifier', ns):
+            text = (identifier.text or '').strip()
+            if not text:
+                continue
+            id_type = identifier.attrib.get('type')
+            if id_type:
+                identifiers.append(f"{id_type}: {text}")
+            else:
+                identifiers.append(text)
+        if identifiers:
+            add_entry("Identifikátory", '; '.join(dict.fromkeys(identifiers)))
+
+        notes = []
+        for note in record.findall('mods:note', ns):
+            text = (note.text or '').strip()
+            if text:
+                notes.append(text)
+        if notes:
+            add_entry("Poznámky", ' | '.join(dict.fromkeys(notes)))
+
+        subjects = []
+        for subject in record.findall('mods:subject', ns):
+            terms = []
+            for child in subject:
+                text = (child.text or '').strip()
+                if text:
+                    terms.append(text)
+            if terms:
+                subjects.append(' - '.join(terms))
+        if subjects:
+            add_entry("Témata", '; '.join(dict.fromkeys(subjects)))
+
+        return metadata
+
+    def _page_summary_from_child(self, child: Dict[str, Any], index: int) -> Dict[str, Any]:
+        details = child.get('details') or {}
+        return {
+            "uuid": self._strip_uuid_prefix(child.get('pid')),
+            "index": index,
+            "title": self._clean_text(child.get('title')),
+            "pageNumber": self._clean_text(details.get('pagenumber')),
+            "pageType": self._clean_text(details.get('type')),
+            "pageSide": self._clean_text(details.get('pageposition') or details.get('pagePosition') or details.get('pagerole')),
+            "model": child.get('model'),
+            "policy": child.get('policy'),
+        }
+
+    def collect_book_pages(self, book_uuid: str, max_depth: int = 4) -> List[Dict[str, Any]]:
+        visited: set[str] = set()
+        pages: List[Dict[str, Any]] = []
+
+        def walk(node_uuid: str, depth: int) -> None:
+            if depth > max_depth or not node_uuid or node_uuid in visited:
+                return
+            visited.add(node_uuid)
+
+            children = self.get_children(node_uuid)
+            for child in children:
+                child_uuid = self._strip_uuid_prefix(child.get('pid'))
+                if not child_uuid:
+                    continue
+                model = child.get('model')
+                if model == 'page':
+                    summary = self._page_summary_from_child(child, len(pages))
+                    pages.append(summary)
+                elif depth + 1 <= max_depth:
+                    walk(child_uuid, depth + 1)
+
+        walk(self._strip_uuid_prefix(book_uuid), 0)
+        return pages
+
+    def get_book_context(self, item_uuid: str) -> Optional[Dict[str, Any]]:
+        """Vrátí metadata knihy, seznam stran a aktuální stranu pro zadaný UUID."""
+
+        item_data = self.get_item_json(item_uuid)
+        if not item_data:
+            return None
+
+        model = item_data.get('model')
+        page_data: Optional[Dict[str, Any]] = None
+
+        if model == 'page':
+            page_data = item_data
+            root_pid = item_data.get('root_pid') or ''
+            book_uuid = self._strip_uuid_prefix(root_pid)
+            if not book_uuid and item_data.get('context'):
+                context_path = item_data['context'][0]
+                if context_path:
+                    book_uuid = self._strip_uuid_prefix(context_path[0].get('pid'))
+        else:
+            book_uuid = self._strip_uuid_prefix(item_data.get('pid'))
+
+        if not book_uuid:
+            return None
+
+        book_data = item_data if model != 'page' else self.get_item_json(book_uuid)
+        if not book_data:
+            return None
+
+        pages = self.collect_book_pages(book_uuid)
+        if not pages:
+            print(f"Pro knihu {book_uuid} se nepodařilo načíst žádné strany")
+
+        page_uuid = self._strip_uuid_prefix((page_data or {}).get('pid')) or self._strip_uuid_prefix(item_uuid)
+        if page_data is None and pages:
+            page_uuid = pages[0]['uuid']
+            page_data = self.get_item_json(page_uuid)
+
+        current_index = -1
+        if pages:
+            for entry in pages:
+                if entry.get('uuid') == page_uuid:
+                    current_index = entry.get('index', pages.index(entry))
+                    break
+        page_summary = None
+        if current_index >= 0:
+            page_summary = pages[current_index]
+        elif page_data:
+            page_summary = {
+                "uuid": page_uuid,
+                "index": current_index if current_index >= 0 else 0,
+                "title": self._clean_text(page_data.get('title')),
+                "pageNumber": self._clean_text((page_data.get('details') or {}).get('pagenumber')),
+                "pageType": self._clean_text((page_data.get('details') or {}).get('type')),
+                "pageSide": self._clean_text((page_data.get('details') or {}).get('pageposition') or (page_data.get('details') or {}).get('pagePosition') or (page_data.get('details') or {}).get('pagerole')),
+                "model": page_data.get('model'),
+                "policy": page_data.get('policy'),
+            }
+
+        resolved_index = current_index if current_index >= 0 else (page_summary.get('index') if page_summary else -1)
+
+        return {
+            "book_uuid": book_uuid,
+            "book": book_data,
+            "page_uuid": page_uuid,
+            "page": page_summary,
+            "page_item": page_data,
+            "pages": pages,
+            "mods": self.get_mods_metadata(book_uuid),
+            "current_index": resolved_index,
+        }
 
     def get_alto_data(self, uuid: str) -> str:
         """Stáhne ALTO XML data pro daný UUID"""
@@ -262,12 +558,6 @@ class AltoProcessor:
         ah = alto_height if alto_height > 0 and alto_width > 0 else alto_height2
 
         blocks = []
-
-        def finalize_block(block_data):
-            """Pomocná funkce pro převod seznamu řádků na text a přidání do výstupu."""
-            text_content = ' '.join(block_data['lines']).strip()
-            if text_content:
-                blocks.append({'text': text_content, 'tag': block_data['tag']})
         # Během průchodu skládáme aktuální blok; bbox slouží pro případné zvýraznění
         block = {'text': '', 'hMin': 0, 'hMax': 0, 'vMin': 0, 'vMax': 0, 'width': aw, 'height': ah}
 
@@ -384,6 +674,12 @@ class AltoProcessor:
                 fonts[style_id] = int(font_size)
 
         blocks = []
+
+        def finalize_block(block_data):
+            """Po spojení řádků uloží blok, pokud není prázdný."""
+            text_content = ' '.join(block_data['lines']).strip()
+            if text_content:
+                blocks.append({'text': text_content, 'tag': block_data['tag']})
 
         # Zpracování TextBlocků
         text_blocks = root.findall('.//{http://www.loc.gov/standards/alto/ns-v3#}TextBlock')

@@ -181,7 +181,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             top: 0;
             right: 0;
             transform-origin: top right;
-            transform: scale(0.35);
+            transform: translate(16px, -16px) scale(0.35);
             opacity: 0;
             visibility: hidden;
             background: white;
@@ -192,16 +192,14 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             z-index: 30;
             transition: transform 0.5s ease, opacity 0.5s ease;
         }
-        .page-preview.preview-loaded:hover .preview-large {
-            transform: scale(1);
+        .page-preview.preview-loaded:hover ~ .preview-large,
+        .preview-large.preview-large-visible {
+            transform: translate(16px, -16px) scale(1);
             opacity: 1;
             visibility: visible;
         }
         .preview-large img {
             display: block;
-            width: 100%;
-            height: auto;
-            max-height: 60vh;
             border-radius: 4px;
         }
         #preview-status {
@@ -243,6 +241,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             border: 1px solid #ddd;
             border-radius: 4px;
             background: #fafafa;
+            position: relative;
         }
 
         .info-section h2 {
@@ -306,13 +305,13 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     <p id="page-uuid" class="muted"></p>
                     <p id="page-handle" class="muted"></p>
                 </div>
-                <div id="page-preview" class="page-preview">
-                    <div id="preview-status" class="muted"></div>
-                    <img id="preview-image-thumb" alt="Náhled stránky">
-                    <div id="preview-large" class="preview-large">
+                    <div id="page-preview" class="page-preview" tabindex="0">
+                        <div id="preview-status" class="muted"></div>
+                        <img id="preview-image-thumb" alt="Náhled stránky">
+                    </div>
+                    <div id="preview-large" class="preview-large" aria-hidden="true">
                         <img id="preview-image-large" alt="Náhled stránky ve větší velikosti">
                     </div>
-                </div>
             </div>
         </div>
 
@@ -356,12 +355,33 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             }
         }
 
+        function setLargePreviewActive(active) {
+            const container = document.getElementById("page-preview");
+            const largeBox = document.getElementById("preview-large");
+
+            if (!container || !largeBox) {
+                return;
+            }
+
+            const isActive = Boolean(active && container.classList.contains("preview-loaded"));
+
+            if (isActive) {
+                largeBox.classList.add("preview-large-visible");
+            } else {
+                largeBox.classList.remove("preview-large-visible");
+            }
+
+            largeBox.setAttribute("aria-hidden", isActive ? "false" : "true");
+        }
+
         function resetPreview() {
             const container = document.getElementById("page-preview");
             const thumb = document.getElementById("preview-image-thumb");
             const largeImg = document.getElementById("preview-image-large");
             const largeBox = document.getElementById("preview-large");
             const status = document.getElementById("preview-status");
+
+            setLargePreviewActive(false);
 
             if (previewObjectUrl) {
                 URL.revokeObjectURL(previewObjectUrl);
@@ -385,14 +405,18 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             }
 
             if (largeImg) {
+                largeImg.onload = null;
                 largeImg.src = "";
                 largeImg.style.width = "";
                 largeImg.style.height = "";
+                largeImg.style.maxWidth = "";
+                largeImg.style.maxHeight = "";
             }
 
             if (largeBox) {
                 largeBox.style.width = "";
                 largeBox.style.maxWidth = "";
+                largeBox.style.height = "";
             }
 
             if (status) {
@@ -435,9 +459,77 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         function computeLargePreviewWidth() {
             const resultBox = document.querySelector('#results .result-box');
             if (resultBox && resultBox.offsetWidth) {
-                return Math.min(resultBox.offsetWidth, window.innerWidth * 0.9);
+                return Math.round(resultBox.offsetWidth);
             }
-            return Math.min(window.innerWidth * 0.55, 900);
+
+            const container = document.querySelector('.container');
+            if (container && container.offsetWidth) {
+                const containerWidth = container.offsetWidth;
+                const fallback = Math.min(containerWidth * 0.5, window.innerWidth * 0.9);
+                return Math.round(Math.max(fallback, 360));
+            }
+
+            return Math.round(Math.min(window.innerWidth * 0.6, 900));
+        }
+
+        function applyLargePreviewSizing(img, box) {
+            if (!img || !box) {
+                return;
+            }
+
+            const maxWidth = computeLargePreviewWidth();
+            const naturalWidth = img.naturalWidth || 0;
+            const naturalHeight = img.naturalHeight || 0;
+            const maxViewportHeight = Math.max(Math.round(window.innerHeight * 0.9), 320);
+
+            box.style.maxWidth = `${Math.round(maxWidth)}px`;
+
+            if (naturalWidth > 0 && naturalHeight > 0) {
+                const ratio = naturalHeight / naturalWidth;
+                if (ratio > 0) {
+                    let targetWidth = maxWidth;
+                    let targetHeight = Math.round(targetWidth * ratio);
+
+                    if (targetHeight > maxViewportHeight) {
+                        targetHeight = maxViewportHeight;
+                        targetWidth = Math.round(targetHeight / ratio);
+                    }
+
+                    const safeWidth = Math.max(200, targetWidth);
+                    const safeHeight = Math.max(1, targetHeight);
+
+                    box.style.width = `${safeWidth}px`;
+                    box.style.height = `${safeHeight}px`;
+                    img.style.width = `${safeWidth}px`;
+                    img.style.height = `${safeHeight}px`;
+                    return;
+                }
+            }
+
+            const fallbackWidth = Math.max(320, Math.round(Math.min(maxWidth, 720)));
+            box.style.width = `${fallbackWidth}px`;
+            box.style.height = "auto";
+            img.style.width = `${fallbackWidth}px`;
+            img.style.height = "auto";
+        }
+
+        function refreshLargePreviewSizing() {
+            const container = document.getElementById("page-preview");
+            const largeImg = document.getElementById("preview-image-large");
+            const largeBox = document.getElementById("preview-large");
+
+            if (!container || !largeImg || !largeBox) {
+                return;
+            }
+
+            if (container.classList.contains("preview-loaded") && largeImg.complete && largeImg.naturalWidth > 0) {
+                applyLargePreviewSizing(largeImg, largeBox);
+            } else if (!container.classList.contains("preview-loaded")) {
+                largeBox.style.width = "";
+                largeBox.style.height = "";
+                largeImg.style.width = "";
+                largeImg.style.height = "";
+            }
         }
 
         function sizeThumbnail(thumb, maxWidth) {
@@ -506,12 +598,18 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 return;
             }
 
-            const largeWidth = computeLargePreviewWidth();
-            largeBox.style.width = `${largeWidth}px`;
-            largeBox.style.maxWidth = `${largeWidth}px`;
-            largeImg.style.width = "100%";
-            largeImg.style.height = "auto";
+            largeImg.onload = null;
+            const handleLargeLoad = () => {
+                applyLargePreviewSizing(largeImg, largeBox);
+            };
+            largeImg.addEventListener("load", handleLargeLoad, { once: true });
             largeImg.src = previewObjectUrl;
+
+            applyLargePreviewSizing(largeImg, largeBox);
+
+            if (largeImg.complete && largeImg.naturalWidth > 0) {
+                applyLargePreviewSizing(largeImg, largeBox);
+            }
 
             const finalize = () => {
                 thumb.style.opacity = "1";
@@ -527,6 +625,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             status.style.display = "block";
             container.classList.add("preview-error");
             container.classList.remove("preview-loaded");
+            setLargePreviewActive(false);
         };
         if (thumb.complete && thumb.naturalWidth > 0) {
             finalize();
@@ -535,6 +634,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             status.style.display = "block";
             container.classList.add("preview-error");
             container.classList.remove("preview-loaded");
+            setLargePreviewActive(false);
         }
     } else if (thumb.naturalWidth > 0) {
         finalize();
@@ -546,6 +646,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             status.style.display = "block";
             container.classList.add("preview-error");
             container.classList.remove("preview-loaded");
+            setLargePreviewActive(false);
         };
     }
 
@@ -554,6 +655,12 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             container.classList.remove("preview-error");
             status.textContent = "";
             status.style.display = "none";
+
+            if (container.matches(":hover") || container.matches(":focus-within")) {
+                setLargePreviewActive(true);
+            } else {
+                setLargePreviewActive(false);
+            }
         }
 
         async function loadPreview(uuid) {
@@ -566,6 +673,8 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             if (!container || !thumb || !largeImg || !largeBox || !status || !uuid) {
                 return;
             }
+
+            setLargePreviewActive(false);
 
             if (previewImageUuid === uuid && previewObjectUrl) {
                 showPreviewFromCache();
@@ -602,12 +711,14 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
 
                 previewObjectUrl = URL.createObjectURL(result.blob);
 
-                const largeWidth = computeLargePreviewWidth();
-                largeBox.style.width = `${largeWidth}px`;
-                largeBox.style.maxWidth = `${largeWidth}px`;
-                largeImg.style.width = "100%";
-                largeImg.style.height = "auto";
+                largeImg.onload = null;
+                const handleLargeLoad = () => {
+                    applyLargePreviewSizing(largeImg, largeBox);
+                };
+                largeImg.addEventListener("load", handleLargeLoad, { once: true });
                 largeImg.src = previewObjectUrl;
+
+                applyLargePreviewSizing(largeImg, largeBox);
 
                 handleLoad = () => {
                     thumb.style.opacity = "1";
@@ -621,6 +732,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                         status.style.display = "block";
                         container.classList.add("preview-error");
                         container.classList.remove("preview-loaded");
+                        setLargePreviewActive(false);
                     }
                 };
                 thumb.src = previewObjectUrl;
@@ -632,6 +744,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                         status.style.display = "block";
                         container.classList.add("preview-error");
                         container.classList.remove("preview-loaded");
+                        setLargePreviewActive(false);
                     }
                 }
 
@@ -640,12 +753,17 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 container.classList.add("preview-loaded");
                 status.textContent = "";
                 status.style.display = "none";
+
+                if (container.matches(":hover") || container.matches(":focus-within")) {
+                    setLargePreviewActive(true);
+                }
             } catch (error) {
                 if (previewImageUuid === uuid) {
                     console.error("Chyba při načítání náhledu:", error);
                     status.textContent = "Náhled se nepodařilo načíst.";
                     status.style.display = "block";
                     container.classList.add("preview-error");
+                    setLargePreviewActive(false);
                 }
             } finally {
                 if (previewFetchToken === uuid) {
@@ -924,8 +1042,29 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             if (next) {
                 next.addEventListener("click", () => goToAdjacent("next"));
             }
+
+            const previewContainer = document.getElementById("page-preview");
+            if (previewContainer) {
+                const handleEnter = () => setLargePreviewActive(true);
+                const handleLeave = () => setLargePreviewActive(false);
+
+                previewContainer.addEventListener("pointerenter", handleEnter);
+                previewContainer.addEventListener("pointerleave", handleLeave);
+                previewContainer.addEventListener("mouseenter", handleEnter);
+                previewContainer.addEventListener("mouseleave", handleLeave);
+                previewContainer.addEventListener("focusin", handleEnter);
+                previewContainer.addEventListener("focusout", handleLeave);
+            }
             processAlto();
         };
+
+        window.addEventListener("resize", () => {
+            refreshLargePreviewSizing();
+            const previewContainer = document.getElementById("page-preview");
+            if (previewContainer && previewContainer.matches(":hover, :focus-within")) {
+                setLargePreviewActive(true);
+            }
+        });
     </script>
 </body>
 </html>'''
@@ -1165,6 +1304,7 @@ def simulate_typescript_processing(alto_xml: str, uuid: str, width: int, height:
 
 def run_server(port=8000):
     """Spuštění webového serveru"""
+    socketserver.TCPServer.allow_reuse_address = True
     with socketserver.TCPServer(("", port), ComparisonHandler) as httpd:
         print(f"Server běží na http://localhost:{port}")
         print("Otevírám prohlížeč...")

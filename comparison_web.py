@@ -15,6 +15,7 @@ import subprocess
 import shutil
 from urllib.parse import urlparse, parse_qs
 import xml.etree.ElementTree as ET
+import xml.dom.minidom as minidom
 import html
 import re
 from pathlib import Path
@@ -55,6 +56,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             border-radius: 8px;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             margin-bottom: 20px;
+            position: relative;
         }
         .form-group {
             margin-bottom: 15px;
@@ -176,7 +178,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             font-weight: bold;
         }
         .preview-large {
-            pointer-events: none;
+            pointer-events: auto;
             position: absolute;
             top: 0;
             right: 0;
@@ -217,9 +219,41 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             color: #333;
         }
         .loading {
-            text-align: center;
-            padding: 20px;
+            position: absolute;
+            inset: 0;
+            background: rgba(255, 255, 255, 0.82);
             display: none;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+            gap: 12px;
+            text-align: center;
+            z-index: 100;
+        }
+        .container.is-loading .loading {
+            display: flex;
+        }
+        .loading-content {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 12px;
+        }
+        .loading-spinner {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            border: 4px solid rgba(0, 123, 255, 0.25);
+            border-top-color: #007bff;
+            animation: spin 0.8s linear infinite;
+        }
+        .loading p {
+            margin: 0;
+            color: #333;
+            font-weight: 600;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
         }
         .error {
             color: red;
@@ -262,6 +296,35 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             margin: 0 0 8px 0;
             color: #555;
         }
+        .book-summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 8px 12px;
+            margin-bottom: 12px;
+        }
+        .book-chip {
+            background: #eef3ff;
+            border: 1px solid #d9e2ff;
+            border-radius: 6px;
+            padding: 10px 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .book-chip strong {
+            font-size: 12px;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            color: #2a3cb5;
+        }
+        .book-chip-value {
+            font-size: 14px;
+            color: #1f2933;
+        }
+        .book-chip-meta {
+            font-size: 12px;
+            color: #52606d;
+        }
         .muted {
             color: #555;
         }
@@ -272,6 +335,44 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             overflow-x: auto;
             white-space: pre-wrap;
             word-wrap: break-word;
+        }
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            overflow: auto;
+            background-color: rgb(0,0,0);
+            background-color: rgba(0,0,0,0.4);
+        }
+        .modal-content {
+            background-color: #fefefe;
+            margin: auto;
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            padding: 20px;
+            border: 1px solid #888;
+            width: 80%;
+            max-width: 1200px;
+            max-height: 70%;
+            overflow-y: auto;
+        }
+        .close {
+            color: #aaa;
+            float: right;
+            font-size: 28px;
+            font-weight: bold;
+        }
+        .close:hover,
+        .close:focus {
+            color: black;
+            text-decoration: none;
+            cursor: pointer;
         }
     </style>
 </head>
@@ -292,19 +393,23 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         <div id="book-info" class="info-section" style="display: none;">
             <h2 id="book-title">Informace o knize</h2>
             <p id="book-handle" class="muted"></p>
+            <div id="book-constants" class="book-summary-grid" style="display: none;"></div>
             <div id="book-metadata-empty" class="muted" style="display: none;">Metadata se nepodařilo načíst.</div>
             <dl id="book-metadata" class="metadata-grid"></dl>
         </div>
 
         <div id="page-info" class="info-section" style="display: none;">
-            <div class="page-info-layout">
-                <div class="page-details">
-                    <h2>Informace o straně</h2>
-                    <p id="page-summary" class="muted"></p>
-                    <p id="page-side" class="muted"></p>
-                    <p id="page-uuid" class="muted"></p>
-                    <p id="page-handle" class="muted"></p>
-                </div>
+                <div class="page-info-layout">
+                    <div class="page-details">
+                        <h2>Informace o straně</h2>
+                        <p id="page-summary" class="muted"></p>
+                        <p id="page-side" class="muted"></p>
+                        <p id="page-uuid" class="muted"></p>
+                        <p id="page-handle" class="muted"></p>
+                    </div>
+                    <div class="page-alto-btn">
+                        <span id="alto-preview-btn" style="display: none;">Zobrazit ALTO</span>
+                    </div>
                     <div id="page-preview" class="page-preview" tabindex="0">
                         <div id="preview-status" class="muted"></div>
                         <img id="preview-image-thumb" alt="Náhled stránky">
@@ -323,8 +428,11 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             </div>
         </div>
 
-        <div id="loading" class="loading">
-            <p>Zpracovávám ALTO data...</p>
+        <div id="loading" class="loading" aria-live="polite" aria-hidden="true">
+            <div class="loading-content">
+                <div class="loading-spinner" role="presentation"></div>
+                <p>Zpracovávám ALTO data...</p>
+            </div>
         </div>
 
         <div id="results" class="results" style="display: none;">
@@ -347,6 +455,170 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         let currentBook = null;
         let currentPage = null;
         let navigationState = null;
+        let processRequestToken = 0;
+
+        const pageCache = new Map();
+        const inflightProcessRequests = new Map();
+        const previewCache = new Map();
+        const inflightPreviewRequests = new Map();
+        let cacheWindowUuids = new Set();
+        let currentAltoXml = '';
+
+        function cacheProcessData(uuid, payload) {
+            if (!uuid || !payload) {
+                return;
+            }
+            pageCache.set(uuid, {
+                payload,
+                timestamp: Date.now(),
+            });
+        }
+
+        async function ensureProcessData(uuid) {
+            if (!uuid) {
+                return null;
+            }
+            const cached = pageCache.get(uuid);
+            if (cached) {
+                cached.timestamp = Date.now();
+                return cached.payload;
+            }
+            if (inflightProcessRequests.has(uuid)) {
+                return inflightProcessRequests.get(uuid);
+            }
+
+            const promise = (async () => {
+                const response = await fetch(`/process?uuid=${encodeURIComponent(uuid)}`, { cache: "no-store" });
+                const data = await response.json();
+                if (!response.ok || data.error) {
+                    const message = data && data.error ? data.error : response.statusText || `HTTP ${response.status}`;
+                    throw new Error(message);
+                }
+                cacheProcessData(uuid, data);
+                return data;
+            })().finally(() => {
+                inflightProcessRequests.delete(uuid);
+            });
+
+            inflightProcessRequests.set(uuid, promise);
+            return promise;
+        }
+
+        function releasePreviewEntry(entry) {
+            if (entry && entry.objectUrl && entry.objectUrl !== previewObjectUrl) {
+                URL.revokeObjectURL(entry.objectUrl);
+            }
+        }
+
+        function storePreviewEntry(uuid, result) {
+            if (!uuid || !result) {
+                return null;
+            }
+            const existing = previewCache.get(uuid);
+            if (existing) {
+                releasePreviewEntry(existing);
+            }
+            const objectUrl = result.objectUrl || URL.createObjectURL(result.blob);
+            const payload = {
+                blob: result.blob,
+                stream: result.stream,
+                contentType: result.contentType,
+                objectUrl,
+                timestamp: Date.now(),
+            };
+            previewCache.set(uuid, payload);
+            return payload;
+        }
+
+        async function ensurePreviewEntry(uuid) {
+            if (!uuid) {
+                return null;
+            }
+            const cached = previewCache.get(uuid);
+            if (cached) {
+                cached.timestamp = Date.now();
+                return cached;
+            }
+            if (inflightPreviewRequests.has(uuid)) {
+                return inflightPreviewRequests.get(uuid);
+            }
+
+            const promise = (async () => {
+                const result = await fetchPreviewImage(uuid);
+                return storePreviewEntry(uuid, result);
+            })().finally(() => {
+                inflightPreviewRequests.delete(uuid);
+            });
+
+            inflightPreviewRequests.set(uuid, promise);
+            return promise;
+        }
+
+        function computeCacheWindow(currentUuid, navigation) {
+            const target = new Set();
+            if (currentUuid) {
+                target.add(currentUuid);
+            }
+            if (navigation) {
+                if (navigation.prevUuid) {
+                    target.add(navigation.prevUuid);
+                }
+                if (navigation.nextUuid) {
+                    target.add(navigation.nextUuid);
+                }
+            }
+            return target;
+        }
+
+        function updateCacheWindow(currentUuid, navigation) {
+            cacheWindowUuids = computeCacheWindow(currentUuid, navigation);
+
+            for (const key of Array.from(pageCache.keys())) {
+                if (!cacheWindowUuids.has(key)) {
+                    pageCache.delete(key);
+                }
+            }
+
+            for (const [key, entry] of Array.from(previewCache.entries())) {
+                if (!cacheWindowUuids.has(key)) {
+                    releasePreviewEntry(entry);
+                    previewCache.delete(key);
+                }
+            }
+        }
+
+        function schedulePrefetch(navigation) {
+            if (!navigation) {
+                return;
+            }
+            const candidates = [navigation.prevUuid, navigation.nextUuid].filter(Boolean);
+            candidates.forEach(uuid => {
+                prefetchProcess(uuid);
+                prefetchPreview(uuid);
+            });
+        }
+
+        async function prefetchProcess(uuid) {
+            if (!uuid || pageCache.has(uuid) || inflightProcessRequests.has(uuid)) {
+                return;
+            }
+            try {
+                await ensureProcessData(uuid);
+            } catch (error) {
+                console.warn("Nepodařilo se přednačíst stránku", uuid, error);
+            }
+        }
+
+        async function prefetchPreview(uuid) {
+            if (!uuid || previewCache.has(uuid) || inflightPreviewRequests.has(uuid)) {
+                return;
+            }
+            try {
+                await ensurePreviewEntry(uuid);
+            } catch (error) {
+                console.warn("Nepodařilo se přednačíst náhled", uuid, error);
+            }
+        }
 
         function setToolsVisible(show) {
             const tools = document.getElementById("page-tools");
@@ -355,7 +627,20 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             }
         }
 
-        function setLargePreviewActive(active) {
+        function setLoadingState(active) {
+            const container = document.querySelector('.container');
+            const loading = document.getElementById('loading');
+            const isActive = Boolean(active);
+
+            if (container) {
+                container.classList.toggle('is-loading', isActive);
+            }
+            if (loading) {
+                loading.setAttribute('aria-hidden', isActive ? 'false' : 'true');
+            }
+        }
+
+        function setLargePreviewActive() {
             const container = document.getElementById("page-preview");
             const largeBox = document.getElementById("preview-large");
 
@@ -363,7 +648,8 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 return;
             }
 
-            const isActive = Boolean(active && container.classList.contains("preview-loaded"));
+            const isHovered = container.matches(":hover") || largeBox.matches(":hover") || container.matches(":focus-within");
+            const isActive = isHovered && container.classList.contains("preview-loaded");
 
             if (isActive) {
                 largeBox.classList.add("preview-large-visible");
@@ -381,7 +667,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             const largeBox = document.getElementById("preview-large");
             const status = document.getElementById("preview-status");
 
-            setLargePreviewActive(false);
+            setLargePreviewActive();
 
             if (previewObjectUrl) {
                 URL.revokeObjectURL(previewObjectUrl);
@@ -587,7 +873,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             throw lastError || new Error("Náhled se nepodařilo načíst.");
         }
 
-        function showPreviewFromCache() {
+        function showPreviewFromCache(entry) {
             const container = document.getElementById("page-preview");
             const thumb = document.getElementById("preview-image-thumb");
             const largeImg = document.getElementById("preview-image-large");
@@ -596,6 +882,11 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
 
             if (!container || !thumb || !largeImg || !largeBox || !status || !previewObjectUrl) {
                 return;
+            }
+
+            const cached = entry || previewCache.get(previewImageUuid) || null;
+            if (cached && cached.stream) {
+                container.dataset.previewStream = cached.stream;
             }
 
             largeImg.onload = null;
@@ -616,39 +907,39 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 thumb.onload = null;
             };
 
-    if (thumb.src !== previewObjectUrl) {
-        thumb.style.opacity = "0";
-        thumb.onload = finalize;
-        thumb.src = previewObjectUrl;
-        thumb.onerror = () => {
-            status.textContent = "Náhled se nepodařilo načíst.";
-            status.style.display = "block";
-            container.classList.add("preview-error");
-            container.classList.remove("preview-loaded");
-            setLargePreviewActive(false);
-        };
-        if (thumb.complete && thumb.naturalWidth > 0) {
-            finalize();
-        } else if (thumb.complete) {
-            status.textContent = "Náhled se nepodařilo načíst.";
-            status.style.display = "block";
-            container.classList.add("preview-error");
-            container.classList.remove("preview-loaded");
-            setLargePreviewActive(false);
-        }
-    } else if (thumb.naturalWidth > 0) {
-        finalize();
-    } else {
-        thumb.style.opacity = "0";
-        thumb.onload = finalize;
-        thumb.onerror = () => {
-            status.textContent = "Náhled se nepodařilo načíst.";
-            status.style.display = "block";
-            container.classList.add("preview-error");
-            container.classList.remove("preview-loaded");
-            setLargePreviewActive(false);
-        };
-    }
+            if (thumb.src !== previewObjectUrl) {
+                thumb.style.opacity = "0";
+                thumb.onload = finalize;
+                thumb.src = previewObjectUrl;
+                thumb.onerror = () => {
+                    status.textContent = "Náhled se nepodařilo načíst.";
+                    status.style.display = "block";
+                    container.classList.add("preview-error");
+                    container.classList.remove("preview-loaded");
+                    setLargePreviewActive(false);
+                };
+                if (thumb.complete && thumb.naturalWidth > 0) {
+                    finalize();
+                } else if (thumb.complete) {
+                    status.textContent = "Náhled se nepodařilo načíst.";
+                    status.style.display = "block";
+                    container.classList.add("preview-error");
+                    container.classList.remove("preview-loaded");
+                    setLargePreviewActive();
+                }
+            } else if (thumb.naturalWidth > 0) {
+                finalize();
+            } else {
+                thumb.style.opacity = "0";
+                thumb.onload = finalize;
+                thumb.onerror = () => {
+                    status.textContent = "Náhled se nepodařilo načíst.";
+                    status.style.display = "block";
+                    container.classList.add("preview-error");
+                    container.classList.remove("preview-loaded");
+                    setLargePreviewActive(false);
+                };
+            }
 
             container.style.display = "flex";
             container.classList.add("preview-visible", "preview-loaded");
@@ -656,11 +947,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             status.textContent = "";
             status.style.display = "none";
 
-            if (container.matches(":hover") || container.matches(":focus-within")) {
-                setLargePreviewActive(true);
-            } else {
-                setLargePreviewActive(false);
-            }
+            setLargePreviewActive();
         }
 
         async function loadPreview(uuid) {
@@ -678,6 +965,14 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
 
             if (previewImageUuid === uuid && previewObjectUrl) {
                 showPreviewFromCache();
+                return;
+            }
+
+            const cachedEntry = previewCache.get(uuid);
+            if (cachedEntry && cachedEntry.objectUrl) {
+                previewImageUuid = uuid;
+                previewObjectUrl = cachedEntry.objectUrl;
+                showPreviewFromCache(cachedEntry);
                 return;
             }
 
@@ -699,17 +994,21 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             let handleLoad;
 
             try {
-                const result = await fetchPreviewImage(uuid);
+                const entry = await ensurePreviewEntry(uuid);
 
-                if (previewImageUuid !== uuid) {
+                if (!entry || previewImageUuid !== uuid) {
                     return;
                 }
 
-                if (previewObjectUrl) {
-                    URL.revokeObjectURL(previewObjectUrl);
-                }
+                const previousUrl = previewObjectUrl;
+                previewObjectUrl = entry.objectUrl;
 
-                previewObjectUrl = URL.createObjectURL(result.blob);
+                if (previousUrl && previousUrl !== previewObjectUrl) {
+                    const stillReferenced = Array.from(previewCache.values()).some(item => item && item.objectUrl === previousUrl);
+                    if (!stillReferenced) {
+                        URL.revokeObjectURL(previousUrl);
+                    }
+                }
 
                 largeImg.onload = null;
                 const handleLargeLoad = () => {
@@ -732,11 +1031,11 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                         status.style.display = "block";
                         container.classList.add("preview-error");
                         container.classList.remove("preview-loaded");
-                        setLargePreviewActive(false);
+                        setLargePreviewActive();
                     }
                 };
                 thumb.src = previewObjectUrl;
-                thumb.style.opacity = "1";  // Set opacity immediately to make visible
+                thumb.style.opacity = "1";
 
                 if (thumb.complete && thumb.naturalWidth === 0) {
                     if (previewImageUuid === uuid) {
@@ -744,19 +1043,17 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                         status.style.display = "block";
                         container.classList.add("preview-error");
                         container.classList.remove("preview-loaded");
-                        setLargePreviewActive(false);
+                        setLargePreviewActive();
                     }
                 }
 
-                container.dataset.previewStream = result.stream;
+                container.dataset.previewStream = entry.stream;
 
                 container.classList.add("preview-loaded");
                 status.textContent = "";
                 status.style.display = "none";
 
-                if (container.matches(":hover") || container.matches(":focus-within")) {
-                    setLargePreviewActive(true);
-                }
+                setLargePreviewActive();
             } catch (error) {
                 if (previewImageUuid === uuid) {
                     console.error("Chyba při načítání náhledu:", error);
@@ -817,6 +1114,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             const handleEl = document.getElementById("book-handle");
             const metadataList = document.getElementById("book-metadata");
             const metadataEmpty = document.getElementById("book-metadata-empty");
+            const constantsContainer = document.getElementById("book-constants");
 
             if (!section || !titleEl || !handleEl || !metadataList || !metadataEmpty) {
                 return;
@@ -827,6 +1125,10 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 handleEl.textContent = "";
                 metadataList.innerHTML = "";
                 metadataEmpty.style.display = "none";
+                if (constantsContainer) {
+                    constantsContainer.innerHTML = "";
+                    constantsContainer.style.display = "none";
+                }
                 return;
             }
 
@@ -837,6 +1139,81 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 handleEl.innerHTML = `<a href="${currentBook.handle}" target="_blank" rel="noopener">Otevřít v Krameriovi</a>`;
             } else {
                 handleEl.textContent = "";
+            }
+
+            if (constantsContainer) {
+                constantsContainer.innerHTML = "";
+                const constants = (currentBook.constants && typeof currentBook.constants === "object") ? currentBook.constants : {};
+                const chips = [];
+
+                if (constants && typeof constants === "object") {
+                    const basic = (constants.basicTextStyle && typeof constants.basicTextStyle === "object") ? constants.basicTextStyle : null;
+                    if (basic) {
+                        const valueParts = [];
+                        if (typeof basic.fontSize === "number" && Number.isFinite(basic.fontSize)) {
+                            const sizeText = basic.fontSize % 1 === 0 ? basic.fontSize.toFixed(0) : basic.fontSize.toFixed(1);
+                            valueParts.push(`${sizeText} pt`);
+                        }
+                        if (basic.fontFamily) {
+                            valueParts.push(basic.fontFamily);
+                        }
+                        const styleFlags = [];
+                        if (basic.isBold) {
+                            styleFlags.push("tučné");
+                        }
+                        if (basic.isItalic) {
+                            styleFlags.push("kurzíva");
+                        }
+                        if (!styleFlags.length) {
+                            styleFlags.push("regular");
+                        }
+                        valueParts.push(styleFlags.join(", "));
+
+                        const metaParts = [];
+                        if (typeof constants.confidence === "number" && Number.isFinite(constants.confidence)) {
+                            metaParts.push(`confidence ${constants.confidence}%`);
+                        }
+                        if (typeof constants.sampledPages === "number" && constants.sampledPages > 0) {
+                            const label = constants.sampledPages === 1 ? "1 strana" : `${constants.sampledPages} stran`;
+                            metaParts.push(`vzorek ${label}`);
+                        }
+                        if (typeof constants.linesSampled === "number" && constants.linesSampled > 0) {
+                            const lineLabel = constants.linesSampled === 1 ? "1 řádek" : `${constants.linesSampled} řádků`;
+                            metaParts.push(lineLabel);
+                        }
+                        if (typeof constants.distinctStyles === "number" && constants.distinctStyles > 0) {
+                            const styleLabel = constants.distinctStyles === 1 ? "1 styl" : `${constants.distinctStyles} stylů`;
+                            metaParts.push(styleLabel);
+                        }
+                        if (basic.styleId) {
+                            metaParts.push(`styl ${basic.styleId}`);
+                        }
+
+                        chips.push({
+                            label: "Typický text",
+                            value: valueParts.filter(Boolean).join(" • ") || "neuvedeno",
+                            meta: metaParts.filter(Boolean).join(" • "),
+                        });
+                    }
+                }
+
+                if (chips.length) {
+                    chips.forEach(item => {
+                        const chipEl = document.createElement("div");
+                        chipEl.className = "book-chip";
+                        chipEl.innerHTML = `<strong>${item.label}</strong><div class="book-chip-value">${item.value}</div>`;
+                        if (item.meta) {
+                            const metaEl = document.createElement("div");
+                            metaEl.className = "book-chip-meta";
+                            metaEl.textContent = item.meta;
+                            chipEl.appendChild(metaEl);
+                        }
+                        constantsContainer.appendChild(chipEl);
+                    });
+                    constantsContainer.style.display = "grid";
+                } else {
+                    constantsContainer.style.display = "none";
+                }
             }
 
             metadataList.innerHTML = "";
@@ -931,6 +1308,52 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             processAlto();
         }
 
+        function applyProcessResult(uuid, data, previousScrollY, toolsElement) {
+            cacheProcessData(uuid, data);
+
+            currentAltoXml = data.alto_xml || '';
+            const altoBtn = document.getElementById("alto-preview-btn");
+            if (altoBtn) {
+                altoBtn.style.display = currentAltoXml ? "block" : "none";
+            }
+
+            currentBook = data.book || null;
+            currentPage = data.currentPage || null;
+
+            updateBookInfo();
+            updatePageInfo();
+            updateNavigationControls(data.navigation || null);
+
+            if (currentPage && currentPage.uuid) {
+                loadPreview(currentPage.uuid);
+            } else {
+                resetPreview();
+            }
+
+            const pythonResult = document.getElementById("python-result");
+            if (pythonResult) {
+                pythonResult.innerHTML = `<pre>${data.python || ""}</pre>`;
+            }
+
+            const tsResult = document.getElementById("typescript-result");
+            if (tsResult) {
+                tsResult.innerHTML = `<pre>${data.typescript || ""}</pre>`;
+            }
+
+            const results = document.getElementById("results");
+            if (results) {
+                results.style.display = "grid";
+            }
+
+            const uuidField = document.getElementById("uuid");
+            if (uuidField && currentPage && currentPage.uuid) {
+                uuidField.value = currentPage.uuid;
+            }
+
+            updateCacheWindow(currentPage ? currentPage.uuid : uuid, data.navigation || null);
+            schedulePrefetch(data.navigation || null);
+        }
+
         async function processAlto() {
             const uuidField = document.getElementById("uuid");
             const uuid = uuidField ? uuidField.value.trim() : "";
@@ -940,96 +1363,37 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 return;
             }
 
+            const token = ++processRequestToken;
             const previousScrollY = window.pageYOffset || window.scrollY || 0;
             const toolsElement = document.getElementById("page-tools");
+            const shouldShowLoading = !pageCache.has(uuid);
 
-            resetPreview();
-            setToolsVisible(false);
-            currentBook = null;
-            currentPage = null;
-            navigationState = null;
-            updateNavigationControls(null);
-
-            const loading = document.getElementById("loading");
-            const results = document.getElementById("results");
-            if (loading) {
-                loading.style.display = "block";
-            }
-            if (results) {
-                results.style.display = "none";
-            }
-
-            const bookSection = document.getElementById("book-info");
-            const pageSection = document.getElementById("page-info");
-            if (bookSection) {
-                bookSection.style.display = "none";
-            }
-            if (pageSection) {
-                pageSection.style.display = "none";
+            if (shouldShowLoading) {
+                setLoadingState(true);
             }
 
             try {
-                const response = await fetch(`/process?uuid=${encodeURIComponent(uuid)}`, { cache: "no-store" });
-                const data = await response.json();
+                const data = await ensureProcessData(uuid);
 
-                if (loading) {
-                    loading.style.display = "none";
-                }
-
-                if (!response.ok || data.error) {
-                    alert(`Chyba: ${data.error || response.statusText}`);
-                    window.requestAnimationFrame(() => {
-                        window.scrollTo(0, previousScrollY);
-                    });
+                if (token !== processRequestToken) {
                     return;
                 }
 
-                currentBook = data.book || null;
-                currentPage = data.currentPage || null;
-                updateBookInfo();
-                updatePageInfo();
-                updateNavigationControls(data.navigation || null);
-                if (currentPage && currentPage.uuid) {
-                    loadPreview(currentPage.uuid);
-                } else {
-                    resetPreview();
-                }
-
-                const pythonResult = document.getElementById("python-result");
-                const tsResult = document.getElementById("typescript-result");
-
-                if (pythonResult) {
-                    pythonResult.innerHTML = `<pre>${data.python || ""}</pre>`;
-                }
-                if (tsResult) {
-                    tsResult.innerHTML = `<pre>${data.typescript || ""}</pre>`;
-                }
-                if (results) {
-                    results.style.display = "grid";
-                }
-
-                if (uuidField && currentPage && currentPage.uuid) {
-                    uuidField.value = currentPage.uuid;
-                }
-
-                window.requestAnimationFrame(() => {
-                    if (toolsElement && toolsElement.style.display !== "none") {
-                        const rect = toolsElement.getBoundingClientRect();
-                        const absoluteTop = window.pageYOffset + rect.top;
-                        window.scrollTo(0, Math.max(absoluteTop - 10, 0));
-                    } else {
-                        window.scrollTo(0, previousScrollY);
-                    }
-                });
+                applyProcessResult(uuid, data, previousScrollY, toolsElement);
             } catch (error) {
-                if (loading) {
-                    loading.style.display = "none";
+                if (token !== processRequestToken) {
+                    return;
                 }
                 console.error("Chyba při zpracování:", error);
-                alert("Chyba při zpracování: " + error);
+                const message = error && error.message ? error.message : String(error);
+                alert("Chyba při zpracování: " + message);
                 window.requestAnimationFrame(() => {
                     window.scrollTo(0, previousScrollY);
                 });
+            } finally {
+                if (token === processRequestToken) {
+                    setLoadingState(false);
+                }
             }
         }
 
@@ -1044,6 +1408,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             }
 
             const previewContainer = document.getElementById("page-preview");
+            const largeBox = document.getElementById("preview-large");
             if (previewContainer) {
                 const handleEnter = () => setLargePreviewActive(true);
                 const handleLeave = () => setLargePreviewActive(false);
@@ -1055,17 +1420,63 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 previewContainer.addEventListener("focusin", handleEnter);
                 previewContainer.addEventListener("focusout", handleLeave);
             }
+            if (largeBox) {
+                const handleEnter = () => setLargePreviewActive(true);
+                const handleLeave = () => setLargePreviewActive(false);
+
+                largeBox.addEventListener("pointerenter", handleEnter);
+                largeBox.addEventListener("pointerleave", handleLeave);
+                largeBox.addEventListener("mouseenter", handleEnter);
+                largeBox.addEventListener("mouseleave", handleLeave);
+                largeBox.addEventListener("focusin", handleEnter);
+                largeBox.addEventListener("focusout", handleLeave);
+            }
+
+            const altoBtn = document.getElementById("alto-preview-btn");
+            if (altoBtn) {
+                altoBtn.style.color = "#007bff";
+                altoBtn.style.cursor = "pointer";
+                altoBtn.style.textDecoration = "underline";
+                altoBtn.addEventListener("click", () => {
+                    const modal = document.getElementById("alto-modal");
+                    const content = document.getElementById("alto-content");
+                    if (modal && content) {
+                        content.textContent = currentAltoXml;
+                        modal.style.display = "block";
+                    }
+                });
+            }
+
+            const closeBtn = document.querySelector(".close");
+            if (closeBtn) {
+                closeBtn.addEventListener("click", () => {
+                    const modal = document.getElementById("alto-modal");
+                    if (modal) modal.style.display = "none";
+                });
+            }
+
+            window.addEventListener("click", (event) => {
+                const modal = document.getElementById("alto-modal");
+                if (event.target == modal) {
+                    modal.style.display = "none";
+                }
+            });
+
             processAlto();
         };
 
         window.addEventListener("resize", () => {
             refreshLargePreviewSizing();
-            const previewContainer = document.getElementById("page-preview");
-            if (previewContainer && previewContainer.matches(":hover, :focus-within")) {
-                setLargePreviewActive(true);
-            }
+            setLargePreviewActive();
         });
     </script>
+    <div id="alto-modal" class="modal">
+        <div class="modal-content">
+            <span class="close">&times;</span>
+            <h2>ALTO XML Obsah</h2>
+            <pre id="alto-content"></pre>
+        </div>
+    </div>
 </body>
 </html>'''
             self.wfile.write(html.encode('utf-8'))
@@ -1087,6 +1498,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             try:
                 processor = AltoProcessor()
                 context = processor.get_book_context(uuid)
+                print(f"Book constants for {uuid}: {context.get('book_constants')}")
 
                 if not context:
                     self.wfile.write(json.dumps({'error': 'Nepodařilo se načíst metadata pro zadané UUID'}).encode('utf-8'))
@@ -1101,6 +1513,8 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 if not alto_xml:
                     self.wfile.write(json.dumps({'error': 'Nepodařilo se stáhnout ALTO data'}).encode('utf-8'))
                     return
+
+                pretty_alto = minidom.parseString(alto_xml).toprettyxml(indent="  ")
 
                 python_result = processor.get_formatted_text(alto_xml, page_uuid, DEFAULT_WIDTH, DEFAULT_HEIGHT)
                 typescript_result = simulate_typescript_processing(alto_xml, page_uuid, DEFAULT_WIDTH, DEFAULT_HEIGHT)
@@ -1142,6 +1556,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     'model': book_data.get('model'),
                     'handle': (book_data.get('handle') or {}).get('href'),
                     'mods': mods_metadata,
+                    'constants': context.get('book_constants') or {},
                 }
 
                 navigation = {
@@ -1159,6 +1574,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     'pages': pages,
                     'currentPage': page_info,
                     'navigation': navigation,
+                    'alto_xml': pretty_alto,
                 }
 
                 self.wfile.write(json.dumps(response_data, ensure_ascii=False).encode('utf-8'))

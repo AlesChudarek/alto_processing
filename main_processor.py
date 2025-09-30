@@ -6,13 +6,17 @@ Podporuje české znaky a formátovaný výstup
 """
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import xml.etree.ElementTree as ET
 from typing import List, Dict, Tuple, Optional, Any
+from collections import Counter
 import html
 import re
 import sys
 import argparse
 import statistics
+import json
 
 # Heuristické multiplikátory pro dělení bloků; úprava na jednom místě usnadní ladění.
 VERTICAL_GAP_MULTIPLIER = 2.5   # Kolikrát musí být mezera mezi řádky větší než typická mezera, aby vznikl nový blok.
@@ -24,6 +28,21 @@ HORIZONTAL_MIN_THRESHOLD = 12   # Minimální povolený práh pro horizontální
 NEGATIVE_SHIFT_MULTIPLIER = 0.85  # Negativní hranice = horizontální práh * tato hodnota (víc citlivá než pozitivní).
 FALLBACK_THRESHOLD = 40        # Záložní hodnota, pokud nelze heuristiku spočítat.
 
+# Centralized HTTP timeouts (seconds)
+API_TIMEOUT = 25
+CHILDREN_TIMEOUT = 25
+MODS_TIMEOUT = 25
+ALTO_TIMEOUT = 30
+
+# Nastavení pro analýzu typického formátu základního textu v rámci knihy.
+TEXT_SAMPLE_WAVE_SIZE = 10           # Kolik stran z každé vlny odečíst.
+TEXT_SAMPLE_MAX_WAVES = 3           # Maximální počet vln načítání.
+MIN_CONFIDENCE_FOR_EARLY_STOP = 75  # Pokud confidence (v %) dosáhne této hodnoty, další vlny nejsou třeba.
+BLOCK_MIN_TOTAL_CHARS = 40          # Minimální množství znaků v TextBlocku, aby šel do analýzy.
+MIN_WORDS_PER_PAGE = 20             # Minimální počet slov na stránce pro výpočet průměrné výšky.
+
+BOOK_TEXT_STYLE_CACHE: Dict[str, Dict[str, Any]] = {}
+
 class AltoProcessor:
     def __init__(
         self,
@@ -32,6 +51,19 @@ class AltoProcessor:
     ):
         self.iiif_base_url = iiif_base_url
         self.api_base_url = api_base_url
+        self._book_text_cache = BOOK_TEXT_STYLE_CACHE
+        # HTTP session with retries for robustness on flaky Kramerius endpoints
+        self.session = requests.Session()
+        retries = Retry(
+            total=3,
+            backoff_factor=0.5,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["GET"],
+            respect_retry_after_header=True,
+        )
+        adapter = HTTPAdapter(max_retries=retries)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
 
     @staticmethod
     def _strip_uuid_prefix(value: Optional[str]) -> str:
@@ -47,6 +79,922 @@ class AltoProcessor:
         cleaned = " ".join(cleaned.split())
         return cleaned.strip()
 
+    @staticmethod
+    def _safe_float(value: Optional[str]) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            return float(str(value).strip())
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _round_float(value: Optional[float], digits: int = 2) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            return round(float(value), digits)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _compute_confidence(counter: Counter) -> Optional[int]:
+        if not counter:
+            return None
+        total = sum(counter.values())
+        if total <= 0:
+            return None
+        top = counter.most_common(1)[0][1]
+        return int(round((top / total) * 100))
+
+    @staticmethod
+    def _parse_alto_root(alto: str):
+        if not alto:
+            return None
+        try:
+            from lxml import etree  # type: ignore
+            return etree.fromstring(alto.encode('utf-8'))
+        except ImportError:
+            pass
+        except Exception:
+            return None
+        try:
+            return ET.fromstring(alto)
+        except ET.ParseError:
+            return None
+        except Exception:
+            return None
+
+    def _extract_text_styles(self, root) -> Dict[str, Dict[str, Any]]:
+        styles: Dict[str, Dict[str, Any]] = {}
+        if root is None:
+            return styles
+        for elem in root.iter():
+            tag = getattr(elem, 'tag', '')
+            if isinstance(tag, str) and tag.endswith('TextStyle'):
+                style_id = elem.get('ID')
+                if not style_id:
+                    continue
+                styles[style_id] = {
+                    'font_size': self._safe_float(elem.get('FONTSIZE')),
+                    'font_family': self._clean_text(elem.get('FONTFAMILY')),
+                    'font_style': self._clean_text(elem.get('FONTSTYLE')),
+                    'font_weight': self._clean_text(elem.get('FONTWEIGHT')),
+                }
+        return styles
+
+    def _string_style_signature(self, string_el, fonts: Dict[str, Dict[str, Any]]) -> Optional[Tuple]:
+        if string_el is None:
+            return None
+
+        style_attr = string_el.get('STYLE') or ''
+        tokens = [token.strip(' ,;') for token in style_attr.split() if token]
+        style_id = None
+        for token in tokens:
+            if token in fonts:
+                style_id = token
+                break
+
+        font_entry = fonts.get(style_id, {}) if style_id else {}
+        font_size = font_entry.get('font_size')
+        if font_size is None:
+            font_size = self._safe_float(string_el.get('FONTSIZE'))
+        if font_size is None:
+            font_size = self._safe_float(string_el.get('HEIGHT'))
+
+        font_family = font_entry.get('font_family') or (string_el.get('FONTFAMILY') or '')
+        font_family = self._clean_text(font_family)
+
+        style_lower = style_attr.lower()
+        weight_meta = (font_entry.get('font_weight') or '').lower()
+        style_meta = (font_entry.get('font_style') or '').lower()
+
+        bold_attr = (string_el.get('BOLD') or '').lower()
+        italic_attr = (string_el.get('ITALIC') or '').lower()
+
+        is_bold = bool(
+            'bold' in style_lower
+            or 'bold' in weight_meta
+            or bold_attr == 'true'
+        )
+        is_italic = bool(
+            'italic' in style_lower
+            or 'italic' in style_meta
+            or italic_attr == 'true'
+        )
+
+        return (
+            self._round_float(font_size, 2),
+            is_bold,
+            is_italic,
+            font_family,
+            style_id or '',
+        )
+
+    def _is_probably_text_page(self, page: Dict[str, Any]) -> bool:
+        page_type = (page.get('pageType') or '').lower()
+        title = (page.get('title') or '').lower()
+
+        exclusion_terms = [
+            'titul', 'title', 'cover', 'obal', 'obsah', 'content', 'contents',
+            'ilustr', 'illustr', 'obraz', 'image', 'map', 'fotograf', 'photo',
+            'reklam', 'advert', 'příloh', 'priloh', 'appendix', 'příloha',
+            'příloha', 'napis', 'blank', 'prázd', 'prazd', 'index'
+        ]
+
+        for term in exclusion_terms:
+            if term in page_type or term in title:
+                return False
+
+        return True
+
+    def _analyze_paragraphs(self, alto: str) -> Tuple[Optional[Dict[str, Any]], List[float]]:
+        root = self._parse_alto_root(alto)
+        if root is None:
+            return None, []
+
+        fonts = self._extract_text_styles(root)
+
+        text_blocks = root.findall('.//{http://www.loc.gov/standards/alto/ns-v3#}TextBlock')
+        if not text_blocks:
+            text_blocks = root.findall('.//{http://www.loc.gov/standards/alto/ns-v2#}TextBlock')
+
+        if not text_blocks:
+            return None, []
+
+        size_stats: Dict[float, Dict[str, Any]] = {}
+        total_chars = 0
+        total_paragraphs = 0
+        total_lines = 0
+        block_size_entries: List[Dict[str, Any]] = []
+        paragraph_modes: List[float] = []
+
+        for block_elem in text_blocks:
+            style_refs = block_elem.get('STYLEREFS', '')
+            tag = 'p'
+
+            if ' ' in style_refs:
+                parts = style_refs.split()
+                if len(parts) > 1:
+                    font_id = parts[1]
+                    font_entry = fonts.get(font_id, {})
+                    size = font_entry.get('font_size', 0)
+                    if size > 18:
+                        tag = 'h1'
+                    elif size > 11:
+                        tag = 'h2'
+
+            text_lines = block_elem.findall('.//{http://www.loc.gov/standards/alto/ns-v3#}TextLine')
+            if not text_lines:
+                text_lines = block_elem.findall('.//{http://www.loc.gov/standards/alto/ns-v2#}TextLine')
+
+            line_records = []
+            for text_line in text_lines:
+                text_line_width = int(text_line.get('WIDTH', '0'))
+                if text_line_width < 50:
+                    continue
+
+                text_line_height = int(text_line.get('HEIGHT', '0'))
+                text_line_vpos = int(text_line.get('VPOS', '0'))
+                text_line_hpos = int(text_line.get('HPOS', '0'))
+
+                line_records.append({
+                    'element': text_line,
+                    'width': text_line_width,
+                    'height': text_line_height,
+                    'vpos': text_line_vpos,
+                    'hpos': text_line_hpos,
+                    'bottom': text_line_vpos + text_line_height
+                })
+
+            if not line_records:
+                continue
+
+            line_heights = [record['height'] for record in line_records]
+            line_widths = [record['width'] for record in line_records]
+
+            vertical_gaps = []
+            horizontal_shifts = []
+            previous_bottom = None
+            previous_left = None
+
+            for record in line_records:
+                if previous_bottom is not None:
+                    gap = record['vpos'] - previous_bottom
+                    if gap > 0:
+                        vertical_gaps.append(gap)
+
+                if previous_left is not None:
+                    shift = record['hpos'] - previous_left
+                    if shift > 0:
+                        horizontal_shifts.append(shift)
+
+                previous_bottom = record['bottom']
+                previous_left = record['hpos']
+
+            median_height = statistics.median(line_heights) if line_heights else 0
+            positive_gaps = [gap for gap in vertical_gaps if gap > 0]
+            median_gap = statistics.median(positive_gaps) if positive_gaps else 0
+
+            vertical_threshold_candidates = []
+            if median_gap:
+                vertical_threshold_candidates.append(median_gap * VERTICAL_GAP_MULTIPLIER)
+            if median_height:
+                vertical_threshold_candidates.append(median_height * VERTICAL_HEIGHT_RATIO)
+
+            if vertical_threshold_candidates:
+                vertical_threshold = max(int(round(value)) for value in vertical_threshold_candidates)
+                vertical_threshold = max(vertical_threshold, 1)
+                if median_height:
+                    vertical_threshold = min(vertical_threshold, int(round(median_height * VERTICAL_MAX_FACTOR)))
+            else:
+                vertical_threshold = FALLBACK_THRESHOLD
+
+            median_width = statistics.median(line_widths) if line_widths else 0
+            trimmed_shifts = []
+            if horizontal_shifts:
+                sorted_shifts = sorted(horizontal_shifts)
+                cutoff = max(1, int(len(sorted_shifts) * 0.5))
+                trimmed_shifts = sorted_shifts[:cutoff]
+
+            median_shift = statistics.median(trimmed_shifts) if trimmed_shifts else 0
+            if median_width and median_shift and median_shift > median_width * 0.6:
+                median_shift = 0
+
+            horizontal_threshold_candidates = []
+            if median_width:
+                horizontal_threshold_candidates.append(median_width * HORIZONTAL_WIDTH_RATIO)
+            if median_shift:
+                horizontal_threshold_candidates.append(median_shift * HORIZONTAL_SHIFT_MULTIPLIER)
+
+            if horizontal_threshold_candidates:
+                horizontal_threshold = max(int(round(value)) for value in horizontal_threshold_candidates)
+                horizontal_threshold = max(horizontal_threshold, HORIZONTAL_MIN_THRESHOLD)
+            else:
+                horizontal_threshold = FALLBACK_THRESHOLD
+
+            current_char_counter = Counter()
+            current_bold_counter = Counter()
+            current_italic_counter = Counter()
+            current_family_counter = {}
+            current_lines = 0
+            current_total_chars = 0
+            last_bottom = None
+            last_left = None
+
+            for record in line_records:
+                text_line = record['element']
+                text_line_vpos = record['vpos']
+                text_line_hpos = record['hpos']
+                bottom = record['bottom']
+
+                if last_bottom is not None:
+                    v_diff = text_line_vpos - last_bottom
+                    if v_diff > vertical_threshold:
+                        # Finalize current paragraph
+                        if current_total_chars > 0 and current_char_counter:
+                            dominant_size = max(current_char_counter, key=current_char_counter.get)
+                            dominant_chars = current_char_counter[dominant_size]
+                            paragraph_modes.append(dominant_size)
+
+                            entry = size_stats.setdefault(dominant_size, {
+                                'char': 0,
+                                'bold': 0,
+                                'italic': 0,
+                                'families': Counter(),
+                                'blocks': 0,
+                            })
+                            entry['char'] += dominant_chars
+                            entry['bold'] += current_bold_counter.get(dominant_size, 0)
+                            entry['italic'] += current_italic_counter.get(dominant_size, 0)
+                            if dominant_size in current_family_counter:
+                                entry['families'].update(current_family_counter[dominant_size])
+                            entry['blocks'] += 1
+
+                            block_size_entries.append({
+                                'size': dominant_size,
+                                'charCount': dominant_chars,
+                                'boldChars': current_bold_counter.get(dominant_size, 0),
+                                'italicChars': current_italic_counter.get(dominant_size, 0),
+                            })
+
+                            total_chars += dominant_chars
+                            total_paragraphs += 1
+                            total_lines += current_lines
+
+                        # Reset for new paragraph
+                        current_char_counter = Counter()
+                        current_bold_counter = Counter()
+                        current_italic_counter = Counter()
+                        current_family_counter = {}
+                        current_lines = 0
+                        current_total_chars = 0
+
+                last_bottom = bottom
+
+                if last_left is not None:
+                    h_diff = text_line_hpos - last_left
+                    if h_diff > horizontal_threshold:
+                        # Finalize current paragraph
+                        if current_total_chars > 0 and current_char_counter:
+                            dominant_size = max(current_char_counter, key=current_char_counter.get)
+                            dominant_chars = current_char_counter[dominant_size]
+                            paragraph_modes.append(dominant_size)
+
+                            entry = size_stats.setdefault(dominant_size, {
+                                'char': 0,
+                                'bold': 0,
+                                'italic': 0,
+                                'families': Counter(),
+                                'blocks': 0,
+                            })
+                            entry['char'] += dominant_chars
+                            entry['bold'] += current_bold_counter.get(dominant_size, 0)
+                            entry['italic'] += current_italic_counter.get(dominant_size, 0)
+                            if dominant_size in current_family_counter:
+                                entry['families'].update(current_family_counter[dominant_size])
+                            entry['blocks'] += 1
+
+                            block_size_entries.append({
+                                'size': dominant_size,
+                                'charCount': dominant_chars,
+                                'boldChars': current_bold_counter.get(dominant_size, 0),
+                                'italicChars': current_italic_counter.get(dominant_size, 0),
+                            })
+
+                            total_chars += dominant_chars
+                            total_paragraphs += 1
+                            total_lines += current_lines
+
+                        # Reset for new paragraph
+                        current_char_counter = Counter()
+                        current_bold_counter = Counter()
+                        current_italic_counter = Counter()
+                        current_family_counter = {}
+                        current_lines = 0
+                        current_total_chars = 0
+
+                last_left = text_line_hpos
+
+                strings = text_line.findall('.//{http://www.loc.gov/standards/alto/ns-v3#}String')
+                if not strings:
+                    strings = text_line.findall('.//{http://www.loc.gov/standards/alto/ns-v2#}String')
+
+                line_all_bold = True
+                line_has_content = False
+
+                for string_el in strings:
+                    style = string_el.get('STYLE', '')
+                    if not style or 'bold' not in style:
+                        line_all_bold = False
+
+                    content = string_el.get('CONTENT', '')
+                    subs_content = string_el.get('SUBS_CONTENT', '')
+                    subs_type = string_el.get('SUBS_TYPE', '')
+
+                    content = html.unescape(content)
+                    subs_content = html.unescape(subs_content)
+
+                    if subs_type == 'HypPart1':
+                        content = subs_content
+                    elif subs_type == 'HypPart2':
+                        continue
+
+                    text_value = content.strip()
+                    if not text_value:
+                        continue
+
+                    char_count = len(re.sub(r'\s+', '', text_value))
+                    if char_count <= 0:
+                        continue
+
+                    signature = self._string_style_signature(string_el, fonts)
+                    if signature is None:
+                        continue
+
+                    font_size = signature[0]
+                    if font_size is None:
+                        continue
+
+                    font_size = self._round_float(font_size, 2)
+                    if font_size is None:
+                        continue
+
+                    current_char_counter[font_size] += char_count
+                    current_total_chars += char_count
+                    line_has_content = True
+
+                    if signature[1]:  # bold
+                        current_bold_counter[font_size] += char_count
+
+                    if signature[2]:  # italic
+                        current_italic_counter[font_size] += char_count
+
+                    family = signature[3]
+                    if family:
+                        if font_size not in current_family_counter:
+                            current_family_counter[font_size] = Counter()
+                        current_family_counter[font_size][family] += char_count
+
+                if line_has_content:
+                    current_lines += 1
+
+                line_text = ' '.join([string_el.get('CONTENT', '') for string_el in strings]).strip()
+                if not line_text:
+                    continue
+
+                prospective_count = current_lines + 1
+
+                if prospective_count == 1 and line_all_bold:
+                    # Finalize single bold line as paragraph
+                    if current_total_chars > 0 and current_char_counter:
+                        dominant_size = max(current_char_counter, key=current_char_counter.get)
+                        dominant_chars = current_char_counter[dominant_size]
+                        paragraph_modes.append(dominant_size)
+
+                        entry = size_stats.setdefault(dominant_size, {
+                            'char': 0,
+                            'bold': 0,
+                            'italic': 0,
+                            'families': Counter(),
+                            'blocks': 0,
+                        })
+                        entry['char'] += dominant_chars
+                        entry['bold'] += current_bold_counter.get(dominant_size, 0)
+                        entry['italic'] += current_italic_counter.get(dominant_size, 0)
+                        if dominant_size in current_family_counter:
+                            entry['families'].update(current_family_counter[dominant_size])
+                        entry['blocks'] += 1
+
+                        block_size_entries.append({
+                            'size': dominant_size,
+                            'charCount': dominant_chars,
+                            'boldChars': current_bold_counter.get(dominant_size, 0),
+                            'italicChars': current_italic_counter.get(dominant_size, 0),
+                        })
+
+                        total_chars += dominant_chars
+                        total_paragraphs += 1
+                        total_lines += 1
+
+                    # Reset for new paragraph
+                    current_char_counter = Counter()
+                    current_bold_counter = Counter()
+                    current_italic_counter = Counter()
+                    current_family_counter = {}
+                    current_lines = 0
+                    current_total_chars = 0
+                    last_left = text_line_hpos
+                    last_bottom = bottom
+                    continue
+
+            # Finalize last paragraph in block
+            if current_total_chars > 0 and current_char_counter:
+                dominant_size = max(current_char_counter, key=current_char_counter.get)
+                dominant_chars = current_char_counter[dominant_size]
+                paragraph_modes.append(dominant_size)
+
+                entry = size_stats.setdefault(dominant_size, {
+                    'char': 0,
+                    'bold': 0,
+                    'italic': 0,
+                    'families': Counter(),
+                    'blocks': 0,
+                })
+                entry['char'] += dominant_chars
+                entry['bold'] += current_bold_counter.get(dominant_size, 0)
+                entry['italic'] += current_italic_counter.get(dominant_size, 0)
+                if dominant_size in current_family_counter:
+                    entry['families'].update(current_family_counter[dominant_size])
+                entry['blocks'] += 1
+
+                block_size_entries.append({
+                    'size': dominant_size,
+                    'charCount': dominant_chars,
+                    'boldChars': current_bold_counter.get(dominant_size, 0),
+                    'italicChars': current_italic_counter.get(dominant_size, 0),
+                })
+
+                total_chars += dominant_chars
+                total_paragraphs += 1
+                total_lines += current_lines
+
+        if not size_stats:
+            return None, []
+
+        analysis = {
+            'size_stats': size_stats,
+            'total_chars': total_chars,
+            'total_blocks': total_paragraphs,
+            'total_lines': total_lines,
+            'block_sizes': block_size_entries,
+        }
+
+        return analysis, paragraph_modes
+
+    def _analyze_text_blocks(self, alto: str) -> Optional[Dict[str, Any]]:
+        root = self._parse_alto_root(alto)
+        if root is None:
+            return None
+
+        fonts = self._extract_text_styles(root)
+
+        text_blocks = root.findall('.//{http://www.loc.gov/standards/alto/ns-v3#}TextBlock')
+        if not text_blocks:
+            text_blocks = root.findall('.//{http://www.loc.gov/standards/alto/ns-v2#}TextBlock')
+
+        if not text_blocks:
+            return None
+
+        size_stats: Dict[float, Dict[str, Any]] = {}
+        total_chars = 0
+        total_blocks = 0
+        total_lines = 0
+        block_size_entries: List[Dict[str, Any]] = []
+
+        for block_elem in text_blocks:
+            size_char_counter: Dict[float, int] = {}
+            size_bold_counter: Dict[float, int] = {}
+            size_italic_counter: Dict[float, int] = {}
+            size_family_counter: Dict[float, Counter] = {}
+
+            block_total_chars = 0
+
+            text_lines = block_elem.findall('.//{http://www.loc.gov/standards/alto/ns-v3#}TextLine')
+            if not text_lines:
+                text_lines = block_elem.findall('.//{http://www.loc.gov/standards/alto/ns-v2#}TextLine')
+
+            if not text_lines:
+                continue
+
+            block_line_count = 0
+
+            for line in text_lines:
+                strings = []
+                for candidate in line.iter():
+                    candidate_tag = getattr(candidate, 'tag', '')
+                    if isinstance(candidate_tag, str) and candidate_tag.endswith('String'):
+                        strings.append(candidate)
+
+                line_has_content = False
+
+                for string_el in strings:
+                    content = string_el.get('CONTENT', '')
+                    subs_content = string_el.get('SUBS_CONTENT', '')
+                    subs_type = string_el.get('SUBS_TYPE', '')
+
+                    content = html.unescape(content)
+                    subs_content = html.unescape(subs_content)
+
+                    if subs_type == 'HypPart1':
+                        content = subs_content
+                    elif subs_type == 'HypPart2':
+                        continue
+
+                    text_value = content.strip()
+                    if not text_value:
+                        continue
+
+                    char_count = len(re.sub(r'\s+', '', text_value))
+                    if char_count <= 0:
+                        continue
+
+                    signature = self._string_style_signature(string_el, fonts)
+                    if signature is None:
+                        continue
+
+                    font_size_value = signature[0]
+                    if font_size_value is None or not isinstance(font_size_value, (int, float)):
+                        continue
+
+                    font_size = self._round_float(font_size_value, 2)
+                    if font_size is None:
+                        continue
+
+                    size_char_counter[font_size] = size_char_counter.get(font_size, 0) + char_count
+                    if signature[1]:
+                        size_bold_counter[font_size] = size_bold_counter.get(font_size, 0) + char_count
+                    if signature[2]:
+                        size_italic_counter[font_size] = size_italic_counter.get(font_size, 0) + char_count
+
+                    family = signature[3]
+                    if family:
+                        fam_counter = size_family_counter.setdefault(font_size, Counter())
+                        fam_counter[family] += char_count
+
+                    block_total_chars += char_count
+                    line_has_content = True
+
+                if line_has_content:
+                    block_line_count += 1
+
+            if block_total_chars < BLOCK_MIN_TOTAL_CHARS or not size_char_counter:
+                continue
+
+            mode_size, mode_chars = max(size_char_counter.items(), key=lambda item: item[1])
+
+            stats_entry = size_stats.setdefault(mode_size, {
+                'char': 0,
+                'bold': 0,
+                'italic': 0,
+                'families': Counter(),
+                'blocks': 0,
+            })
+
+            stats_entry['char'] += mode_chars
+            stats_entry['bold'] += size_bold_counter.get(mode_size, 0)
+            stats_entry['italic'] += size_italic_counter.get(mode_size, 0)
+            if mode_size in size_family_counter:
+                stats_entry['families'].update(size_family_counter[mode_size])
+            stats_entry['blocks'] += 1
+
+            total_chars += mode_chars
+            total_blocks += 1
+            total_lines += block_line_count
+
+            block_size_entries.append({
+                'size': mode_size,
+                'charCount': mode_chars,
+                'boldChars': size_bold_counter.get(mode_size, 0),
+                'italicChars': size_italic_counter.get(mode_size, 0),
+            })
+
+        if not size_stats:
+            return None
+
+        return {
+            'size_stats': size_stats,
+            'total_chars': total_chars,
+            'total_blocks': total_blocks,
+            'total_lines': total_lines,
+            'block_sizes': block_size_entries,
+        }
+
+    def _compute_wave_indices(self, total_pages: int, wave_index: int) -> List[int]:
+        if total_pages <= 0:
+            return []
+
+        sample_count = min(TEXT_SAMPLE_WAVE_SIZE, total_pages)
+        if sample_count <= 0:
+            return []
+
+        offsets = [0.0, 0.5, 0.25]
+        offset = offsets[wave_index] if wave_index < len(offsets) else 0.0
+        base = sample_count + 1
+        max_index = total_pages - 1
+
+        indices: List[int] = []
+        for i in range(sample_count):
+            fraction = (i + 1 + offset) / base
+            fraction = max(0.0, min(0.999, fraction))
+            index = int(round(fraction * max_index))
+            indices.append(index)
+
+        # Zachovat pořadí a odstranit duplikáty
+        seen: set[int] = set()
+        unique_indices: List[int] = []
+        for idx in indices:
+            if idx not in seen:
+                seen.add(idx)
+                unique_indices.append(idx)
+
+        return unique_indices
+
+    def summarize_book_text_format(self, book_uuid: str, pages: List[Dict[str, Any]]) -> Dict[str, Any]:
+        cache_key = book_uuid or ''
+        sample_target_default = TEXT_SAMPLE_WAVE_SIZE
+
+        if not cache_key:
+            return {
+                'average_height': None,
+                'confidence': 0,
+                'pages_used': 0,
+            }
+
+        cached = self._book_text_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        total_pages = len(pages)
+        if total_pages <= 0:
+            result = {
+                'average_height': None,
+                'confidence': 0,
+                'pages_used': 0,
+            }
+            self._book_text_cache[cache_key] = result
+            return result
+
+        def compute_average_height_for_page(page_uuid: str) -> Optional[Dict[str, Any]]:
+            print(f"[height-calc] Processing page {page_uuid}")
+            alto_xml = self.get_alto_data(page_uuid)
+            if not alto_xml:
+                print(f"[height-calc] No ALTO XML for page {page_uuid}")
+                return None
+            root = self._parse_alto_root(alto_xml)
+            if root is None:
+                print(f"[height-calc] Failed to parse ALTO XML for page {page_uuid}")
+                return None
+
+            text_lines = root.findall('.//{http://www.loc.gov/standards/alto/ns-v3#}TextLine')
+            if not text_lines:
+                text_lines = root.findall('.//{http://www.loc.gov/standards/alto/ns-v2#}TextLine')
+            print(f"[height-calc] Found {len(text_lines)} text lines for page {page_uuid}")
+
+            word_heights = []
+            for tl in text_lines:
+                string_els = tl.findall('.//{http://www.loc.gov/standards/alto/ns-v3#}String')
+                if not string_els:
+                    string_els = tl.findall('.//{http://www.loc.gov/standards/alto/ns-v2#}String')
+                for s in string_els:
+                    h = s.get('HEIGHT')
+                    if h:
+                        try:
+                            word_heights.append(float(h))
+                        except ValueError:
+                            continue
+            print(f"[height-calc] Found {len(word_heights)} word heights for page {page_uuid}")
+
+            if len(word_heights) < MIN_WORDS_PER_PAGE:
+                print(f"[height-calc] Only {len(word_heights)} words, less than minimum {MIN_WORDS_PER_PAGE}, skipping page {page_uuid}")
+                return None
+
+            # Compute mode of word heights
+            rounded_heights = [round(h, 1) for h in word_heights]
+            height_counts = Counter(rounded_heights)
+            mode_height = height_counts.most_common(1)[0][0]
+            print(f"[height-calc] Mode word height for page {page_uuid}: {mode_height}")
+            return {
+                'mode_height': mode_height,
+                'word_heights': word_heights,
+                'lines_count': len(text_lines),
+                'word_count': len(word_heights),
+                'uuid': page_uuid
+            }
+
+        heights_per_page = []
+        all_word_heights = []
+        pages_used = 0
+        total_lines_sampled = 0
+        total_words_sampled = 0
+        sampled_page_uuids = []
+
+        # Filtrovat stránky na pravděpodobně textové
+        text_pages = [p for p in pages if self._is_probably_text_page(p)]
+        print(f"[text-format] Filtered to {len(text_pages)} probable text pages out of {len(pages)} total")
+
+        if not text_pages:
+            print(f"[text-format] No text pages found, cannot calculate height")
+            result = {
+                'average_height': None,
+                'confidence': 0,
+                'pages_used': 0,
+            }
+            self._book_text_cache[cache_key] = result
+            return result
+
+        # Použít distribuované vzorkování
+        wave_index = 0
+        sampled_indices = self._compute_wave_indices(len(text_pages), wave_index)
+        initial_sample_count = len(sampled_indices)
+        print(f"[text-format] Wave {wave_index} sampling indices: {sampled_indices}")
+
+        for idx in sampled_indices:
+            page = text_pages[idx]
+            page_uuid = page.get('uuid')
+            if not page_uuid:
+                print(f"[text-format] Skipping page index {idx}, no UUID")
+                continue
+            page_data = compute_average_height_for_page(page_uuid)
+            if page_data is not None:
+                heights_per_page.append(page_data['mode_height'])
+                all_word_heights.extend(page_data['word_heights'])
+                pages_used += 1
+                total_lines_sampled += page_data['lines_count']
+                total_words_sampled += page_data['word_count']
+                sampled_page_uuids.append(page_data['uuid'])
+                print(f"[text-format] Added mode height {page_data['mode_height']} from page index {idx} (page {page.get('index', idx)})")
+            else:
+                print(f"[text-format] Failed to get height from page index {idx}")
+
+        if len(heights_per_page) < 2:
+            # Nedostatek dat pro výpočet variance
+            print(f"[text-format] Only {len(heights_per_page)} valid pages, need at least 2 for variance calculation")
+            result = {
+                'average_height': None,
+                'confidence': 0,
+                'pages_used': pages_used,
+            }
+            self._book_text_cache[cache_key] = result
+            return result
+
+        # Vyhodnotit rozptyl hodnot a případně přidat další vlny
+        print(f"[text-format] Heights per page: {heights_per_page}")
+        wave_index = 0  # už jsme udělali wave 0
+        while len(heights_per_page) > 1 and wave_index + 1 < TEXT_SAMPLE_MAX_WAVES:
+            stdev = statistics.stdev(heights_per_page)
+            mean = statistics.mean(heights_per_page)
+            print(f"[text-format] Wave {wave_index} stdev: {stdev}, mean: {mean}")
+            if stdev > 0.1 * mean:
+                wave_index += 1
+                additional_indices = self._compute_wave_indices(len(text_pages), wave_index)
+                print(f"[text-format] Adding wave {wave_index} with indices: {additional_indices}")
+                for idx in additional_indices:
+                    if idx >= len(text_pages):
+                        continue
+                    page = text_pages[idx]
+                    page_uuid = page.get('uuid')
+                    if not page_uuid:
+                        print(f"[text-format] Skipping additional page index {idx}, no UUID")
+                        continue
+                    page_data = compute_average_height_for_page(page_uuid)
+                    if page_data is not None:
+                        heights_per_page.append(page_data['mode_height'])
+                        all_word_heights.extend(page_data['word_heights'])
+                        pages_used += 1
+                        total_lines_sampled += page_data['lines_count']
+                        total_words_sampled += page_data['word_count']
+                        sampled_page_uuids.append(page_data['uuid'])
+                        print(f"[text-format] Added additional mode height {page_data['mode_height']} from page index {idx} (wave {wave_index})")
+                    else:
+                        print(f"[text-format] Failed to get additional height from page index {idx}")
+            else:
+                print(f"[text-format] Variance acceptable after wave {wave_index}, stopping")
+                break
+        if len(heights_per_page) <= 1:
+            print(f"[text-format] Only one height or less, skipping variance check")
+
+        if not heights_per_page:
+            print(f"[text-format] No heights collected, returning None")
+            result = {
+                'average_height': None,
+                'confidence': 0,
+                'pages_used': pages_used,
+            }
+            self._book_text_cache[cache_key] = result
+            return result
+
+        # Compute average of all word heights after removing outliers
+        if all_word_heights:
+            sorted_heights = sorted(all_word_heights)
+            q1 = statistics.quantiles(sorted_heights, n=4)[0]
+            q3 = statistics.quantiles(sorted_heights, n=4)[2]
+            iqr = q3 - q1
+            lower_bound = q1 - 1.5 * iqr
+            upper_bound = q3 + 1.5 * iqr
+            filtered_heights = [h for h in all_word_heights if lower_bound <= h <= upper_bound]
+            if filtered_heights:
+                final_mean = round(sum(filtered_heights) / len(filtered_heights), 2)
+                print(f"[text-format] Final mean height after outlier removal: {final_mean} from {len(filtered_heights)} words (out of {len(all_word_heights)} total)")
+            else:
+                final_mean = round(sum(all_word_heights) / len(all_word_heights), 2)
+                print(f"[text-format] No outliers removed, final mean height: {final_mean} from {len(all_word_heights)} words")
+        else:
+            final_mean = round(sum(heights_per_page) / len(heights_per_page), 2)
+            print(f"[text-format] No word heights, using page modes mean: {final_mean}")
+
+        if len(heights_per_page) > 1:
+            stdev = statistics.stdev(heights_per_page)
+            rel_var = stdev / final_mean if final_mean else 1
+            confidence = max(0, int(round(100 - rel_var * 100)))
+            print(f"[text-format] Final stdev: {stdev}, relative variance: {rel_var}, confidence: {confidence}")
+        else:
+            confidence = 100
+            print(f"[text-format] Single page, confidence: 100")
+
+        result = {
+            'basicTextStyle': {
+                'fontSize': final_mean,
+                'isBold': False,
+                'isItalic': False,
+                'fontFamily': '',
+                'styleId': '',
+            },
+            'confidence': confidence,
+            'sampledPages': pages_used,
+            'sampleTarget': TEXT_SAMPLE_WAVE_SIZE,
+            'linesSampled': total_lines_sampled,
+            'distinctStyles': len(set(heights_per_page)),
+            'sampledPageUuids': sampled_page_uuids,
+            'totalSamples': total_words_sampled,
+            'average_height': final_mean,
+            'pages_used': pages_used,
+        }
+
+        try:
+            log_payload = {
+                'book': book_uuid,
+                'average_height': final_mean,
+                'confidence': confidence,
+                'pages_used': pages_used,
+            }
+            print("[text-format] " + json.dumps(log_payload, ensure_ascii=False))
+        except Exception as err:
+            print(f"[text-format] Logging failed for book {book_uuid}: {err}")
+
+        self._book_text_cache[cache_key] = result
+        return result
+
     def get_item_json(self, uuid: str) -> Dict[str, Any]:
         normalized = self._strip_uuid_prefix(uuid)
         if not normalized:
@@ -54,7 +1002,7 @@ class AltoProcessor:
 
         url = f"{self.api_base_url}/item/uuid:{normalized}"
         try:
-            response = requests.get(url, timeout=20)
+            response = self.session.get(url, timeout=API_TIMEOUT)
             response.raise_for_status()
             return response.json()
         except Exception as exc:
@@ -68,7 +1016,7 @@ class AltoProcessor:
 
         url = f"{self.api_base_url}/item/uuid:{normalized}/children"
         try:
-            response = requests.get(url, timeout=25)
+            response = self.session.get(url, timeout=CHILDREN_TIMEOUT)
             response.raise_for_status()
             data = response.json()
             return data if isinstance(data, list) else []
@@ -83,7 +1031,7 @@ class AltoProcessor:
 
         url = f"{self.api_base_url}/item/uuid:{normalized}/streams/BIBLIO_MODS"
         try:
-            response = requests.get(url, timeout=25)
+            response = self.session.get(url, timeout=MODS_TIMEOUT)
             response.raise_for_status()
         except Exception as exc:
             print(f"Chyba při načítání MODS metadat {uuid}: {exc}")
@@ -228,6 +1176,25 @@ class AltoProcessor:
             "model": child.get('model'),
             "policy": child.get('policy'),
         }
+    
+    def _pick_book_uuid_from_context(self, item_data: Dict[str, Any]) -> Optional[str]:
+        """Z kontextové cesty vybere nejbližší 'knižní' předek.
+        Preferuje nejnižší (nejbližší) výskyt `monographunit`, pak `monograph`,
+        případně `periodicalitem`. Vrací UUID bez prefixu `uuid:` nebo None.
+        """
+        paths = item_data.get('context') or []
+        if not paths:
+            return None
+        # context[0] bývá cesta od rootu k listu (stránce); projdeme ji odspoda
+        path = paths[0] or []
+        for node in reversed(path):
+            model = (node.get('model') or '').lower()
+            pid = node.get('pid') or ''
+            if not pid:
+                continue
+            if model in ('monographunit', 'monograph', 'periodicalitem'):
+                return self._strip_uuid_prefix(pid)
+        return None
 
     def collect_book_pages(self, book_uuid: str, max_depth: int = 4) -> List[Dict[str, Any]]:
         visited: set[str] = set()
@@ -265,14 +1232,19 @@ class AltoProcessor:
 
         if model == 'page':
             page_data = item_data
-            root_pid = item_data.get('root_pid') or ''
-            book_uuid = self._strip_uuid_prefix(root_pid)
-            if not book_uuid and item_data.get('context'):
-                context_path = item_data['context'][0]
-                if context_path:
-                    book_uuid = self._strip_uuid_prefix(context_path[0].get('pid'))
+            # Nejprve vezmeme nejbližší knižní předek z context path (svazek/monografie/číslo)
+            book_uuid = self._pick_book_uuid_from_context(item_data) or ''
+            # Fallback: root_pid (může ukazovat na sérii; proto až druhý pokus)
+            if not book_uuid:
+                root_pid = item_data.get('root_pid') or ''
+                book_uuid = self._strip_uuid_prefix(root_pid)
         else:
-            book_uuid = self._strip_uuid_prefix(item_data.get('pid'))
+            # Když není stránka a je to rovnou kniha/svazek/číslo, použij ji přímo
+            if (model or '').lower() in ('monographunit', 'monograph', 'periodicalitem'):
+                book_uuid = self._strip_uuid_prefix(item_data.get('pid'))
+            else:
+                # Jiný uzel – zkusíme najít nejbližší knižní předek z contextu
+                book_uuid = self._pick_book_uuid_from_context(item_data) or self._strip_uuid_prefix(item_data.get('pid'))
 
         if not book_uuid:
             return None
@@ -313,6 +1285,8 @@ class AltoProcessor:
 
         resolved_index = current_index if current_index >= 0 else (page_summary.get('index') if page_summary else -1)
 
+        book_constants = self.summarize_book_text_format(book_uuid, pages)
+
         return {
             "book_uuid": book_uuid,
             "book": book_data,
@@ -322,13 +1296,14 @@ class AltoProcessor:
             "pages": pages,
             "mods": self.get_mods_metadata(book_uuid),
             "current_index": resolved_index,
+            "book_constants": book_constants,
         }
 
     def get_alto_data(self, uuid: str) -> str:
         """Stáhne ALTO XML data pro daný UUID"""
         url = f"https://kramerius5.nkp.cz/search/api/v5.0/item/uuid:{uuid}/streams/ALTO"
         try:
-            response = requests.get(url, timeout=30)
+            response = self.session.get(url, timeout=ALTO_TIMEOUT)
             response.raise_for_status()
             # Explicitně dekódujeme jako UTF-8
             content = response.content.decode('utf-8')
@@ -527,8 +1502,9 @@ class AltoProcessor:
 
         return text.strip()
 
+
     def get_blocks_for_reading(self, alto: str) -> List[Dict]:
-        """Získá bloky textu pro čtení"""
+        """Získá bloky textu pro čtení (sestavené z TextLine podle vertikálních mezer)."""
         try:
             root = ET.fromstring(alto)
         except ET.ParseError:
@@ -546,7 +1522,7 @@ class AltoProcessor:
         if print_space is None:
             print_space = root.find('.//{http://www.loc.gov/standards/alto/ns-v2#}PrintSpace')
 
-        if print_space is None:
+        if page is None or print_space is None:
             return []
 
         alto_height = int(page.get('HEIGHT', '0'))
@@ -554,72 +1530,59 @@ class AltoProcessor:
         alto_height2 = int(print_space.get('HEIGHT', '0'))
         alto_width2 = int(print_space.get('WIDTH', '0'))
 
-        aw = alto_width if alto_height > 0 and alto_width > 0 else alto_width2
-        ah = alto_height if alto_height > 0 and alto_width > 0 else alto_height2
+        aw = alto_width if (alto_height > 0 and alto_width > 0) else alto_width2
+        ah = alto_height if (alto_height > 0 and alto_width > 0) else alto_height2
 
-        blocks = []
-        # Během průchodu skládáme aktuální blok; bbox slouží pro případné zvýraznění
+        # Posbírej řádky
+        text_lines = [el for el in root.iter() if getattr(el, 'tag', '').endswith('TextLine')]
+
+        blocks: List[Dict[str, Any]] = []
         block = {'text': '', 'hMin': 0, 'hMax': 0, 'vMin': 0, 'vMax': 0, 'width': aw, 'height': ah}
 
-        text_lines = []
-        for elem in root.iter():
-            if elem.tag.endswith('TextLine'):
-                text_lines.append(elem)
-
-        lines = 0
         last_bottom = 0
-
         for text_line in text_lines:
-            text_line_width = int(text_line.get('WIDTH', '0'))
+            # ignoruj velmi krátké pseudo-řádky
+            text_line_width = int(text_line.get('WIDTH', '0') or 0)
             if text_line_width < 50:
                 continue
 
-            text_line_height = int(text_line.get('HEIGHT', '0'))
-            text_line_vpos = int(text_line.get('VPOS', '0'))
-            bottom = text_line_vpos + text_line_height
-            diff = text_line_vpos - last_bottom
+            hpos = int(text_line.get('HPOS', '0') or 0)
+            vpos = int(text_line.get('VPOS', '0') or 0)
+            height = int(text_line.get('HEIGHT', '0') or 0)
+            bottom = vpos + height
 
-            if last_bottom > 0 and diff > 50:
-                # Větší mezera značí nový odstavec; mezi bloky vkládáme oddělovač
-                if block['text']:
-                    block['text'] += '. -- -- '
+            # Nový odstavec, když je větší mezera mezi předchozím a aktuálním řádkem
+            if last_bottom > 0 and (vpos - last_bottom) > 50:
+                if block['text'].strip():
+                    blocks.append(block)
+                block = {'text': '', 'hMin': 0, 'hMax': 0, 'vMin': 0, 'vMax': 0, 'width': aw, 'height': ah}
+
+            # Přidání textu řádku
+            line_parts: List[str] = []
+            for elem in text_line.iter():
+                if getattr(elem, 'tag', '').endswith('String'):
+                    content = elem.get('CONTENT', '') or ''
+                    subs_content = elem.get('SUBS_CONTENT', '') or ''
+                    subs_type = elem.get('SUBS_TYPE', '') or ''
+                    if subs_type == 'HypPart1':
+                        content = subs_content
+                    elif subs_type == 'HypPart2':
+                        continue
+                    line_parts.append(content)
+
+            line_text = ' '.join(p for p in line_parts if p).strip()
+            if line_text:
+                if not block['text']:
+                    block['hMin'] = hpos
+                    block['vMin'] = vpos
+                block['text'] += line_text + '\n'
+                block['hMax'] = max(block['hMax'], hpos + text_line_width)
+                block['vMax'] = max(block['vMax'], bottom)
 
             last_bottom = bottom
-            lines += 1
 
-            strings = []
-            for elem in text_line.iter():
-                if elem.tag.endswith('String'):
-                    strings.append(elem)
-
-            for string_el in strings:
-                string_hpos = int(string_el.get('HPOS', '0'))
-                string_vpos = int(string_el.get('VPOS', '0'))
-                string_width = int(string_el.get('WIDTH', '0'))
-                string_height = int(string_el.get('HEIGHT', '0'))
-
-                if block['hMin'] == 0 or block['hMin'] > string_hpos:
-                    block['hMin'] = string_hpos
-                if block['hMax'] == 0 or block['hMax'] < string_hpos + string_width:
-                    block['hMax'] = string_hpos + string_width
-                if block['vMin'] == 0 or block['vMin'] > string_vpos:
-                    block['vMin'] = string_vpos
-                if block['vMax'] == 0 or block['vMax'] < string_vpos + string_height:
-                    block['vMax'] = string_vpos + string_height
-
-                content = string_el.get('CONTENT', '')
-                block['text'] += content
-
-                if lines >= 3 and len(block['text']) > 120 and (content.endswith('.') or content.endswith(';')):
-                    # Delší souvislý text uzavíráme do samostatného bloku
-                    if block['text']:
-                        blocks.append(block)
-                    block = {'text': '', 'hMin': 0, 'hMax': 0, 'vMin': 0, 'vMax': 0, 'width': aw, 'height': ah}
-                    lines = 0
-                else:
-                    block['text'] += ' '
-
-        if block['text']:
+        # poslední blok
+        if block['text'].strip():
             blocks.append(block)
 
         return blocks

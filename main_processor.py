@@ -10,7 +10,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import xml.etree.ElementTree as ET
 from typing import List, Dict, Tuple, Optional, Any
-from collections import Counter
+from collections import Counter, defaultdict
 import html
 import re
 import sys
@@ -27,6 +27,14 @@ HORIZONTAL_SHIFT_MULTIPLIER = 0.85  # Kandidát prahu = medián kladných posun�
 HORIZONTAL_MIN_THRESHOLD = 12   # Minimální povolený práh pro horizontální dělení (v ALTO jednotkách).
 NEGATIVE_SHIFT_MULTIPLIER = 0.85  # Negativní hranice = horizontální práh * tato hodnota (víc citlivá než pozitivní).
 FALLBACK_THRESHOLD = 40        # Záložní hodnota, pokud nelze heuristiku spočítat.
+
+# Konstanty pro rozhodování o nadpisech na základě výšky slov
+HEADING_H2_RATIO = 1.08         # Práh pro h2: 1.08 * průměrná výška
+HEADING_H1_RATIO = 1.6         # Práh pro h1: 1.6 * průměrná výška
+HEADING_MIN_WORD_RATIO_DEFAULT = 0.75   # Výchozí minimální podíl slov v bloku, které musí překročit práh (margin of error pro OCR)
+HEADING_FONT_GAP_THRESHOLD = 1.2        # Práh pro rozdíl ve velikosti fontu pro identifikaci nadpisových fontů
+HEADING_FONT_RATIO_MULTIPLIER = 0.5     # Koeficient pro snížení prahu pro bloky s nadpisovými fonty
+HEADING_FONT_MAX_RATIO = 0.4            # Maximální podíl řádků s fontem, aby byl považován za nadpisový
 
 # Centralized HTTP timeouts (seconds)
 API_TIMEOUT = 25
@@ -291,6 +299,9 @@ class AltoProcessor:
 
                 previous_bottom = record['bottom']
                 previous_left = record['hpos']
+
+            print(f"DEBUG: vertical_gaps={vertical_gaps}")
+            print(f"DEBUG: horizontal_shifts={horizontal_shifts}")
 
             median_height = statistics.median(line_heights) if line_heights else 0
             positive_gaps = [gap for gap in vertical_gaps if gap > 0]
@@ -1587,7 +1598,7 @@ class AltoProcessor:
 
         return blocks
 
-    def get_formatted_text(self, alto: str, uuid: str, width: int, height: int) -> str:
+    def get_formatted_text(self, alto: str, uuid: str, width: int, height: int, average_height: Optional[float] = None) -> str:
         """Hlavní funkce pro formátovaný text - převedená z TypeScript"""
         try:
             from lxml import etree
@@ -1638,32 +1649,120 @@ class AltoProcessor:
 
         blocks = []
 
-        def finalize_block(block_data):
+        def finalize_block(block_data, word_heights, average_height, heading_fonts):
             """Po spojení řádků uloží blok, pokud není prázdný."""
+
             text_content = ' '.join(block_data['lines']).strip()
-            if text_content:
-                blocks.append({'text': text_content, 'tag': block_data['tag']})
+            if not text_content:
+                return
+
+            tag = block_data['tag']
+
+            if tag != 'h3' and average_height is not None and word_heights:
+                max_font = max(block_data['font_sizes']) if block_data['font_sizes'] else 0
+
+                if max_font in heading_fonts:
+                    min_ratio = HEADING_MIN_WORD_RATIO_DEFAULT * HEADING_FONT_RATIO_MULTIPLIER
+                else:
+                    min_ratio = HEADING_MIN_WORD_RATIO_DEFAULT
+
+                count_above_h1 = sum(1 for h in word_heights if h >= average_height * HEADING_H1_RATIO)
+                count_above_h2 = sum(1 for h in word_heights if h >= average_height * HEADING_H2_RATIO)
+                total_words = len(word_heights)
+
+                if total_words > 0:
+                    if count_above_h1 / total_words >= min_ratio:
+                        tag = 'h1'
+                    elif count_above_h2 / total_words >= min_ratio:
+                        tag = 'h2'
+                    else:
+                        tag = 'p'
+                else:
+                    tag = 'p'
+
+                # Debug print for block details
+                print(f"DEBUG finalize_block: text='{text_content[:100]}...', tag={tag}, max_font={max_font}, average_height={average_height}, word_heights={word_heights}, count_above_h1={count_above_h1}, count_above_h2={count_above_h2}, total_words={total_words}, min_ratio={min_ratio:.3f}")
+
+            blocks.append({'text': text_content, 'tag': tag})
+
+        # Pokud average_height není poskytnut, načteme z kontextu knihy
+        if average_height is None and uuid:
+            context = self.get_book_context(uuid)
+            average_height = context.get('book_constants', {}).get('average_height') if context else None
 
         # Zpracování TextBlocků
         text_blocks = root.findall('.//{http://www.loc.gov/standards/alto/ns-v3#}TextBlock')
         if not text_blocks:
             text_blocks = root.findall('.//{http://www.loc.gov/standards/alto/ns-v2#}TextBlock')
 
+        print(f"DEBUG: Found {len(text_blocks)} TextBlocks")
+
+        # Pre-scan all text lines to build font_counts based on characters
+        font_counts = defaultdict(int)
         for block_elem in text_blocks:
-            style_refs = block_elem.get('STYLEREFS', '')
-            tag = 'p'
+            text_lines = block_elem.findall('.//{http://www.loc.gov/standards/alto/ns-v3#}TextLine')
+            if not text_lines:
+                text_lines = block_elem.findall('.//{http://www.loc.gov/standards/alto/ns-v2#}TextLine')
+            for text_line in text_lines:
+                text_line_width = int(text_line.get('WIDTH', '0'))
+                if text_line_width < 50:
+                    continue
+                style_ref = text_line.get('STYLEREFS') or block_elem.get('STYLEREFS', '')
+                current_line_font_size = 0
+                if style_ref:
+                    parts = style_ref.split()
+                    if len(parts) > 1:
+                        font_id = parts[1]
+                        current_line_font_size = fonts.get(font_id, 0)
+                strings = text_line.findall('.//{http://www.loc.gov/standards/alto/ns-v3#}String')
+                if not strings:
+                    strings = text_line.findall('.//{http://www.loc.gov/standards/alto/ns-v2#}String')
+                total_char_in_line = 0
+                for string_el in strings:
+                    content = string_el.get('CONTENT', '')
+                    subs_content = string_el.get('SUBS_CONTENT', '')
+                    subs_type = string_el.get('SUBS_TYPE', '')
+                    content = html.unescape(content)
+                    subs_content = html.unescape(subs_content)
+                    if subs_type == 'HypPart1':
+                        content = subs_content
+                    elif subs_type == 'HypPart2':
+                        continue
+                    text_value = content.strip()
+                    if text_value:
+                        char_count = len(re.sub(r'\s+', '', text_value))
+                        total_char_in_line += char_count
+                font_counts[current_line_font_size] += total_char_in_line
 
-            if ' ' in style_refs:
-                parts = style_refs.split()
-                if len(parts) > 1:
-                    font_id = parts[1]
-                    size = fonts.get(font_id, 0)
-                    # Hrubá heuristika pro převod větších fontů na nadpisy
-                    if size > 18:
-                        tag = 'h1'
-                    elif size > 11:
-                        tag = 'h2'
+        # Identifikace nadpisových fontů na základě rozdílů ve velikostech a zastoupení
+        sorted_sizes = sorted(set(fonts.values()), reverse=True)
+        heading_fonts = []
+        boundary_found = False
+        for i in range(len(sorted_sizes) - 1):
+            if sorted_sizes[i] > sorted_sizes[i + 1] * HEADING_FONT_GAP_THRESHOLD:
+                # Found boundary, collect all sizes above it
+                candidate_sizes = sorted_sizes[:i+1]
+                # Check combined ratio
+                total_candidate_chars = sum(font_counts.get(size, 0) for size in candidate_sizes)
+                total_chars = sum(font_counts.values())
+                if total_chars > 0:
+                    combined_ratio = total_candidate_chars / total_chars
+                    if combined_ratio <= HEADING_FONT_MAX_RATIO:
+                        heading_fonts.extend(candidate_sizes)
+                boundary_found = True
+                break
+        if not boundary_found:
+            # No boundary found, check if the largest font is rare enough
+            if sorted_sizes:
+                largest_size = sorted_sizes[0]
+                largest_chars = font_counts.get(largest_size, 0)
+                total_chars = sum(font_counts.values())
+                if total_chars > 0 and largest_chars / total_chars <= HEADING_FONT_MAX_RATIO:
+                    heading_fonts.append(largest_size)
 
+        print(f"DEBUG: heading_fonts={heading_fonts}, font_counts={dict(font_counts)}")
+
+        for block_elem in text_blocks:
             text_lines = block_elem.findall('.//{http://www.loc.gov/standards/alto/ns-v3#}TextLine')
             if not text_lines:
                 text_lines = block_elem.findall('.//{http://www.loc.gov/standards/alto/ns-v2#}TextLine')
@@ -1689,6 +1788,8 @@ class AltoProcessor:
 
             if not line_records:
                 continue
+
+            current_block = {'lines': [], 'tag': 'p', 'font_sizes': set(), 'word_heights': []}
 
             line_heights = [record['height'] for record in line_records]
             line_widths = [record['width'] for record in line_records]
@@ -1753,7 +1854,17 @@ class AltoProcessor:
             else:
                 horizontal_threshold = FALLBACK_THRESHOLD
 
-            current_block = {'lines': [], 'tag': tag}
+            print(f"DEBUG: line_heights={line_heights}")
+            print(f"DEBUG: line_widths={line_widths}")
+            print(f"DEBUG: vertical_gaps={vertical_gaps}, horizontal_shifts={horizontal_shifts}")
+            print(f"DEBUG: median_height={median_height}, median_width={median_width}, median_gap={median_gap}, median_shift={median_shift}")
+            print(f"DEBUG: trimmed_shifts={trimmed_shifts}")
+            print(f"DEBUG: vertical_threshold_candidates={vertical_threshold_candidates}, horizontal_threshold_candidates={horizontal_threshold_candidates}")
+            print(f"DEBUG: vertical_threshold={vertical_threshold}, horizontal_threshold={horizontal_threshold}")
+            print(f"DEBUG: heading_fonts={heading_fonts}, font_counts={dict(font_counts)}")
+
+            tag = 'p'
+            current_block = {'lines': [], 'tag': tag, 'font_sizes': set(), 'word_heights': []}
             lines = 0
             last_bottom = None
             last_left = None
@@ -1764,37 +1875,60 @@ class AltoProcessor:
                 text_line_hpos = record['hpos']
                 bottom = record['bottom']
 
+                # Extract font size for current line from STYLEREFS on TextLine or inherit from TextBlock
+                style_ref = text_line.get('STYLEREFS') or block_elem.get('STYLEREFS', '')
+                current_line_font_size = 0
+                if style_ref:
+                    parts = style_ref.split()
+                    if len(parts) > 1:
+                        font_id = parts[1]
+                        current_line_font_size = fonts.get(font_id, 0)
+
+
+
                 if last_bottom is not None:
                     v_diff = text_line_vpos - last_bottom
+                    print(f"DEBUG: v_diff={v_diff}, vertical_threshold={vertical_threshold}")
                     if v_diff > vertical_threshold:
+                        print(f"DEBUG: Splitting on v_diff={v_diff} > {vertical_threshold}")
                         # Velká vertikální mezera = nový blok textu
                         if current_block['lines']:
-                            finalize_block(current_block)
-                        current_block = {'lines': [], 'tag': tag}
+                            finalize_block(current_block, current_block['word_heights'], average_height, heading_fonts)
+                        current_block = {'lines': [], 'tag': tag, 'font_sizes': set(), 'word_heights': []}
                         lines = 0
 
                 last_bottom = bottom
 
                 if last_left is not None:
                     h_diff = text_line_hpos - last_left
-                    if h_diff > horizontal_threshold:
-                        # Podobně reagujeme na výrazný horizontální posun (např. tabulky, sloupce)
+                    # Check font size difference threshold (e.g., 1.2x)
+                    font_size_differs = False
+                    if last_line_font_size and current_line_font_size:
+                        ratio = max(last_line_font_size, current_line_font_size) / min(last_line_font_size, current_line_font_size)
+                        if ratio >= 1.2:
+                            font_size_differs = True
+
+                    if (h_diff > horizontal_threshold and h_diff < horizontal_threshold * 5) or font_size_differs:
+                        print(f"DEBUG: Horizontal split on h_diff={h_diff} > {horizontal_threshold} and < {horizontal_threshold * 5} or font_size_differs={font_size_differs}")
+                        # Podobně reagujeme na výrazný horizontální posun nebo rozdíl fontu (např. tabulky, sloupce, nadpisy)
                         if current_block['lines']:
-                            finalize_block(current_block)
-                        current_block = {'lines': [], 'tag': tag}
+                            finalize_block(current_block, current_block['word_heights'], average_height, heading_fonts)
+                        current_block = {'lines': [], 'tag': tag, 'font_sizes': set(), 'word_heights': []}
                         lines = 0
-                    elif h_diff < 0 and abs(h_diff) > horizontal_threshold * NEGATIVE_SHIFT_MULTIPLIER and current_block['lines']:
-                        if len(current_block['lines']) > 1:
-                            for previous_line in current_block['lines'][:-1]:
-                                finalize_block({'lines': [previous_line], 'tag': current_block['tag']})
-                            current_block = {'lines': [current_block['lines'][-1]], 'tag': current_block['tag']}
-                        lines = len(current_block['lines'])
+                    # Disabled negative shift split to keep indented lines in the same paragraph
+                    # elif h_diff < 0 and abs(h_diff) > horizontal_threshold * NEGATIVE_SHIFT_MULTIPLIER and current_block['lines']:
+                    #     if len(current_block['lines']) > 1:
+                    #         for previous_line in current_block['lines'][:-1]:
 
                 last_left = text_line_hpos
+                last_line_font_size = current_line_font_size
 
                 strings = text_line.findall('.//{http://www.loc.gov/standards/alto/ns-v3#}String')
                 if not strings:
                     strings = text_line.findall('.//{http://www.loc.gov/standards/alto/ns-v2#}String')
+
+                line_text = ' '.join([string_el.get('CONTENT', '') for string_el in strings]).strip()
+                print(f"DEBUG: Processing line at hpos={text_line_hpos}, previous_left={last_left}, line_text='{line_text[:50]}...'")
 
                 line_parts = []
                 line_all_bold = True
@@ -1817,6 +1951,14 @@ class AltoProcessor:
                     elif subs_type == 'HypPart2':
                         continue
 
+                    height = string_el.get('HEIGHT')
+                    if height:
+                        current_block['word_heights'].append(float(height))
+
+                    # Use the line's font size for all strings in the line
+                    if current_line_font_size:
+                        current_block['font_sizes'].add(current_line_font_size)
+
                     if content:
                         line_parts.append(content)
 
@@ -1828,8 +1970,8 @@ class AltoProcessor:
 
                 # Logika pro <h3> - shodná s původní TypeScript implementací
                 if prospective_count == 1 and line_all_bold:
-                    finalize_block({'lines': [line_text], 'tag': 'h3'})
-                    current_block = {'lines': [], 'tag': tag}
+                    finalize_block({'lines': [line_text], 'tag': 'h3', 'font_sizes': set(), 'word_heights': []}, [], average_height, heading_fonts)
+                    current_block = {'lines': [], 'tag': tag, 'font_sizes': set(), 'word_heights': []}
                     lines = 0
                     last_left = text_line_hpos
                     last_bottom = bottom
@@ -1839,7 +1981,7 @@ class AltoProcessor:
                 lines = len(current_block['lines'])
 
             if current_block['lines']:
-                finalize_block(current_block)
+                finalize_block(current_block, current_block['word_heights'], average_height, heading_fonts)
 
         # Generování HTML - přesně jako v TypeScript
         result = ""

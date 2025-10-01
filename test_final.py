@@ -11,7 +11,7 @@ def test_processor():
     processor = AltoProcessor()
 
     # Test UUID
-    test_uuid = "673320dd-0071-4a03-bf82-243ee206bc0b"
+    test_uuid = "0f7d662c-56c7-4d62-aaa0-e6743158e8d5"
 
     print("=== Test ALTO Procesoru ===")
     print(f"Testuji s UUID: {test_uuid}")

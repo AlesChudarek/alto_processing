@@ -1397,6 +1397,31 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             }
         }
 
+        function makeDraggable(element) {
+            let pos1 = 0, pos2 = 0, pos3 = 0, pos4 = 0;
+            element.onmousedown = dragMouseDown;
+            function dragMouseDown(e) {
+                e.preventDefault();
+                pos3 = e.clientX;
+                pos4 = e.clientY;
+                document.onmouseup = closeDragElement;
+                document.onmousemove = elementDrag;
+            }
+            function elementDrag(e) {
+                e.preventDefault();
+                pos1 = pos3 - e.clientX;
+                pos2 = pos4 - e.clientY;
+                pos3 = e.clientX;
+                pos4 = e.clientY;
+                element.style.top = (element.offsetTop - pos2) + "px";
+                element.style.left = (element.offsetLeft - pos1) + "px";
+            }
+            function closeDragElement() {
+                document.onmouseup = null;
+                document.onmousemove = null;
+            }
+        }
+
         window.onload = function () {
             const prev = document.getElementById("prev-page");
             const next = document.getElementById("next-page");
@@ -1437,14 +1462,23 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 altoBtn.style.color = "#007bff";
                 altoBtn.style.cursor = "pointer";
                 altoBtn.style.textDecoration = "underline";
-                altoBtn.addEventListener("click", () => {
-                    const modal = document.getElementById("alto-modal");
-                    const content = document.getElementById("alto-content");
-                    if (modal && content) {
-                        content.textContent = currentAltoXml;
-                        modal.style.display = "block";
+            altoBtn.addEventListener("click", () => {
+                const modal = document.getElementById("alto-modal");
+                const content = document.getElementById("alto-content");
+                if (modal && content) {
+                    content.textContent = currentAltoXml;
+                    modal.style.display = "block";
+                    const modalContent = modal.querySelector('.modal-content');
+                    if (modalContent) {
+                        // Set initial position to center
+                        modalContent.style.top = '';
+                        modalContent.style.left = '';
+                        modalContent.style.transform = 'translate(-50%, -50%)';
+                        // Make draggable
+                        makeDraggable(modalContent);
                     }
-                });
+                }
+            });
             }
 
             const closeBtn = document.querySelector(".close");

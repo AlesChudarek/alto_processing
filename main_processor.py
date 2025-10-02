@@ -22,7 +22,7 @@ import json
 VERTICAL_GAP_MULTIPLIER = 2.5   # Kolikrát musí být mezera mezi řádky větší než typická mezera, aby vznikl nový blok.
 VERTICAL_HEIGHT_RATIO = 0.85    # Poměr k mediánu výšky řádku, přispívá k prahu pro rozdělení bloku.
 VERTICAL_MAX_FACTOR = 3         # Horní limit pro vertikální práh v násobcích mediánu výšky řádku.
-HORIZONTAL_WIDTH_RATIO = 0.012  # Kandidát prahu = medián šířek řádků * tato hodnota (nižší = citlivější).
+HORIZONTAL_WIDTH_RATIO = 0.066  # Kandidát prahu = medián šířek řádků * tato hodnota (nižší = citlivější).
 HORIZONTAL_SHIFT_MULTIPLIER = 0.85  # Kandidát prahu = medián kladných posunů * tato hodnota.
 HORIZONTAL_MIN_THRESHOLD = 12   # Minimální povolený práh pro horizontální dělení (v ALTO jednotkách).
 NEGATIVE_SHIFT_MULTIPLIER = 0.85  # Negativní hranice = horizontální práh * tato hodnota (víc citlivá než pozitivní).
@@ -1916,10 +1916,16 @@ class AltoProcessor:
                             finalize_block(current_block, current_block['word_heights'], average_height, heading_fonts)
                         current_block = {'lines': [], 'tag': tag, 'font_sizes': set(), 'word_heights': []}
                         lines = 0
-                    # Disabled negative shift split to keep indented lines in the same paragraph
-                    # elif h_diff < 0 and abs(h_diff) > horizontal_threshold * NEGATIVE_SHIFT_MULTIPLIER and current_block['lines']:
-                    #     if len(current_block['lines']) > 1:
-                    #         for previous_line in current_block['lines'][:-1]:
+                    elif h_diff < 0 and abs(h_diff) > horizontal_threshold * NEGATIVE_SHIFT_MULTIPLIER and current_block['lines']:
+                        print(f"DEBUG: Negative split on h_diff={h_diff}, abs(h_diff)={abs(h_diff)} > {horizontal_threshold * NEGATIVE_SHIFT_MULTIPLIER}")
+                        # Negative horizontal shift indicates indented line, so previous lines were single-line paragraphs that should be split
+                        if len(current_block['lines']) > 1:
+                            # Finalize each previous line as a separate paragraph
+                            for previous_line in current_block['lines'][:-1]:
+                                finalize_block({'lines': [previous_line], 'tag': tag, 'font_sizes': set(), 'word_heights': []}, [], average_height, heading_fonts)
+                            # Reset current block to start with the last line
+                            current_block = {'lines': [current_block['lines'][-1]], 'tag': tag, 'font_sizes': set(), 'word_heights': []}
+                            lines = 1
 
                 last_left = text_line_hpos
                 last_line_font_size = current_line_font_size

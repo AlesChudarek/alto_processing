@@ -33,8 +33,8 @@ CENTER_ALIGNMENT_MIN_LINE_LEN_DIFF = 0.1  # 10% minimum difference between short
 
 # Konstanty pro rozhodování o nadpisech na základě výšky slov
 HEADING_H2_RATIO = 1.08         # Práh pro h2: 1.08 * průměrná výška
-HEADING_H1_RATIO = 1.6         # Práh pro h1: 1.6 * průměrná výška
-HEADING_MIN_WORD_RATIO_DEFAULT = 0.75   # Výchozí minimální podíl slov v bloku, které musí překročit práh (margin of error pro OCR)
+HEADING_H1_RATIO = 2         # Práh pro h1: 1.6 * průměrná výška
+HEADING_MIN_WORD_RATIO_DEFAULT = 0.81   # Výchozí minimální podíl slov v bloku, které musí překročit práh (margin of error pro OCR)
 HEADING_FONT_GAP_THRESHOLD = 1.2        # Práh pro rozdíl ve velikosti fontu pro identifikaci nadpisových fontů
 HEADING_FONT_RATIO_MULTIPLIER = 0.5     # Koeficient pro snížení prahu pro bloky s nadpisovými fonty
 HEADING_FONT_MAX_RATIO = 0.4            # Maximální podíl řádků s fontem, aby byl považován za nadpisový
@@ -498,6 +498,7 @@ class AltoProcessor:
                     current_total_chars += char_count
                     line_has_content = True
 
+                    print(f"DEBUG string: content='{content}', style='{style}', is_bold={signature[1]}")
                     if signature[1]:  # bold
                         current_bold_counter[font_size] += char_count
 
@@ -1676,17 +1677,20 @@ class AltoProcessor:
                 if total_words > 0:
                     if count_above_h1 / total_words >= min_ratio:
                         tag = 'h1'
+                        print(f"DEBUG finalize_block: changed to h1, count_above_h1={count_above_h1}, total_words={total_words}, ratio={count_above_h1 / total_words:.3f} >= {min_ratio:.3f}")
                     elif count_above_h2 / total_words >= min_ratio:
                         tag = 'h2'
+                        print(f"DEBUG finalize_block: changed to h2, count_above_h2={count_above_h2}, total_words={total_words}, ratio={count_above_h2 / total_words:.3f} >= {min_ratio:.3f}")
                     else:
                         tag = 'p'
+                        print(f"DEBUG finalize_block: stayed p, count_above_h1={count_above_h1}, count_above_h2={count_above_h2}, total_words={total_words}, min_ratio={min_ratio:.3f}")
                 else:
                     tag = 'p'
 
                 # Debug print for block details
                 print(f"DEBUG finalize_block: text='{text_content[:100]}...', tag={tag}, max_font={max_font}, average_height={average_height}, word_heights={word_heights}, count_above_h1={count_above_h1}, count_above_h2={count_above_h2}, total_words={total_words}, min_ratio={min_ratio:.3f}")
 
-            blocks.append({'text': text_content, 'tag': tag, 'centered': block_data.get('centered', False)})
+            blocks.append({'text': text_content, 'tag': tag, 'centered': block_data.get('centered', False), 'all_bold': block_data.get('all_bold', False)})
 
         # Pokud average_height není poskytnut, načteme z kontextu knihy
         if average_height is None and uuid:
@@ -1792,7 +1796,7 @@ class AltoProcessor:
             if not line_records:
                 continue
 
-            current_block = {'lines': [], 'tag': 'p', 'font_sizes': set(), 'word_heights': []}
+            current_block = {'lines': [], 'tag': 'p', 'font_sizes': set(), 'word_heights': [], 'all_bold': True}
 
             line_heights = [record['height'] for record in line_records]
             line_widths = [record['width'] for record in line_records]
@@ -1890,7 +1894,7 @@ class AltoProcessor:
             print(f"DEBUG: is_center_aligned={is_center_aligned}")
 
             tag = 'p'
-            current_block = {'lines': [], 'tag': tag, 'font_sizes': set(), 'word_heights': [], 'centered': is_center_aligned}
+            current_block = {'lines': [], 'tag': tag, 'font_sizes': set(), 'word_heights': [], 'centered': is_center_aligned, 'all_bold': True}
             lines = 0
             last_bottom = None
             last_left = None
@@ -1918,7 +1922,7 @@ class AltoProcessor:
                         # Velká vertikální mezera = nový blok textu
                         if current_block['lines']:
                             finalize_block(current_block, current_block['word_heights'], average_height, heading_fonts)
-                        current_block = {'lines': [], 'tag': tag, 'font_sizes': set(), 'word_heights': [], 'centered': is_center_aligned}
+                        current_block = {'lines': [], 'tag': tag, 'font_sizes': set(), 'word_heights': [], 'centered': is_center_aligned, 'all_bold': True}
                         lines = 0
 
                 last_bottom = bottom
@@ -1939,7 +1943,7 @@ class AltoProcessor:
                         # Podobně reagujeme na výrazný horizontální posun nebo rozdíl fontu (např. tabulky, sloupce, nadpisy)
                         if current_block['lines']:
                             finalize_block(current_block, current_block['word_heights'], average_height, heading_fonts)
-                        current_block = {'lines': [], 'tag': tag, 'font_sizes': set(), 'word_heights': [], 'centered': is_center_aligned}
+                        current_block = {'lines': [], 'tag': tag, 'font_sizes': set(), 'word_heights': [], 'centered': is_center_aligned, 'all_bold': True}
                         lines = 0
                     elif h_diff < 0 and abs(h_diff) > horizontal_threshold * NEGATIVE_SHIFT_MULTIPLIER and current_block['lines']:
                         print(f"DEBUG: Negative split on h_diff={h_diff}, abs(h_diff)={abs(h_diff)} > {horizontal_threshold * NEGATIVE_SHIFT_MULTIPLIER}")
@@ -1949,7 +1953,7 @@ class AltoProcessor:
                             for previous_line in current_block['lines'][:-1]:
                                 finalize_block({'lines': [previous_line], 'tag': tag, 'font_sizes': set(), 'word_heights': []}, [], average_height, heading_fonts)
                             # Reset current block to start with the last line
-                            current_block = {'lines': [current_block['lines'][-1]], 'tag': tag, 'font_sizes': set(), 'word_heights': [], 'centered': is_center_aligned}
+                            current_block = {'lines': [current_block['lines'][-1]], 'tag': tag, 'font_sizes': set(), 'word_heights': [], 'centered': is_center_aligned, 'all_bold': True}
                             lines = 1
 
                 last_left = text_line_hpos
@@ -1967,6 +1971,7 @@ class AltoProcessor:
 
                 for string_el in strings:
                     style = string_el.get('STYLE', '')
+                    print(f"DEBUG line_all_bold check: style='{style}', 'bold' in style={ 'bold' in style}")
                     if not style or 'bold' not in style:
                         line_all_bold = False
 
@@ -1994,26 +1999,40 @@ class AltoProcessor:
                     if content:
                         line_parts.append(content)
 
+                if not line_all_bold:
+                    current_block['all_bold'] = False
+
                 line_text = ' '.join(line_parts).strip()
                 if not line_text:
                     continue
 
                 prospective_count = lines + 1
 
-                # # Logika pro <h3> - shodná s původní TypeScript implementací
-                # if prospective_count == 1 and line_all_bold:
-                #     finalize_block({'lines': [line_text], 'tag': 'h3', 'font_sizes': set(), 'word_heights': []}, [], average_height, heading_fonts)
-                #     current_block = {'lines': [], 'tag': tag, 'font_sizes': set(), 'word_heights': []}
-                #     lines = 0
-                #     last_left = text_line_hpos
-                #     last_bottom = bottom
-                #     continue
-
                 current_block['lines'].append(line_text)
                 lines = len(current_block['lines'])
 
             if current_block['lines']:
                 finalize_block(current_block, current_block['word_heights'], average_height, heading_fonts)
+
+        # After all blocks are finalized, apply the new logic for h3 detection based on bold paragraphs and neighbors
+        for i, block in enumerate(blocks):
+            print(f"DEBUG post-processing: block '{block['text'][:50]}...', tag={block['tag']}, all_bold={block.get('all_bold', False)}")
+            if block['tag'] == 'p' and block.get('all_bold', False):
+                prev_block = blocks[i - 1] if i > 0 else None
+                next_block = blocks[i + 1] if i < len(blocks) - 1 else None
+
+                def is_heading_or_nonbold_p(b):
+                    if b is None:
+                        return True
+                    if b['tag'] in ('h1', 'h2'):
+                        return True
+                    if b['tag'] == 'p' and not b.get('all_bold', False):
+                        return True
+                    return False
+
+                if is_heading_or_nonbold_p(prev_block) and is_heading_or_nonbold_p(next_block) and not (prev_block is None and next_block is None):
+                    print(f"DEBUG post-processing: changing block '{block['text'][:50]}...' to h3")
+                    block['tag'] = 'h3'
 
         # Generování HTML - přesně jako v TypeScript
         result = ""

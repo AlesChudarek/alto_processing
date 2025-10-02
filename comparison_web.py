@@ -355,18 +355,35 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             top: 50%;
             left: 50%;
             transform: translate(-50%, -50%);
-            padding: 20px;
+            padding: 0;
             border: 1px solid #888;
             width: 80%;
             max-width: 1200px;
             max-height: 70%;
             overflow-y: auto;
         }
+        .modal-header {
+            cursor: move;
+            user-select: none;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 20px;
+            background-color: #fefefe;
+            border-bottom: 1px solid #ddd;
+            position: sticky;
+            top: 0;
+            z-index: 1;
+        }
+        .modal-content pre {
+            padding: 20px;
+            margin: 0;
+        }
         .close {
             color: #aaa;
-            float: right;
             font-size: 28px;
             font-weight: bold;
+            cursor: pointer;
         }
         .close:hover,
         .close:focus {
@@ -1397,9 +1414,10 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             }
         }
 
-        function makeDraggable(element) {
+        function makeDraggable(element, handle) {
             let pos1 = 0, pos2 = 0, pos3 = 0, pos4 = 0;
-            element.onmousedown = dragMouseDown;
+            const dragHandle = handle || element;
+            dragHandle.onmousedown = dragMouseDown;
             function dragMouseDown(e) {
                 e.preventDefault();
                 pos3 = e.clientX;
@@ -1468,14 +1486,18 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 if (modal && content) {
                     content.textContent = currentAltoXml;
                     modal.style.display = "block";
+                    modal.focus();
                     const modalContent = modal.querySelector('.modal-content');
+                    const modalHeader = modal.querySelector('.modal-header');
                     if (modalContent) {
                         // Set initial position to center
                         modalContent.style.top = '';
                         modalContent.style.left = '';
                         modalContent.style.transform = 'translate(-50%, -50%)';
-                        // Make draggable
-                        makeDraggable(modalContent);
+                        // Make draggable only on header
+                        if (modalHeader) {
+                            makeDraggable(modalContent, modalHeader);
+                        }
                     }
                 }
             });
@@ -1486,6 +1508,23 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 closeBtn.addEventListener("click", () => {
                     const modal = document.getElementById("alto-modal");
                     if (modal) modal.style.display = "none";
+                });
+            }
+
+            const modal = document.getElementById("alto-modal");
+            if (modal) {
+                modal.addEventListener("keydown", (e) => {
+                    if ((e.ctrlKey || e.metaKey) && e.key === "a") {
+                        e.preventDefault();
+                        const content = document.getElementById("alto-content");
+                        if (content) {
+                            const range = document.createRange();
+                            range.selectNodeContents(content);
+                            const selection = window.getSelection();
+                            selection.removeAllRanges();
+                            selection.addRange(range);
+                        }
+                    }
                 });
             }
 
@@ -1504,10 +1543,12 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             setLargePreviewActive();
         });
     </script>
-    <div id="alto-modal" class="modal">
+    <div id="alto-modal" class="modal" tabindex="-1">
         <div class="modal-content">
-            <span class="close">&times;</span>
-            <h2>ALTO XML Obsah</h2>
+            <div class="modal-header">
+                <h2>ALTO XML Obsah</h2>
+                <span class="close">&times;</span>
+            </div>
             <pre id="alto-content"></pre>
         </div>
     </div>

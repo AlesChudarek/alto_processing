@@ -28,6 +28,9 @@ HORIZONTAL_MIN_THRESHOLD = 12   # Minimální povolený práh pro horizontální
 NEGATIVE_SHIFT_MULTIPLIER = 0.85  # Negativní hranice = horizontální práh * tato hodnota (víc citlivá než pozitivní).
 FALLBACK_THRESHOLD = 40        # Záložní hodnota, pokud nelze heuristiku spočítat.
 
+CENTER_ALIGNMENT_ERROR_MARGIN = 0.05  # 5% margin for center alignment detection relative to median line width
+CENTER_ALIGNMENT_MIN_LINE_LEN_DIFF = 0.1  # 10% minimum difference between shortest and longest line for center alignment
+
 # Konstanty pro rozhodování o nadpisech na základě výšky slov
 HEADING_H2_RATIO = 1.08         # Práh pro h2: 1.08 * průměrná výška
 HEADING_H1_RATIO = 1.6         # Práh pro h1: 1.6 * průměrná výška
@@ -1683,7 +1686,7 @@ class AltoProcessor:
                 # Debug print for block details
                 print(f"DEBUG finalize_block: text='{text_content[:100]}...', tag={tag}, max_font={max_font}, average_height={average_height}, word_heights={word_heights}, count_above_h1={count_above_h1}, count_above_h2={count_above_h2}, total_words={total_words}, min_ratio={min_ratio:.3f}")
 
-            blocks.append({'text': text_content, 'tag': tag})
+            blocks.append({'text': text_content, 'tag': tag, 'centered': block_data.get('centered', False)})
 
         # Pokud average_height není poskytnut, načteme z kontextu knihy
         if average_height is None and uuid:
@@ -1799,6 +1802,29 @@ class AltoProcessor:
             previous_bottom = None
             previous_left = None
 
+            # Calculate line centers for center alignment detection
+            line_centers = [record['hpos'] + record['width'] / 2 for record in line_records]
+            median_center = statistics.median(line_centers) if line_centers else 0
+            median_width = statistics.median(line_widths) if line_widths else 0
+            margin = median_width * CENTER_ALIGNMENT_ERROR_MARGIN if median_width else 0
+
+            # Check if all line centers are within median_center ± margin
+            centers_aligned = all(
+                abs(center - median_center) <= margin for center in line_centers
+            )
+
+            # Check if line widths vary enough (not a justified block)
+            if line_widths:
+                min_width = min(line_widths)
+                max_width = max(line_widths)
+                width_diff = max_width - min_width
+                width_diff_threshold = median_width * CENTER_ALIGNMENT_MIN_LINE_LEN_DIFF if median_width else 0
+                widths_vary = width_diff > width_diff_threshold
+            else:
+                widths_vary = False
+
+            is_center_aligned = centers_aligned and widths_vary
+
             for record in line_records:
                 if previous_bottom is not None:
                     gap = record['vpos'] - previous_bottom
@@ -1831,7 +1857,6 @@ class AltoProcessor:
             else:
                 vertical_threshold = FALLBACK_THRESHOLD
 
-            median_width = statistics.median(line_widths) if line_widths else 0
             trimmed_shifts = []
             if horizontal_shifts:
                 sorted_shifts = sorted(horizontal_shifts)
@@ -1862,9 +1887,10 @@ class AltoProcessor:
             print(f"DEBUG: vertical_threshold_candidates={vertical_threshold_candidates}, horizontal_threshold_candidates={horizontal_threshold_candidates}")
             print(f"DEBUG: vertical_threshold={vertical_threshold}, horizontal_threshold={horizontal_threshold}")
             print(f"DEBUG: heading_fonts={heading_fonts}, font_counts={dict(font_counts)}")
+            print(f"DEBUG: is_center_aligned={is_center_aligned}")
 
             tag = 'p'
-            current_block = {'lines': [], 'tag': tag, 'font_sizes': set(), 'word_heights': []}
+            current_block = {'lines': [], 'tag': tag, 'font_sizes': set(), 'word_heights': [], 'centered': is_center_aligned}
             lines = 0
             last_bottom = None
             last_left = None
@@ -1892,12 +1918,12 @@ class AltoProcessor:
                         # Velká vertikální mezera = nový blok textu
                         if current_block['lines']:
                             finalize_block(current_block, current_block['word_heights'], average_height, heading_fonts)
-                        current_block = {'lines': [], 'tag': tag, 'font_sizes': set(), 'word_heights': []}
+                        current_block = {'lines': [], 'tag': tag, 'font_sizes': set(), 'word_heights': [], 'centered': is_center_aligned}
                         lines = 0
 
                 last_bottom = bottom
 
-                if last_left is not None:
+                if last_left is not None and not is_center_aligned:
                     h_diff = text_line_hpos - last_left
                     # Check font size difference threshold (e.g., 1.2x)
                     font_size_differs = False
@@ -1908,13 +1934,12 @@ class AltoProcessor:
 
                     print(f"DEBUG: h_diff={h_diff}, horizontal_threshold={horizontal_threshold}, font_size_differs={font_size_differs}")
 
-                    # if (h_diff > horizontal_threshold and h_diff < horizontal_threshold * 5) or font_size_differs:
                     if h_diff > horizontal_threshold or font_size_differs:
-                        print(f"DEBUG: Horizontal split on h_diff={h_diff} > {horizontal_threshold} and < {horizontal_threshold * 5} or font_size_differs={font_size_differs}")
+                        print(f"DEBUG: Horizontal split on h_diff={h_diff} > {horizontal_threshold} or font_size_differs={font_size_differs}")
                         # Podobně reagujeme na výrazný horizontální posun nebo rozdíl fontu (např. tabulky, sloupce, nadpisy)
                         if current_block['lines']:
                             finalize_block(current_block, current_block['word_heights'], average_height, heading_fonts)
-                        current_block = {'lines': [], 'tag': tag, 'font_sizes': set(), 'word_heights': []}
+                        current_block = {'lines': [], 'tag': tag, 'font_sizes': set(), 'word_heights': [], 'centered': is_center_aligned}
                         lines = 0
                     elif h_diff < 0 and abs(h_diff) > horizontal_threshold * NEGATIVE_SHIFT_MULTIPLIER and current_block['lines']:
                         print(f"DEBUG: Negative split on h_diff={h_diff}, abs(h_diff)={abs(h_diff)} > {horizontal_threshold * NEGATIVE_SHIFT_MULTIPLIER}")
@@ -1924,7 +1949,7 @@ class AltoProcessor:
                             for previous_line in current_block['lines'][:-1]:
                                 finalize_block({'lines': [previous_line], 'tag': tag, 'font_sizes': set(), 'word_heights': []}, [], average_height, heading_fonts)
                             # Reset current block to start with the last line
-                            current_block = {'lines': [current_block['lines'][-1]], 'tag': tag, 'font_sizes': set(), 'word_heights': []}
+                            current_block = {'lines': [current_block['lines'][-1]], 'tag': tag, 'font_sizes': set(), 'word_heights': [], 'centered': is_center_aligned}
                             lines = 1
 
                 last_left = text_line_hpos
@@ -1994,7 +2019,10 @@ class AltoProcessor:
         result = ""
         for block in blocks:
             if block['text'].strip():  # Jen neprázdné bloky
-                result += f"<{block['tag']}>{block['text'].strip()}</{block['tag']}>"
+                style_attr = ''
+                if block.get('centered'):
+                    style_attr = ' style="text-align: center;"'
+                result += f"<{block['tag']}{style_attr}>{block['text'].strip()}</{block['tag']}>"
 
         return result
 

@@ -22,7 +22,7 @@ import json
 VERTICAL_GAP_MULTIPLIER = 2.5   # Kolikrát musí být mezera mezi řádky větší než typická mezera, aby vznikl nový blok.
 VERTICAL_HEIGHT_RATIO = 0.85    # Poměr k mediánu výšky řádku, přispívá k prahu pro rozdělení bloku.
 VERTICAL_MAX_FACTOR = 3         # Horní limit pro vertikální práh v násobcích mediánu výšky řádku.
-HORIZONTAL_WIDTH_RATIO = 0.066  # Kandidát prahu = medián šířek řádků * tato hodnota (nižší = citlivější).
+HORIZONTAL_WIDTH_RATIO = 0.045  # Kandidát prahu = medián šířek řádků * tato hodnota (nižší = citlivější).
 HORIZONTAL_SHIFT_MULTIPLIER = 0.85  # Kandidát prahu = medián kladných posunů * tato hodnota.
 HORIZONTAL_MIN_THRESHOLD = 12   # Minimální povolený práh pro horizontální dělení (v ALTO jednotkách).
 NEGATIVE_SHIFT_MULTIPLIER = 0.85  # Negativní hranice = horizontální práh * tato hodnota (víc citlivá než pozitivní).
@@ -1975,14 +1975,14 @@ class AltoProcessor:
 
                 prospective_count = lines + 1
 
-                # Logika pro <h3> - shodná s původní TypeScript implementací
-                if prospective_count == 1 and line_all_bold:
-                    finalize_block({'lines': [line_text], 'tag': 'h3', 'font_sizes': set(), 'word_heights': []}, [], average_height, heading_fonts)
-                    current_block = {'lines': [], 'tag': tag, 'font_sizes': set(), 'word_heights': []}
-                    lines = 0
-                    last_left = text_line_hpos
-                    last_bottom = bottom
-                    continue
+                # # Logika pro <h3> - shodná s původní TypeScript implementací
+                # if prospective_count == 1 and line_all_bold:
+                #     finalize_block({'lines': [line_text], 'tag': 'h3', 'font_sizes': set(), 'word_heights': []}, [], average_height, heading_fonts)
+                #     current_block = {'lines': [], 'tag': tag, 'font_sizes': set(), 'word_heights': []}
+                #     lines = 0
+                #     last_left = text_line_hpos
+                #     last_bottom = bottom
+                #     continue
 
                 current_block['lines'].append(line_text)
                 lines = len(current_block['lines'])

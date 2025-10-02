@@ -1884,8 +1884,6 @@ class AltoProcessor:
                         font_id = parts[1]
                         current_line_font_size = fonts.get(font_id, 0)
 
-
-
                 if last_bottom is not None:
                     v_diff = text_line_vpos - last_bottom
                     print(f"DEBUG: v_diff={v_diff}, vertical_threshold={vertical_threshold}")
@@ -1908,7 +1906,10 @@ class AltoProcessor:
                         if ratio >= 1.2:
                             font_size_differs = True
 
-                    if (h_diff > horizontal_threshold and h_diff < horizontal_threshold * 5) or font_size_differs:
+                    print(f"DEBUG: h_diff={h_diff}, horizontal_threshold={horizontal_threshold}, font_size_differs={font_size_differs}")
+
+                    # if (h_diff > horizontal_threshold and h_diff < horizontal_threshold * 5) or font_size_differs:
+                    if h_diff > horizontal_threshold or font_size_differs:
                         print(f"DEBUG: Horizontal split on h_diff={h_diff} > {horizontal_threshold} and < {horizontal_threshold * 5} or font_size_differs={font_size_differs}")
                         # Podobně reagujeme na výrazný horizontální posun nebo rozdíl fontu (např. tabulky, sloupce, nadpisy)
                         if current_block['lines']:

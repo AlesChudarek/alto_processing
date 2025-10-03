@@ -54,14 +54,30 @@ MIN_WORDS_PER_PAGE = 20             # Minimální počet slov na stránce pro v�
 
 BOOK_TEXT_STYLE_CACHE: Dict[str, Dict[str, Any]] = {}
 
+DEFAULT_API_BASES: List[str] = [
+    "https://kramerius.mzk.cz/search/api/v5.0",
+    "https://kramerius5.nkp.cz/search/api/v5.0",
+]
+
 class AltoProcessor:
     def __init__(
         self,
-        iiif_base_url: str = "https://kramerius5.nkp.cz/search/iiif",
-        api_base_url: str = "https://kramerius5.nkp.cz/search/api/v5.0",
+        iiif_base_url: Optional[str] = None,
+        api_base_url: Optional[str] = None,
+        fallback_api_bases: Optional[List[str]] = None,
     ):
-        self.iiif_base_url = iiif_base_url
-        self.api_base_url = api_base_url
+        primary_iiif = iiif_base_url or "https://kramerius.mzk.cz/search/iiif"
+        self.iiif_base_url = primary_iiif.rstrip('/')
+
+        base_candidates: List[str] = []
+        if api_base_url:
+            base_candidates.append(api_base_url)
+        if fallback_api_bases:
+            base_candidates.extend(fallback_api_bases)
+        base_candidates.extend(DEFAULT_API_BASES)
+
+        self._api_base_candidates = self._normalize_api_bases(base_candidates)
+        self.api_base_url = self._api_base_candidates[0] if self._api_base_candidates else ""
         self._book_text_cache = BOOK_TEXT_STYLE_CACHE
         # HTTP session with retries for robustness on flaky Kramerius endpoints
         self.session = requests.Session()
@@ -75,6 +91,48 @@ class AltoProcessor:
         adapter = HTTPAdapter(max_retries=retries)
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
+
+    @staticmethod
+    def _normalize_api_base(value: str) -> Optional[str]:
+        if not value:
+            return None
+        normalized = value.rstrip('/')
+        return normalized or None
+
+    def _normalize_api_bases(self, bases: List[str]) -> List[str]:
+        ordered: List[str] = []
+        seen: set[str] = set()
+        for base in bases:
+            normalized = self._normalize_api_base(base)
+            if not normalized or normalized in seen:
+                continue
+            ordered.append(normalized)
+            seen.add(normalized)
+        return ordered
+
+    def _iter_api_bases(self, override: Optional[str] = None):
+        seen: set[str] = set()
+        if override:
+            normalized = self._normalize_api_base(override)
+            if normalized:
+                seen.add(normalized)
+                yield normalized
+        for base in self._api_base_candidates:
+            if base in seen:
+                continue
+            seen.add(base)
+            yield base
+
+    def _remember_successful_base(self, base: str) -> None:
+        normalized = self._normalize_api_base(base)
+        if not normalized:
+            return
+        try:
+            self._api_base_candidates.remove(normalized)
+        except ValueError:
+            pass
+        self._api_base_candidates.insert(0, normalized)
+        self.api_base_url = normalized
 
     @staticmethod
     def _strip_uuid_prefix(value: Optional[str]) -> str:
@@ -1010,50 +1068,82 @@ class AltoProcessor:
         self._book_text_cache[cache_key] = result
         return result
 
-    def get_item_json(self, uuid: str) -> Dict[str, Any]:
+    def get_item_json(self, uuid: str, api_base_override: Optional[str] = None) -> Dict[str, Any]:
         normalized = self._strip_uuid_prefix(uuid)
         if not normalized:
             return {}
 
-        url = f"{self.api_base_url}/item/uuid:{normalized}"
-        try:
-            response = self.session.get(url, timeout=API_TIMEOUT)
-            response.raise_for_status()
-            return response.json()
-        except Exception as exc:
-            print(f"Chyba při načítání metadat objektu {uuid}: {exc}")
-            return {}
+        attempted: List[str] = []
+        last_error: Optional[Exception] = None
+        for base in self._iter_api_bases(api_base_override):
+            attempted.append(base)
+            url = f"{base}/item/uuid:{normalized}"
+            try:
+                response = self.session.get(url, timeout=API_TIMEOUT)
+                response.raise_for_status()
+                data = response.json()
+                self._remember_successful_base(base)
+                return data if isinstance(data, dict) else {}
+            except Exception as exc:
+                last_error = exc
+                continue
 
-    def get_children(self, uuid: str) -> List[Dict[str, Any]]:
+        if last_error:
+            print(f"Chyba při načítání metadat objektu {uuid} z {', '.join(attempted)}: {last_error}")
+        return {}
+
+    def get_children(self, uuid: str, api_base_override: Optional[str] = None) -> List[Dict[str, Any]]:
         normalized = self._strip_uuid_prefix(uuid)
         if not normalized:
             return []
 
-        url = f"{self.api_base_url}/item/uuid:{normalized}/children"
-        try:
-            response = self.session.get(url, timeout=CHILDREN_TIMEOUT)
-            response.raise_for_status()
-            data = response.json()
-            return data if isinstance(data, list) else []
-        except Exception as exc:
-            print(f"Chyba při načítání potomků objektu {uuid}: {exc}")
-            return []
+        attempted: List[str] = []
+        last_error: Optional[Exception] = None
+        for base in self._iter_api_bases(api_base_override):
+            attempted.append(base)
+            url = f"{base}/item/uuid:{normalized}/children"
+            try:
+                response = self.session.get(url, timeout=CHILDREN_TIMEOUT)
+                response.raise_for_status()
+                data = response.json()
+                self._remember_successful_base(base)
+                return data if isinstance(data, list) else []
+            except Exception as exc:
+                last_error = exc
+                continue
 
-    def get_mods_metadata(self, uuid: str) -> List[Dict[str, str]]:
+        if last_error:
+            print(f"Chyba při načítání potomků objektu {uuid} z {', '.join(attempted)}: {last_error}")
+        return []
+
+    def get_mods_metadata(self, uuid: str, api_base_override: Optional[str] = None) -> List[Dict[str, str]]:
         normalized = self._strip_uuid_prefix(uuid)
         if not normalized:
             return []
 
-        url = f"{self.api_base_url}/item/uuid:{normalized}/streams/BIBLIO_MODS"
-        try:
-            response = self.session.get(url, timeout=MODS_TIMEOUT)
-            response.raise_for_status()
-        except Exception as exc:
-            print(f"Chyba při načítání MODS metadat {uuid}: {exc}")
+        attempted: List[str] = []
+        last_error: Optional[Exception] = None
+        response_content: Optional[bytes] = None
+        for base in self._iter_api_bases(api_base_override):
+            attempted.append(base)
+            url = f"{base}/item/uuid:{normalized}/streams/BIBLIO_MODS"
+            try:
+                response = self.session.get(url, timeout=MODS_TIMEOUT)
+                response.raise_for_status()
+                response_content = response.content
+                self._remember_successful_base(base)
+                break
+            except Exception as exc:
+                last_error = exc
+                continue
+
+        if response_content is None:
+            if last_error:
+                print(f"Chyba při načítání MODS metadat {uuid} z {', '.join(attempted)}: {last_error}")
             return []
 
         try:
-            root = ET.fromstring(response.content)
+            root = ET.fromstring(response_content)
         except ET.ParseError as exc:
             print(f"Chyba při parsování MODS metadat {uuid}: {exc}")
             return []
@@ -1312,20 +1402,33 @@ class AltoProcessor:
             "mods": self.get_mods_metadata(book_uuid),
             "current_index": resolved_index,
             "book_constants": book_constants,
+            "api_base": self.api_base_url,
         }
 
-    def get_alto_data(self, uuid: str) -> str:
+    def get_alto_data(self, uuid: str, api_base_override: Optional[str] = None) -> str:
         """Stáhne ALTO XML data pro daný UUID"""
-        url = f"https://kramerius5.nkp.cz/search/api/v5.0/item/uuid:{uuid}/streams/ALTO"
-        try:
-            response = self.session.get(url, timeout=ALTO_TIMEOUT)
-            response.raise_for_status()
-            # Explicitně dekódujeme jako UTF-8
-            content = response.content.decode('utf-8')
-            return content
-        except Exception as e:
-            print(f"Chyba při stahování ALTO dat: {e}")
+
+        normalized = self._strip_uuid_prefix(uuid)
+        if not normalized:
             return ""
+
+        attempted: List[str] = []
+        last_error: Optional[Exception] = None
+        for base in self._iter_api_bases(api_base_override):
+            attempted.append(base)
+            url = f"{base}/item/uuid:{normalized}/streams/ALTO"
+            try:
+                response = self.session.get(url, timeout=ALTO_TIMEOUT)
+                response.raise_for_status()
+                self._remember_successful_base(base)
+                return response.content.decode('utf-8', errors='replace')
+            except Exception as exc:
+                last_error = exc
+                continue
+
+        if last_error:
+            print(f"Chyba při stahování ALTO dat {uuid} z {', '.join(attempted)}: {last_error}")
+        return ""
 
     def get_boxes(self, alto: str, query: str, width: int, height: int) -> List[List[List[int]]]:
         """Najde bounding boxy pro daný query"""

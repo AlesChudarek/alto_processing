@@ -19,15 +19,66 @@ import xml.dom.minidom as minidom
 import html
 import re
 from pathlib import Path
+from typing import Dict, Optional
 
 # Import původního procesoru
-from main_processor import AltoProcessor
+from main_processor import AltoProcessor, DEFAULT_API_BASES
 
 
 ROOT_DIR = Path(__file__).resolve().parent
 TS_DIST_PATH = ROOT_DIR / 'dist' / 'run_original.js'
 DEFAULT_WIDTH = 800
 DEFAULT_HEIGHT = 1200
+
+KNOWN_LIBRARY_OVERRIDES: Dict[str, Dict[str, str]] = {
+    "https://kramerius.mzk.cz/search/api/v5.0": {
+        "code": "mzk",
+        "label": "Moravská zemská knihovna v Brně",
+        "handle_base": "https://kramerius.mzk.cz/search",
+    },
+    "https://kramerius5.nkp.cz/search/api/v5.0": {
+        "code": "nkp",
+        "label": "Národní knihovna České republiky",
+        "handle_base": "https://kramerius5.nkp.cz/search",
+    },
+}
+
+
+def _api_base_to_handle_base(api_base: str) -> str:
+    if not api_base:
+        return ""
+    normalized = api_base.rstrip('/')
+    if '/api/' in normalized:
+        return normalized.split('/api/', 1)[0]
+    if normalized.endswith('/api'):
+        return normalized[:-4]
+    return normalized
+
+
+def describe_library(api_base: Optional[str]) -> Dict[str, str]:
+    normalized = (api_base or '').rstrip('/')
+    if not normalized:
+        return {
+            'label': '',
+            'code': '',
+            'api_base': '',
+            'handle_base': '',
+            'netloc': '',
+        }
+
+    override = KNOWN_LIBRARY_OVERRIDES.get(normalized, {})
+    handle_base = override.get('handle_base') or _api_base_to_handle_base(normalized)
+    parsed = urlparse(handle_base or normalized)
+    label = override.get('label') or (parsed.netloc or normalized)
+    code = override.get('code') or (parsed.netloc.split('.', 1)[0] if parsed.netloc else '')
+
+    return {
+        'label': label,
+        'code': code,
+        'api_base': normalized,
+        'handle_base': handle_base,
+        'netloc': parsed.netloc or '',
+    }
 
 class ComparisonHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -410,6 +461,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         <div id="book-info" class="info-section" style="display: none;">
             <h2 id="book-title">Informace o knize</h2>
             <p id="book-handle" class="muted"></p>
+            <p id="book-library" class="muted"></p>
             <div id="book-constants" class="book-summary-grid" style="display: none;"></div>
             <div id="book-metadata-empty" class="muted" style="display: none;">Metadata se nepodařilo načíst.</div>
             <dl id="book-metadata" class="metadata-grid"></dl>
@@ -471,6 +523,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
 
         let currentBook = null;
         let currentPage = null;
+        let currentLibrary = null;
         let navigationState = null;
         let processRequestToken = 0;
 
@@ -1129,6 +1182,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             const section = document.getElementById("book-info");
             const titleEl = document.getElementById("book-title");
             const handleEl = document.getElementById("book-handle");
+            const libraryEl = document.getElementById("book-library");
             const metadataList = document.getElementById("book-metadata");
             const metadataEmpty = document.getElementById("book-metadata-empty");
             const constantsContainer = document.getElementById("book-constants");
@@ -1140,6 +1194,10 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             if (!currentBook) {
                 section.style.display = "none";
                 handleEl.textContent = "";
+                if (libraryEl) {
+                    libraryEl.textContent = "";
+                    libraryEl.style.display = "none";
+                }
                 metadataList.innerHTML = "";
                 metadataEmpty.style.display = "none";
                 if (constantsContainer) {
@@ -1156,6 +1214,16 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 handleEl.innerHTML = `<a href="${currentBook.handle}" target="_blank" rel="noopener">Otevřít v Krameriovi</a>`;
             } else {
                 handleEl.textContent = "";
+            }
+
+            if (libraryEl) {
+                if (currentLibrary && currentLibrary.label) {
+                    libraryEl.textContent = currentLibrary.label;
+                    libraryEl.style.display = "block";
+                } else {
+                    libraryEl.textContent = "";
+                    libraryEl.style.display = "none";
+                }
             }
 
             if (constantsContainer) {
@@ -1336,6 +1404,14 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
 
             currentBook = data.book || null;
             currentPage = data.currentPage || null;
+            currentLibrary = data.library || (currentBook && currentBook.library) || null;
+
+            if (currentBook && currentLibrary && !currentBook.library) {
+                currentBook.library = currentLibrary;
+            }
+            if (currentPage && currentLibrary && !currentPage.library) {
+                currentPage.library = currentLibrary;
+            }
 
             updateBookInfo();
             updatePageInfo();
@@ -1573,16 +1649,22 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             try:
                 processor = AltoProcessor()
                 context = processor.get_book_context(uuid)
-                print(f"Book constants for {uuid}: {context.get('book_constants')}")
 
                 if not context:
                     self.wfile.write(json.dumps({'error': 'Nepodařilo se načíst metadata pro zadané UUID'}).encode('utf-8'))
                     return
 
+                print(f"Book constants for {uuid}: {context.get('book_constants')}")
+
                 page_uuid = context.get('page_uuid')
                 if not page_uuid:
                     self.wfile.write(json.dumps({'error': 'Nepodařilo se určit konkrétní stránku pro zadané UUID'}).encode('utf-8'))
                     return
+
+                book_uuid = context.get('book_uuid')
+                active_api_base = context.get('api_base') or processor.api_base_url
+                library_info = describe_library(active_api_base)
+                handle_base = library_info.get('handle_base') or ''
 
                 alto_xml = processor.get_alto_data(page_uuid)
                 if not alto_xml:
@@ -1613,6 +1695,8 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
 
                 page_summary = context.get('page') or {}
                 page_item = context.get('page_item') or {}
+                book_handle = f"{handle_base}/handle/uuid:{book_uuid}" if handle_base and book_uuid else ''
+                page_handle = f"{handle_base}/handle/uuid:{page_uuid}" if handle_base and page_uuid else ''
 
                 page_info = {
                     'uuid': page_uuid,
@@ -1622,16 +1706,18 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     'pageSide': clean(page_summary.get('pageSide') or (page_item.get('details') or {}).get('pageposition') or (page_item.get('details') or {}).get('pagePosition') or (page_item.get('details') or {}).get('pagerole') or ''),
                     'index': current_index,
                     'iiif': page_item.get('iiif'),
-                    'handle': (page_item.get('handle') or {}).get('href'),
+                    'handle': page_handle,
+                    'library': library_info,
                 }
 
                 book_info = {
                     'uuid': context.get('book_uuid'),
                     'title': clean(book_data.get('title') or ''),
                     'model': book_data.get('model'),
-                    'handle': (book_data.get('handle') or {}).get('href'),
+                    'handle': book_handle,
                     'mods': mods_metadata,
                     'constants': context.get('book_constants') or {},
+                    'library': library_info,
                 }
 
                 navigation = {
@@ -1650,6 +1736,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     'currentPage': page_info,
                     'navigation': navigation,
                     'alto_xml': pretty_alto,
+                    'library': library_info,
                 }
 
                 self.wfile.write(json.dumps(response_data, ensure_ascii=False).encode('utf-8'))
@@ -1679,38 +1766,38 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             if stream == 'AUTO':
                 candidate_streams = ['IMG_FULL', 'IMG_PREVIEW', 'IMG_THUMB']
 
-            def upstream_url_for(candidate: str) -> str:
-                return f"https://kramerius5.nkp.cz/search/api/v5.0/item/uuid:{uuid}/streams/{candidate}"
+            candidate_bases = list(dict.fromkeys(DEFAULT_API_BASES))
 
             last_error = None
 
             try:
-                for candidate in candidate_streams:
-                    upstream_url = upstream_url_for(candidate)
-                    response = requests.get(upstream_url, timeout=20)
+                for base in candidate_bases:
+                    for candidate in candidate_streams:
+                        upstream_url = f"{base}/item/uuid:{uuid}/streams/{candidate}"
+                        response = requests.get(upstream_url, timeout=20)
 
-                    if response.status_code != 200 or not response.content:
-                        last_error = f'Nepodařilo se načíst náhled (status {response.status_code} pro {candidate})'
-                        response.close()
-                        continue
-
-                    content_type = response.headers.get('Content-Type', 'image/jpeg')
-                    if 'jp2' in content_type.lower():
-                        last_error = f'Stream {candidate} vrací nepodporovaný formát {content_type}'
-                        response.close()
-                        if stream == 'AUTO':
+                        if response.status_code != 200 or not response.content:
+                            last_error = f'Nepodařilo se načíst náhled (status {response.status_code} pro {candidate} z {base})'
+                            response.close()
                             continue
-                        break
 
-                    self.send_response(200)
-                    self.send_header('Content-type', content_type)
-                    self.send_header('Content-Length', str(len(response.content)))
-                    self.send_header('Cache-Control', 'no-store')
-                    self.send_header('X-Preview-Stream', candidate)
-                    self.end_headers()
-                    self.wfile.write(response.content)
-                    response.close()
-                    return
+                        content_type = response.headers.get('Content-Type', 'image/jpeg')
+                        if 'jp2' in content_type.lower():
+                            last_error = f'Stream {candidate} vrací nepodporovaný formát {content_type}'
+                            response.close()
+                            if stream == 'AUTO':
+                                continue
+                            break
+
+                        self.send_response(200)
+                        self.send_header('Content-type', content_type)
+                        self.send_header('Content-Length', str(len(response.content)))
+                        self.send_header('Cache-Control', 'no-store')
+                        self.send_header('X-Preview-Stream', candidate)
+                        self.end_headers()
+                        self.wfile.write(response.content)
+                        response.close()
+                        return
 
                 self.send_response(502)
                 self.send_header('Content-type', 'application/json; charset=utf-8')

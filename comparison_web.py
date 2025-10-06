@@ -455,7 +455,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         </div>
 
         <div class="action-row">
-            <button id="load-button" type="button" onclick="processAlto()">Načíst stránku</button>
+            <button id="load-button" type="button" onclick="handleLoadClick()">Načíst stránku</button>
         </div>
 
         <div id="book-info" class="info-section" style="display: none;">
@@ -1393,6 +1393,84 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             processAlto();
         }
 
+        function elementConsumesTextInput(element) {
+            if (!element) {
+                return false;
+            }
+            if (element === document.body) {
+                return false;
+            }
+            if (element.isContentEditable) {
+                return true;
+            }
+            const tag = element.tagName ? element.tagName.toUpperCase() : "";
+            if (!tag) {
+                return false;
+            }
+            if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
+                return true;
+            }
+            return false;
+        }
+
+        function blurUuidField() {
+            const uuidField = document.getElementById("uuid");
+            if (uuidField && typeof uuidField.blur === "function") {
+                uuidField.blur();
+            }
+        }
+
+        function isModalActive() {
+            const modal = document.getElementById("alto-modal");
+            return Boolean(modal && modal.style.display === "block");
+        }
+
+        function handleLoadClick() {
+            blurUuidField();
+            processAlto();
+        }
+
+        function setupKeyboardShortcuts() {
+            document.addEventListener("keydown", (event) => {
+                if (event.defaultPrevented) {
+                    return;
+                }
+
+                const key = event.key;
+                const activeElement = document.activeElement;
+                const modalVisible = isModalActive();
+                const isWithinModal = modalVisible && activeElement && activeElement.closest("#alto-modal");
+
+                if (event.altKey || event.ctrlKey || event.metaKey) {
+                    return;
+                }
+
+                if ((key === "ArrowLeft" || key === "ArrowRight") && !isWithinModal) {
+                    if (elementConsumesTextInput(activeElement)) {
+                        return;
+                    }
+                    event.preventDefault();
+                    goToAdjacent(key === "ArrowLeft" ? "prev" : "next");
+                    return;
+                }
+
+                if (key === "Enter" && !isWithinModal) {
+                    if (activeElement && (activeElement.tagName === "TEXTAREA" || activeElement.isContentEditable)) {
+                        return;
+                    }
+                    const loadButton = document.getElementById("load-button");
+                    if (loadButton && !loadButton.disabled) {
+                        event.preventDefault();
+                        handleLoadClick();
+                    } else {
+                        event.preventDefault();
+                        blurUuidField();
+                        processAlto();
+                    }
+                }
+            });
+        }
+
         function applyProcessResult(uuid, data, previousScrollY, toolsElement) {
             cacheProcessData(uuid, data);
 
@@ -1603,6 +1681,8 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     }
                 });
             }
+
+            setupKeyboardShortcuts();
 
             window.addEventListener("click", (event) => {
                 const modal = document.getElementById("alto-modal");

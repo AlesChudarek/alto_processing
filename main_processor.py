@@ -38,6 +38,9 @@ HEADING_MIN_WORD_RATIO_DEFAULT = 0.81   # Výchozí minimální podíl slov v bl
 HEADING_FONT_GAP_THRESHOLD = 1.2        # Práh pro rozdíl ve velikosti fontu pro identifikaci nadpisových fontů
 HEADING_FONT_RATIO_MULTIPLIER = 0.5     # Koeficient pro snížení prahu pro bloky s nadpisovými fonty
 HEADING_FONT_MAX_RATIO = 0.4            # Maximální podíl řádků s fontem, aby byl považován za nadpisový
+HEADING_FONT_MERGE_TOLERANCE = 0.1      # Povolená relativní odchylka mezi velikostmi písma při spojování nadpisů
+
+PAGE_NUMBER_SHORT_LINE_RATIO_TO_PAGE = 0.2  # Procento šířky stránky, pod které je řádek považován za potenciální řádek s číslem stránky
 
 # Centralized HTTP timeouts (seconds)
 API_TIMEOUT = 25
@@ -165,6 +168,24 @@ class AltoProcessor:
             return round(float(value), digits)
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _normalize_page_number(value: Optional[str]) -> Tuple[Optional[str], bool]:
+        if value is None:
+            return None, False
+
+        cleaned = value.strip()
+        if not cleaned:
+            return None, False
+
+        bracket_match = re.fullmatch(r"\[\s*(\d+)\s*\]", cleaned)
+        if bracket_match:
+            return bracket_match.group(1), False
+
+        if re.fullmatch(r"\d+", cleaned):
+            return cleaned, True
+
+        return None, False
 
     @staticmethod
     def _compute_confidence(counter: Counter) -> Optional[int]:
@@ -319,8 +340,11 @@ class AltoProcessor:
 
             line_records = []
             for text_line in text_lines:
-                text_line_width = int(text_line.get('WIDTH', '0'))
-                if text_line_width < 50:
+                if page_number_line_ids and id(text_line) in page_number_line_ids:
+                    continue
+
+                text_line_width = int(text_line.get('WIDTH', '0') or 0)
+                if text_line_width <= 0:
                     continue
 
                 text_line_height = int(text_line.get('HEIGHT', '0'))
@@ -1742,6 +1766,10 @@ class AltoProcessor:
             wc = width / alto_width2
             hc = height / alto_height2
 
+        context = self.get_book_context(uuid) if uuid else None
+        if average_height is None and context:
+            average_height = context.get('book_constants', {}).get('average_height')
+
         # Parsování fontů: mapujeme ID stylů na jejich velikost písma
         fonts = {}
         styles = root.findall('.//{http://www.loc.gov/standards/alto/ns-v3#}TextStyle')
@@ -1765,7 +1793,13 @@ class AltoProcessor:
 
             tag = block_data['tag']
 
-            if tag != 'h3' and average_height is not None and word_heights:
+            effective_word_heights = word_heights or block_data.get('word_heights', [])
+            line_font_sizes = list(block_data.get('line_font_sizes', []))
+            line_bold_flags = list(block_data.get('line_bold_flags', []))
+            source_block_id = block_data.get('source_block_id')
+            block_all_bold = block_data.get('all_bold', False)
+
+            if tag != 'h3' and average_height is not None and effective_word_heights:
                 max_font = max(block_data['font_sizes']) if block_data['font_sizes'] else 0
 
                 if max_font in heading_fonts:
@@ -1773,9 +1807,9 @@ class AltoProcessor:
                 else:
                     min_ratio = HEADING_MIN_WORD_RATIO_DEFAULT
 
-                count_above_h1 = sum(1 for h in word_heights if h >= average_height * HEADING_H1_RATIO)
-                count_above_h2 = sum(1 for h in word_heights if h >= average_height * HEADING_H2_RATIO)
-                total_words = len(word_heights)
+                count_above_h1 = sum(1 for h in effective_word_heights if h >= average_height * HEADING_H1_RATIO)
+                count_above_h2 = sum(1 for h in effective_word_heights if h >= average_height * HEADING_H2_RATIO)
+                total_words = len(effective_word_heights)
 
                 if total_words > 0:
                     if count_above_h1 / total_words >= min_ratio:
@@ -1791,14 +1825,101 @@ class AltoProcessor:
                     tag = 'p'
 
                 # Debug print for block details
-                print(f"DEBUG finalize_block: text='{text_content[:100]}...', tag={tag}, max_font={max_font}, average_height={average_height}, word_heights={word_heights}, count_above_h1={count_above_h1}, count_above_h2={count_above_h2}, total_words={total_words}, min_ratio={min_ratio:.3f}")
+                print(f"DEBUG finalize_block: text='{text_content[:100]}...', tag={tag}, max_font={max_font}, average_height={average_height}, word_heights={effective_word_heights}, count_above_h1={count_above_h1}, count_above_h2={count_above_h2}, total_words={total_words}, min_ratio={min_ratio:.3f}")
 
-            blocks.append({'text': text_content, 'tag': tag, 'centered': block_data.get('centered', False), 'all_bold': block_data.get('all_bold', False)})
+            blocks.append({
+                'text': text_content,
+                'tag': tag,
+                'centered': block_data.get('centered', False),
+                'all_bold': block_all_bold,
+                'source_block_id': source_block_id,
+                'line_font_sizes': line_font_sizes,
+                'line_bold_flags': line_bold_flags,
+                'line_count': len(block_data.get('lines', [])),
+            })
 
-        # Pokud average_height není poskytnut, načteme z kontextu knihy
-        if average_height is None and uuid:
-            context = self.get_book_context(uuid)
-            average_height = context.get('book_constants', {}).get('average_height') if context else None
+        def representative_font_size(font_sizes: List[int]) -> Optional[float]:
+            values = [size for size in font_sizes if size]
+            if not values:
+                return None
+            return statistics.median(values)
+
+        def should_merge_heading_blocks(first_block: Dict[str, Any], second_block: Dict[str, Any]) -> bool:
+            if first_block.get('tag') not in {'h1', 'h2'}:
+                return False
+            if second_block.get('tag') != first_block.get('tag'):
+                return False
+
+            first_source = first_block.get('source_block_id')
+            second_source = second_block.get('source_block_id')
+            if not first_source or not second_source or first_source != second_source:
+                return False
+
+            first_bold = first_block.get('all_bold', False)
+            second_bold = second_block.get('all_bold', False)
+            if first_bold != second_bold:
+                return False
+
+            first_font = representative_font_size(first_block.get('line_font_sizes', []))
+            second_font = representative_font_size(second_block.get('line_font_sizes', []))
+            if first_font is None or second_font is None:
+                return False
+
+            larger = max(first_font, second_font)
+            smaller = min(first_font, second_font)
+            if smaller <= 0:
+                return False
+
+            relative_diff = (larger - smaller) / smaller
+            if relative_diff > HEADING_FONT_MERGE_TOLERANCE:
+                return False
+
+            return True
+
+        def merge_heading_pair(first_block: Dict[str, Any], second_block: Dict[str, Any]) -> Dict[str, Any]:
+            first_text = (first_block.get('text') or '').rstrip()
+            second_text = (second_block.get('text') or '').lstrip()
+
+            if first_text.endswith('-'):
+                combined_text = (first_text[:-1] + second_text).strip()
+            else:
+                combined_text = (first_text + ' ' + second_text).strip()
+
+            merged_block = dict(first_block)
+            merged_block['text'] = re.sub(r'\s+', ' ', combined_text)
+            merged_block['line_font_sizes'] = list(first_block.get('line_font_sizes', [])) + list(second_block.get('line_font_sizes', []))
+            merged_block['line_bold_flags'] = list(first_block.get('line_bold_flags', [])) + list(second_block.get('line_bold_flags', []))
+            merged_block['line_count'] = first_block.get('line_count', 0) + second_block.get('line_count', 0)
+            merged_block['centered'] = first_block.get('centered') or second_block.get('centered')
+            merged_block['all_bold'] = first_block.get('all_bold', False) and second_block.get('all_bold', False)
+
+            return merged_block
+
+        def merge_heading_sequences(block_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            merged_blocks: List[Dict[str, Any]] = []
+            index = 0
+
+            while index < len(block_list):
+                current_block_entry = block_list[index]
+                if current_block_entry.get('tag') in {'h1', 'h2'}:
+                    working_block = current_block_entry
+                    cursor = index
+                    while cursor + 1 < len(block_list) and should_merge_heading_blocks(working_block, block_list[cursor + 1]):
+                        working_block = merge_heading_pair(working_block, block_list[cursor + 1])
+                        cursor += 1
+                    merged_blocks.append(working_block)
+                    index = cursor + 1
+                    continue
+
+                merged_blocks.append(current_block_entry)
+                index += 1
+
+            return merged_blocks
+
+        page_summary = (context or {}).get('page') or {}
+        page_number_value, _ = self._normalize_page_number(page_summary.get('pageNumber'))
+        page_number_annotations: List[Tuple[int, str]] = []
+        page_number_line_ids: set[int] = set()
 
         # Zpracování TextBlocků
         text_blocks = root.findall('.//{http://www.loc.gov/standards/alto/ns-v3#}TextBlock')
@@ -1807,6 +1928,138 @@ class AltoProcessor:
 
         print(f"DEBUG: Found {len(text_blocks)} TextBlocks")
 
+        if page_number_value:
+            text_line_elements = root.findall('.//{http://www.loc.gov/standards/alto/ns-v3#}TextLine')
+            if not text_line_elements:
+                text_line_elements = root.findall('.//{http://www.loc.gov/standards/alto/ns-v2#}TextLine')
+
+            line_entries: List[Dict[str, Any]] = []
+            width_values: List[int] = []
+
+            for text_line in text_line_elements:
+                try:
+                    line_width = int(text_line.get('WIDTH', '0') or 0)
+                except (TypeError, ValueError):
+                    line_width = 0
+                try:
+                    line_vpos = int(text_line.get('VPOS', '0') or 0)
+                except (TypeError, ValueError):
+                    line_vpos = 0
+
+                if line_width > 0:
+                    width_values.append(line_width)
+
+                strings = text_line.findall('.//{http://www.loc.gov/standards/alto/ns-v3#}String')
+                if not strings:
+                    strings = text_line.findall('.//{http://www.loc.gov/standards/alto/ns-v2#}String')
+
+                line_parts: List[str] = []
+                for string_el in strings:
+                    content = string_el.get('CONTENT', '') or ''
+                    subs_content = string_el.get('SUBS_CONTENT', '') or ''
+                    subs_type = string_el.get('SUBS_TYPE', '') or ''
+
+                    content = html.unescape(content)
+                    subs_content = html.unescape(subs_content)
+
+                    if subs_type == 'HypPart1':
+                        content = subs_content
+                    elif subs_type == 'HypPart2':
+                        continue
+
+                    if content:
+                        line_parts.append(content)
+
+                line_entries.append({
+                    'element': text_line,
+                    'width': line_width,
+                    'vpos': line_vpos,
+                    'text': ' '.join(line_parts).strip(),
+                })
+
+            reference_width = alto_width2 or alto_width
+            if reference_width and reference_width > 0:
+                short_threshold = max(reference_width * PAGE_NUMBER_SHORT_LINE_RATIO_TO_PAGE, 1)
+            else:
+                short_threshold = None
+
+            print(
+                f"DEBUG page-number: total_lines={len(line_entries)}, reference_width={reference_width}, short_threshold={short_threshold}"
+            )
+
+            if short_threshold is not None:
+                pattern = re.compile(rf"(?<!\d){re.escape(page_number_value)}(?!\d)")
+                sorted_entries = sorted(line_entries, key=lambda entry: entry['vpos'])
+
+                matches: List[Dict[str, Any]] = []
+                suspects: List[Dict[str, Any]] = []
+                number_found = False
+
+                for entry in sorted_entries:
+                    width = entry['width']
+                    if width <= 0 or width > short_threshold:
+                        print(
+                            f"DEBUG page-number: skipping line width={width} vpos={entry['vpos']} text='{entry['text']}'"
+                        )
+                        continue
+
+                    text_value = entry['text']
+                    if not text_value:
+                        print(
+                            f"DEBUG page-number: skipping empty text for width={width} vpos={entry['vpos']}"
+                        )
+                        continue
+
+                    if pattern.search(text_value):
+                        print(
+                            f"DEBUG page-number: FOUND match width={width} vpos={entry['vpos']} text='{text_value}'"
+                        )
+                        matches.append(entry)
+                        number_found = True
+                        suspects.clear()
+                    elif not number_found:
+                        print(
+                            f"DEBUG page-number: candidate width={width} vpos={entry['vpos']} text='{text_value}'"
+                        )
+                        suspects.append(entry)
+
+                candidates = matches if matches else suspects
+                print(
+                    f"DEBUG page-number: matches={len(matches)}, suspects={len(suspects)}, using_candidates={len(candidates)}"
+                )
+
+                if candidates:
+                    annotation_is_found = bool(matches)
+                    for entry in candidates:
+                        page_number_line_ids.add(id(entry['element']))
+                        ocr_text_display = entry['text'] or ''
+                        annotation_parts = [
+                            f"Page number: {page_number_value}",
+                            f"OCR text: {ocr_text_display}",
+                        ]
+                        if not annotation_is_found:
+                            annotation_parts.append("!FOUND ONLY KANDIDATE!")
+                        annotation_text = ' ; '.join(annotation_parts)
+                        page_number_annotations.append(
+                            (entry['vpos'], f"<small>{html.escape(annotation_text, quote=False)}</small>")
+                        )
+                else:
+                    print("DEBUG page-number: no candidates detected after scanning")
+
+            else:
+                print("DEBUG page-number: cannot compute short_threshold due to missing page width")
+
+            if not page_number_annotations:
+                reference_height_local = alto_height2 or alto_height
+                fallback_text = f"Page number: {page_number_value} ; OCR text: None ; !NOT FOUND!"
+                fallback_vpos = (reference_height_local or 0) + 1
+                page_number_annotations.append(
+                    (fallback_vpos, f"<small>{html.escape(fallback_text, quote=False)}</small>")
+                )
+                print(
+                    "DEBUG page-number: appended fallback annotation due to missing candidates"
+                )
+
         # Pre-scan all text lines to build font_counts based on characters
         font_counts = defaultdict(int)
         for block_elem in text_blocks:
@@ -1814,8 +2067,11 @@ class AltoProcessor:
             if not text_lines:
                 text_lines = block_elem.findall('.//{http://www.loc.gov/standards/alto/ns-v2#}TextLine')
             for text_line in text_lines:
-                text_line_width = int(text_line.get('WIDTH', '0'))
-                if text_line_width < 50:
+                if page_number_line_ids and id(text_line) in page_number_line_ids:
+                    continue
+
+                text_line_width = int(text_line.get('WIDTH', '0') or 0)
+                if text_line_width <= 0:
                     continue
                 style_ref = text_line.get('STYLEREFS') or block_elem.get('STYLEREFS', '')
                 current_line_font_size = 0
@@ -1879,8 +2135,11 @@ class AltoProcessor:
 
             line_records = []
             for text_line in text_lines:
-                text_line_width = int(text_line.get('WIDTH', '0'))
-                if text_line_width < 50:
+                if page_number_line_ids and id(text_line) in page_number_line_ids:
+                    continue
+
+                text_line_width = int(text_line.get('WIDTH', '0') or 0)
+                if text_line_width <= 0:
                     continue
 
                 text_line_height = int(text_line.get('HEIGHT', '0'))
@@ -1997,7 +2256,22 @@ class AltoProcessor:
             print(f"DEBUG: is_center_aligned={is_center_aligned}")
 
             tag = 'p'
-            current_block = {'lines': [], 'tag': tag, 'font_sizes': set(), 'word_heights': [], 'centered': is_center_aligned, 'all_bold': True}
+            block_id = block_elem.get('ID')
+
+            def new_block_state():
+                return {
+                    'lines': [],
+                    'tag': tag,
+                    'font_sizes': set(),
+                    'word_heights': [],
+                    'centered': is_center_aligned,
+                    'all_bold': True,
+                    'source_block_id': block_id,
+                    'line_font_sizes': [],
+                    'line_bold_flags': [],
+                }
+
+            current_block = new_block_state()
             lines = 0
             last_bottom = None
             last_left = None
@@ -2025,7 +2299,7 @@ class AltoProcessor:
                         # Velká vertikální mezera = nový blok textu
                         if current_block['lines']:
                             finalize_block(current_block, current_block['word_heights'], average_height, heading_fonts)
-                        current_block = {'lines': [], 'tag': tag, 'font_sizes': set(), 'word_heights': [], 'centered': is_center_aligned, 'all_bold': True}
+                        current_block = new_block_state()
                         lines = 0
 
                 last_bottom = bottom
@@ -2046,17 +2320,44 @@ class AltoProcessor:
                         # Podobně reagujeme na výrazný horizontální posun nebo rozdíl fontu (např. tabulky, sloupce, nadpisy)
                         if current_block['lines']:
                             finalize_block(current_block, current_block['word_heights'], average_height, heading_fonts)
-                        current_block = {'lines': [], 'tag': tag, 'font_sizes': set(), 'word_heights': [], 'centered': is_center_aligned, 'all_bold': True}
+                        current_block = new_block_state()
                         lines = 0
                     elif h_diff < 0 and abs(h_diff) > horizontal_threshold * NEGATIVE_SHIFT_MULTIPLIER and current_block['lines']:
                         print(f"DEBUG: Negative split on h_diff={h_diff}, abs(h_diff)={abs(h_diff)} > {horizontal_threshold * NEGATIVE_SHIFT_MULTIPLIER}")
                         # Negative horizontal shift indicates indented line, so previous lines were single-line paragraphs that should be split
                         if len(current_block['lines']) > 1:
                             # Finalize each previous line as a separate paragraph
-                            for previous_line in current_block['lines'][:-1]:
-                                finalize_block({'lines': [previous_line], 'tag': tag, 'font_sizes': set(), 'word_heights': []}, [], average_height, heading_fonts)
+                            for idx, previous_line in enumerate(current_block['lines'][:-1]):
+                                line_font_size = current_block['line_font_sizes'][idx] if idx < len(current_block['line_font_sizes']) else 0
+                                line_bold_flag = current_block['line_bold_flags'][idx] if idx < len(current_block['line_bold_flags']) else False
+                                finalize_block(
+                                    {
+                                        'lines': [previous_line],
+                                        'tag': tag,
+                                        'font_sizes': {line_font_size} if line_font_size else set(),
+                                        'word_heights': [],
+                                        'centered': is_center_aligned,
+                                        'all_bold': line_bold_flag,
+                                        'source_block_id': block_id,
+                                        'line_font_sizes': [line_font_size],
+                                        'line_bold_flags': [line_bold_flag],
+                                    },
+                                    [],
+                                    average_height,
+                                    heading_fonts,
+                                )
                             # Reset current block to start with the last line
-                            current_block = {'lines': [current_block['lines'][-1]], 'tag': tag, 'font_sizes': set(), 'word_heights': [], 'centered': is_center_aligned, 'all_bold': True}
+                            last_line_text = current_block['lines'][-1]
+                            last_font_size = current_block['line_font_sizes'][-1] if current_block['line_font_sizes'] else 0
+                            last_bold_flag = current_block['line_bold_flags'][-1] if current_block['line_bold_flags'] else True
+
+                            current_block = new_block_state()
+                            current_block['lines'].append(last_line_text)
+                            current_block['line_font_sizes'].append(last_font_size)
+                            current_block['line_bold_flags'].append(last_bold_flag)
+                            if last_font_size:
+                                current_block['font_sizes'].add(last_font_size)
+                            current_block['all_bold'] = last_bold_flag
                             lines = 1
 
                 last_left = text_line_hpos
@@ -2102,20 +2403,25 @@ class AltoProcessor:
                     if content:
                         line_parts.append(content)
 
-                if not line_all_bold:
-                    current_block['all_bold'] = False
-
                 line_text = ' '.join(line_parts).strip()
                 if not line_text:
                     continue
 
-                prospective_count = lines + 1
-
                 current_block['lines'].append(line_text)
+                current_block['line_font_sizes'].append(current_line_font_size)
+                current_block['line_bold_flags'].append(line_all_bold)
+
+                if not line_all_bold:
+                    current_block['all_bold'] = False
+
+                prospective_count = lines + 1
                 lines = len(current_block['lines'])
 
             if current_block['lines']:
                 finalize_block(current_block, current_block['word_heights'], average_height, heading_fonts)
+
+        # Spojit víceliniové nadpisy podle dohodnutých heuristik
+        blocks = merge_heading_sequences(blocks)
 
         # After all blocks are finalized, apply the new logic for h3 detection based on bold paragraphs and neighbors
         for i, block in enumerate(blocks):
@@ -2145,6 +2451,20 @@ class AltoProcessor:
                 if block.get('centered'):
                     style_attr = ' style="text-align: center;"'
                 result += f"<{block['tag']}{style_attr}>{block['text'].strip()}</{block['tag']}>"
+
+        if page_number_annotations:
+            reference_height = alto_height2 or alto_height
+            sorted_annotations = sorted(page_number_annotations, key=lambda item: item[0])
+            top_fragments: List[str] = []
+            bottom_fragments: List[str] = []
+
+            for vpos, fragment in sorted_annotations:
+                if reference_height and vpos > reference_height / 2:
+                    bottom_fragments.append(fragment)
+                else:
+                    top_fragments.append(fragment)
+
+            result = ''.join(top_fragments) + result + ''.join(bottom_fragments)
 
         return result
 

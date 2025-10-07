@@ -94,12 +94,22 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ALTO Processing Comparison</title>
     <style>
+:root {
+            --thumbnail-drawer-width: clamp(260px, 35vw, 460px);
+            --thumbnail-toggle-size: 32px;
+        }
         body {
             font-family: Arial, sans-serif;
-            max-width: 1200px;
-            margin: 0 auto;
+            margin: 0;
             padding: 20px;
             background-color: #f5f5f5;
+        }
+        .page-shell {
+            position: relative;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding-left: 0;
+            overflow: visible;
         }
         .container {
             background: white;
@@ -108,6 +118,239 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             margin-bottom: 20px;
             position: relative;
+            max-width: 1200px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        .main-content {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        #thumbnail-drawer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: var(--thumbnail-drawer-width);
+            transform: translateX(-100%);
+            transition: transform 0.3s ease, opacity 0.3s ease;
+            pointer-events: auto;
+        }
+        .thumbnail-panel {
+            background: white;
+            border: 1px solid #dbe4f0;
+            border-right: none;
+            border-radius: 8px 0 0 8px;
+            box-shadow: none;
+            padding: 16px 16px 16px 18px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            height: 100%;
+            max-height: none;
+            overflow: hidden;
+        }
+        body.thumbnail-drawer-collapsed #thumbnail-drawer {
+            transform: translateX(0);
+            opacity: 0;
+            pointer-events: none;
+        }
+        body.thumbnail-drawer-collapsed .thumbnail-panel {
+            pointer-events: none;
+        }
+        .thumbnail-toggle {
+            position: absolute;
+            top: 18px;
+            left: 0;
+            transform: translateX(-50%);
+            width: var(--thumbnail-toggle-size);
+            height: var(--thumbnail-toggle-size);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: white;
+            color: #1f2933;
+            font-weight: 600;
+            border: 1px solid #d0d7e2;
+            border-radius: 10px;
+            box-shadow: none;
+            cursor: pointer;
+            transition: background 0.2s ease, color 0.2s ease, box-shadow 0.25s ease;
+            z-index: 6;
+        }
+        .thumbnail-toggle:hover {
+            background: #1f78ff;
+            color: #ffffff;
+            box-shadow: none;
+        }
+        .page-jump {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+        }
+        .page-jump label {
+            margin: 0;
+            font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            color: #1f2933;
+        }
+        #page-number-input {
+            width: 72px;
+            padding: 6px 8px;
+            border: 1px solid #cfd4dc;
+            border-radius: 4px;
+            font-size: 14px;
+            background: #fff;
+        }
+        #page-number-input:disabled {
+            background-color: #f1f3f5;
+            color: #98a0ab;
+        }
+        .page-jump-total {
+            color: #52606d;
+            font-size: 13px;
+        }
+        .thumbnail-scroll {
+            flex: 1 1 auto;
+            overflow-y: auto;
+            padding: 8px;
+            border: 1px solid #e0e6ef;
+            border-radius: 8px;
+            background: #f9fbff;
+            box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.08);
+            max-height: inherit;
+            min-height: 0;
+        }
+        .thumbnail-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+            gap: 8px;
+        }
+        .page-thumbnail {
+            position: relative;
+            border: none;
+            background: #ffffff;
+            color: inherit;
+            border-radius: 6px;
+            padding: 0;
+            cursor: pointer;
+            overflow: hidden;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.1);
+            transition: transform 0.15s ease, box-shadow 0.15s ease;
+            font-family: inherit;
+            aspect-ratio: 3 / 4;
+        }
+        .thumbnail-placeholder {
+            position: absolute;
+            inset: 8px;
+            border-radius: 6px;
+            background: linear-gradient(135deg, #e7edf5 0%, #f1f5fb 100%);
+            transition: opacity 0.2s ease;
+        }
+        .page-thumbnail:hover {
+            background: #ffffff;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 14px rgba(15, 23, 42, 0.18);
+        }
+        .page-thumbnail:disabled {
+            cursor: default;
+            opacity: 0.6;
+            box-shadow: none;
+        }
+        .page-thumbnail:disabled:hover {
+            transform: none;
+            box-shadow: none;
+        }
+        .page-thumbnail img {
+            display: block;
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            background: #f0f2f7;
+            opacity: 0;
+            transition: opacity 0.2s ease;
+        }
+        .page-thumbnail.is-loaded .thumbnail-placeholder {
+            opacity: 0;
+            visibility: hidden;
+        }
+        .page-thumbnail.is-loaded img {
+            opacity: 1;
+        }
+        .page-thumbnail-label {
+            position: absolute;
+            top: 6px;
+            right: 6px;
+            background: rgba(15, 23, 42, 0.75);
+            color: #ffffff;
+            font-size: 11px;
+            padding: 3px 5px;
+            border-radius: 4px;
+            line-height: 1;
+        }
+        .page-thumbnail.is-active {
+            outline: 3px solid #1f78ff;
+            outline-offset: 0;
+            box-shadow: 0 0 0 2px rgba(31, 120, 255, 0.25);
+        }
+        .page-thumbnail:focus-visible {
+            outline: 3px solid #1f78ff;
+            outline-offset: 0;
+        }
+        .thumbnail-empty {
+            font-size: 13px;
+            color: #5f6b7c;
+            padding: 20px 8px;
+            text-align: center;
+        }
+        .main-content {
+            min-width: 0;
+        }
+        @media (max-width: 1100px) {
+            body {
+                padding: 12px;
+            }
+            .page-shell {
+                max-width: none;
+            }
+            .container {
+                padding: 16px;
+                padding-top: 20px;
+                padding-bottom: 20px;
+            }
+            #thumbnail-drawer {
+                position: static;
+                width: 100%;
+                transform: none;
+                margin-bottom: 12px;
+            }
+            body.thumbnail-drawer-collapsed #thumbnail-drawer {
+                transform: none;
+            }
+            .thumbnail-panel {
+                max-height: none;
+                width: 100%;
+                border-right: 1px solid #dbe4f0;
+                border-radius: 8px;
+                pointer-events: auto;
+            }
+            .thumbnail-scroll {
+                max-height: none;
+            }
+            .thumbnail-toggle {
+                position: static;
+                margin-left: auto;
+                box-shadow: none;
+            }
+            body.thumbnail-drawer-collapsed #thumbnail-scroll {
+                visibility: visible;
+            }
+        }
+        @media (max-height: 700px) {
+            .thumbnail-panel {
+                max-height: calc(100vh - 120px);
+            }
         }
         .form-group {
             margin-bottom: 15px;
@@ -117,14 +360,15 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             margin-bottom: 5px;
             font-weight: bold;
         }
-        input[type="text"] {
+        input[type="text"],
+        input[type="number"] {
             width: 100%;
             padding: 8px;
             border: 1px solid #ddd;
             border-radius: 4px;
             font-size: 14px;
         }
-        button {
+        button:not(.page-thumbnail):not(.thumbnail-toggle) {
             background-color: #007bff;
             color: white;
             padding: 10px 20px;
@@ -133,10 +377,10 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             cursor: pointer;
             font-size: 14px;
         }
-        button:hover {
+        button:not(.page-thumbnail):not(.thumbnail-toggle):hover {
             background-color: #0056b3;
         }
-        button:disabled {
+        button:not(.page-thumbnail):not(.thumbnail-toggle):disabled {
             background-color: #9aa0a6;
             cursor: not-allowed;
         }
@@ -202,6 +446,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             align-self: flex-start;
             height: auto;
             min-height: 120px;
+            min-height: 200px;
         }
         .page-preview.preview-visible {
             display: flex;
@@ -256,6 +501,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             border-radius: 4px;
         }
         #preview-status {
+            width: 100%;
             text-align: right;
             max-width: 220px;
         }
@@ -270,16 +516,17 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             color: #333;
         }
         .loading {
-            position: absolute;
+            position: fixed;
             inset: 0;
             background: rgba(255, 255, 255, 0.82);
+            backdrop-filter: blur(3px);
             display: none;
             align-items: center;
             justify-content: center;
             flex-direction: column;
             gap: 12px;
             text-align: center;
-            z-index: 100;
+            z-index: 200;
         }
         .container.is-loading .loading {
             display: flex;
@@ -445,73 +692,91 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>ALTO Processing Comparison</h1>
-        <p>Porovnání původního TypeScript a nového Python zpracování ALTO XML</p>
-
-        <div class="form-group">
-            <label for="uuid">UUID stránky nebo dokumentu:</label>
-            <input type="text" id="uuid" placeholder="Zadejte UUID (např. 673320dd-0071-4a03-bf82-243ee206bc0b)" value="673320dd-0071-4a03-bf82-243ee206bc0b">
-        </div>
-
-        <div class="action-row">
-            <button id="load-button" type="button" onclick="handleLoadClick()">Načíst stránku</button>
-        </div>
-
-        <div id="book-info" class="info-section" style="display: none;">
-            <h2 id="book-title">Informace o knize</h2>
-            <p id="book-handle" class="muted"></p>
-            <p id="book-library" class="muted"></p>
-            <div id="book-constants" class="book-summary-grid" style="display: none;"></div>
-            <div id="book-metadata-empty" class="muted" style="display: none;">Metadata se nepodařilo načíst.</div>
-            <dl id="book-metadata" class="metadata-grid"></dl>
-        </div>
-
-        <div id="page-info" class="info-section" style="display: none;">
-                <div class="page-info-layout">
-                    <div class="page-details">
-                        <h2>Informace o straně</h2>
-                        <p id="page-summary" class="muted"></p>
-                        <p id="page-side" class="muted"></p>
-                        <p id="page-uuid" class="muted"></p>
-                        <p id="page-handle" class="muted"></p>
+    <div class="page-shell">
+        <aside id="thumbnail-drawer" aria-label="Náhledy stránek">
+            <div class="thumbnail-panel">
+                <div class="page-jump">
+                    <label for="page-number-input">Strana</label>
+                    <input type="number" id="page-number-input" min="1" step="1" inputmode="numeric" aria-label="Zadat číslo strany">
+                    <span id="page-number-total" class="page-jump-total"></span>
+                </div>
+                <div id="thumbnail-scroll" class="thumbnail-scroll">
+                    <div id="thumbnail-grid" class="thumbnail-grid">
+                        <div class="thumbnail-empty">Náhledy budou k dispozici po načtení knihy.</div>
                     </div>
-                    <div class="page-alto-btn">
-                        <span id="alto-preview-btn" style="display: none;">Zobrazit ALTO</span>
-                    </div>
-                    <div id="page-preview" class="page-preview" tabindex="0">
-                        <div id="preview-status" class="muted"></div>
-                        <img id="preview-image-thumb" alt="Náhled stránky">
-                    </div>
-                    <div id="preview-large" class="preview-large" aria-hidden="true">
-                        <img id="preview-image-large" alt="Náhled stránky ve větší velikosti">
-                    </div>
+                </div>
             </div>
-        </div>
+        </aside>
+        <button id="thumbnail-toggle" class="thumbnail-toggle" type="button" aria-expanded="true" aria-controls="thumbnail-grid" aria-label="Skrýt náhledy">&gt;</button>
+        <div class="container">
+            <div class="main-content">
+                <h1>ALTO Processing Comparison</h1>
+                <p>Porovnání původního TypeScript a nového Python zpracování ALTO XML</p>
 
-        <div id="page-tools" class="tools-row" style="display: none;">
-            <div class="navigation-controls">
-                <button id="prev-page" type="button" aria-label="Předchozí stránka">◀</button>
-                <span id="page-position">-</span>
-                <button id="next-page" type="button" aria-label="Další stránka">▶</button>
-            </div>
-        </div>
+                <div class="form-group">
+                    <label for="uuid">UUID stránky nebo dokumentu:</label>
+                    <input type="text" id="uuid" placeholder="Zadejte UUID (např. 673320dd-0071-4a03-bf82-243ee206bc0b)" value="673320dd-0071-4a03-bf82-243ee206bc0b">
+                </div>
 
-        <div id="loading" class="loading" aria-live="polite" aria-hidden="true">
-            <div class="loading-content">
-                <div class="loading-spinner" role="presentation"></div>
-                <p>Zpracovávám ALTO data...</p>
-            </div>
-        </div>
+                <div class="action-row">
+                    <button id="load-button" type="button" onclick="handleLoadClick()">Načíst stránku</button>
+                </div>
 
-        <div id="results" class="results" style="display: none;">
-            <div class="result-box">
-                <h3>Python výsledek</h3>
-                <div id="python-result"></div>
+                <div id="book-info" class="info-section" style="display: none;">
+                    <h2 id="book-title">Informace o knize</h2>
+                    <p id="book-handle" class="muted"></p>
+                    <p id="book-library" class="muted"></p>
+                    <div id="book-constants" class="book-summary-grid" style="display: none;"></div>
+                    <div id="book-metadata-empty" class="muted" style="display: none;">Metadata se nepodařilo načíst.</div>
+                    <dl id="book-metadata" class="metadata-grid"></dl>
+                </div>
+
+                <div id="page-info" class="info-section" style="display: none;">
+                    <div class="page-info-layout">
+                        <div class="page-details">
+                            <h2>Informace o straně</h2>
+                            <p id="page-summary" class="muted"></p>
+                            <p id="page-side" class="muted"></p>
+                            <p id="page-uuid" class="muted"></p>
+                            <p id="page-handle" class="muted"></p>
+                        </div>
+                        <div class="page-alto-btn">
+                            <span id="alto-preview-btn" style="display: none;">Zobrazit ALTO</span>
+                        </div>
+                        <div id="page-preview" class="page-preview" tabindex="0">
+                            <div id="preview-status" class="muted"></div>
+                            <img id="preview-image-thumb" alt="Náhled stránky">
+                        </div>
+                        <div id="preview-large" class="preview-large" aria-hidden="true">
+                            <img id="preview-image-large" alt="Náhled stránky ve větší velikosti">
+                        </div>
+                    </div>
+                </div>
+
+                <div id="page-tools" class="tools-row" style="display: none;">
+                    <div class="navigation-controls">
+                        <button id="prev-page" type="button" aria-label="Předchozí stránka">◀</button>
+                        <span id="page-position">-</span>
+                        <button id="next-page" type="button" aria-label="Další stránka">▶</button>
+                    </div>
+                </div>
+
+                <div id="results" class="results" style="display: none;">
+                    <div class="result-box">
+                        <h3>Python výsledek</h3>
+                        <div id="python-result"></div>
+                    </div>
+                    <div class="result-box">
+                        <h3>TypeScript výsledek (simulace)</h3>
+                        <div id="typescript-result"></div>
+                    </div>
+                </div>
             </div>
-            <div class="result-box">
-                <h3>TypeScript výsledek (simulace)</h3>
-                <div id="typescript-result"></div>
+            <div id="loading" class="loading" aria-live="polite" aria-hidden="true">
+                <div class="loading-content">
+                    <div class="loading-spinner" role="presentation"></div>
+                    <p>Zpracovávám ALTO data...</p>
+                </div>
             </div>
         </div>
     </div>
@@ -533,6 +798,72 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         const inflightPreviewRequests = new Map();
         let cacheWindowUuids = new Set();
         let currentAltoXml = '';
+        let bookPages = [];
+        let lastRenderedBookUuid = null;
+        let lastActiveThumbnailUuid = null;
+        let thumbnailDrawerCollapsed = false;
+        let thumbnailObserver = null;
+        function clearThumbnailQueue() {
+            thumbnailQueue.length = 0;
+        }
+
+        function drainThumbnailQueue() {
+            while (thumbnailQueue.length && activeThumbnailLoads < MAX_THUMBNAIL_REQUESTS) {
+                const img = thumbnailQueue.shift();
+                if (!img || !img.dataset) {
+                    continue;
+                }
+                delete img.dataset.queued;
+                startThumbnailLoad(img);
+            }
+        }
+
+        function finalizeThumbnail(img, success) {
+            if (img && img.dataset) {
+                delete img.dataset.loading;
+                delete img.dataset.queued;
+                if (success) {
+                    img.dataset.loaded = 'true';
+                } else {
+                    delete img.dataset.loaded;
+                }
+            }
+            if (activeThumbnailLoads > 0) {
+                activeThumbnailLoads -= 1;
+            }
+            drainThumbnailQueue();
+        }
+
+        function startThumbnailLoad(img) {
+            if (!img || !img.dataset) {
+                return;
+            }
+            if (img.dataset.loaded === 'true' || img.dataset.loading === 'true') {
+                return;
+            }
+            const src = img.dataset.src;
+            if (!src) {
+                return;
+            }
+            img.dataset.loading = 'true';
+            activeThumbnailLoads += 1;
+            img.src = src;
+            if (img.complete) {
+                if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+                    img.dispatchEvent(new Event('load'));
+                } else if (img.naturalWidth === 0) {
+                    img.dispatchEvent(new Event('error'));
+                }
+            }
+        }
+
+        function flushAllThumbnailLoads() {
+            activeThumbnailLoads = 0;
+            clearThumbnailQueue();
+        }
+        const MAX_THUMBNAIL_REQUESTS = 6;
+        const thumbnailQueue = [];
+        let activeThumbnailLoads = 0;
 
         function cacheProcessData(uuid, payload) {
             if (!uuid || !payload) {
@@ -690,6 +1021,460 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             }
         }
 
+        function setThumbnailDrawerCollapsed(collapsed) {
+            const desiredState = Boolean(collapsed);
+            thumbnailDrawerCollapsed = desiredState;
+            document.body.classList.toggle('thumbnail-drawer-collapsed', thumbnailDrawerCollapsed);
+            const toggle = document.getElementById('thumbnail-toggle');
+            if (toggle) {
+                toggle.textContent = thumbnailDrawerCollapsed ? '<' : '>';
+                toggle.setAttribute('aria-expanded', (!thumbnailDrawerCollapsed).toString());
+                toggle.setAttribute('aria-label', thumbnailDrawerCollapsed ? 'Zobrazit náhledy' : 'Skrýt náhledy');
+            }
+            const drawerPanel = document.querySelector('#thumbnail-drawer .thumbnail-panel');
+            if (drawerPanel) {
+                drawerPanel.setAttribute('aria-hidden', thumbnailDrawerCollapsed ? 'true' : 'false');
+            }
+            const drawer = document.getElementById('thumbnail-drawer');
+            if (drawer) {
+                drawer.setAttribute('aria-hidden', thumbnailDrawerCollapsed ? 'true' : 'false');
+            }
+            if (thumbnailDrawerCollapsed) {
+                resetThumbnailObserver();
+            } else {
+                ensureThumbnailObserver();
+            }
+            if (!thumbnailDrawerCollapsed) {
+                syncThumbnailDrawerHeight();
+            }
+        }
+
+        function navigateToUuid(targetUuid) {
+            if (!targetUuid) {
+                return;
+            }
+            const uuidField = document.getElementById("uuid");
+            if (uuidField) {
+                uuidField.value = targetUuid;
+            }
+            processAlto();
+        }
+
+        function clearThumbnailGrid(message) {
+            const grid = document.getElementById("thumbnail-grid");
+            if (!grid) {
+                return;
+            }
+            resetThumbnailObserver();
+            grid.innerHTML = "";
+            if (message) {
+                const placeholder = document.createElement("div");
+                placeholder.className = "thumbnail-empty";
+                placeholder.textContent = message;
+                grid.appendChild(placeholder);
+            }
+        }
+
+        function normalizePages(pages) {
+            if (!Array.isArray(pages)) {
+                return [];
+            }
+            return pages.map((entry, idx) => {
+                const normalized = Object.assign({}, entry || {});
+                if (typeof normalized.index !== "number" || !Number.isFinite(normalized.index)) {
+                    normalized.index = idx;
+                }
+                normalized.uuid = normalized.uuid || '';
+                return normalized;
+            });
+        }
+
+        function updateThumbnailLabels(pages) {
+            const grid = document.getElementById("thumbnail-grid");
+            if (!grid || !pages.length) {
+                return;
+            }
+            const buttons = grid.querySelectorAll('.page-thumbnail');
+            buttons.forEach(button => {
+                const listIndex = Number.parseInt(button.dataset.listIndex || "-1", 10);
+                const page = Number.isFinite(listIndex) && listIndex >= 0 && listIndex < pages.length ? pages[listIndex] : null;
+                const pageNumber = page && page.pageNumber ? page.pageNumber : '';
+                const displayIndex = page && typeof page.index === "number" && Number.isFinite(page.index) ? page.index : listIndex;
+                const labelText = pageNumber ? `Strana ${pageNumber}` : `Strana ${displayIndex + 1}`;
+
+                button.setAttribute('aria-label', labelText);
+
+                const thumbImage = button.querySelector('img');
+                if (thumbImage) {
+                    thumbImage.alt = labelText;
+                }
+
+                let labelEl = button.querySelector('.page-thumbnail-label');
+                if (pageNumber) {
+                    if (!labelEl) {
+                        labelEl = document.createElement('span');
+                        labelEl.className = 'page-thumbnail-label';
+                        button.appendChild(labelEl);
+                    }
+                    labelEl.textContent = pageNumber;
+                } else if (labelEl) {
+                    labelEl.remove();
+                }
+            });
+        }
+
+        function highlightActiveThumbnail(uuid) {
+            const grid = document.getElementById("thumbnail-grid");
+            if (!grid) {
+                lastActiveThumbnailUuid = null;
+                return;
+            }
+
+            let activeButton = null;
+            grid.querySelectorAll('.page-thumbnail').forEach(button => {
+                if (uuid && button.dataset.uuid === uuid) {
+                    button.classList.add('is-active');
+                    activeButton = button;
+                } else {
+                    button.classList.remove('is-active');
+                }
+            });
+
+            const shouldScroll = uuid && uuid !== lastActiveThumbnailUuid && !thumbnailDrawerCollapsed;
+            if (activeButton && shouldScroll) {
+                const scrollContainer = document.getElementById('thumbnail-scroll');
+                if (scrollContainer) {
+                    const containerRect = scrollContainer.getBoundingClientRect();
+                    const buttonRect = activeButton.getBoundingClientRect();
+                    if (buttonRect.top < containerRect.top || buttonRect.bottom > containerRect.bottom) {
+                        activeButton.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+                    }
+                } else {
+                    activeButton.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+                }
+            }
+
+            lastActiveThumbnailUuid = uuid || null;
+        }
+
+        function syncThumbnailDrawerHeight() {
+            const drawer = document.getElementById('thumbnail-drawer');
+            const panel = drawer ? drawer.querySelector('.thumbnail-panel') : null;
+            const container = document.querySelector('.container');
+            if (!drawer || !container) {
+                return;
+            }
+            const rect = container.getBoundingClientRect();
+            const height = rect && Number.isFinite(rect.height) ? rect.height : container.offsetHeight;
+            if (!Number.isFinite(height) || height <= 0) {
+                return;
+            }
+            drawer.style.height = `${height}px`;
+            if (panel) {
+                const styles = window.getComputedStyle(panel);
+                const paddingTop = parseFloat(styles.paddingTop) || 0;
+                const paddingBottom = parseFloat(styles.paddingBottom) || 0;
+                const borderTop = parseFloat(styles.borderTopWidth) || 0;
+                const borderBottom = parseFloat(styles.borderBottomWidth) || 0;
+                const innerHeight = Math.max(height - paddingTop - paddingBottom - borderTop - borderBottom, 0);
+                panel.style.height = `${innerHeight}px`;
+                panel.style.maxHeight = `${innerHeight}px`;
+            }
+        }
+
+        function resetThumbnailObserver() {
+            if (thumbnailObserver) {
+                thumbnailObserver.disconnect();
+                thumbnailObserver = null;
+            }
+            flushAllThumbnailLoads();
+        }
+
+        function ensureThumbnailObserver() {
+            if (thumbnailObserver) {
+                return thumbnailObserver;
+            }
+            if (!('IntersectionObserver' in window)) {
+                return null;
+            }
+            const scrollContainer = document.getElementById('thumbnail-scroll');
+            if (!scrollContainer) {
+                return null;
+            }
+            thumbnailObserver = new IntersectionObserver((entries) => {
+                entries.forEach(entry => {
+                    if (entry.isIntersecting) {
+                        const img = entry.target;
+                        loadThumbnailImage(img);
+                        if (thumbnailObserver) {
+                            thumbnailObserver.unobserve(img);
+                        }
+                    }
+                });
+            }, {
+                root: scrollContainer,
+                rootMargin: '200px 0px',
+                threshold: 0.05,
+            });
+            const grid = document.getElementById('thumbnail-grid');
+            if (grid) {
+                grid.querySelectorAll('img[data-src]').forEach(img => {
+                    if (!img.dataset.loaded || img.dataset.loaded !== 'true') {
+                        thumbnailObserver.observe(img);
+                    }
+                });
+            }
+            return thumbnailObserver;
+        }
+
+        function loadThumbnailImage(img, immediate = false) {
+            if (!img || !img.dataset || img.dataset.loaded === 'true' || !img.dataset.src) {
+                return;
+            }
+            if (img.dataset.loading === 'true') {
+                return;
+            }
+            if (immediate) {
+                startThumbnailLoad(img);
+            } else if (thumbnailObserver) {
+                if (!img.dataset.queued && activeThumbnailLoads >= MAX_THUMBNAIL_REQUESTS) {
+                    img.dataset.queued = 'true';
+                    thumbnailQueue.push(img);
+                } else {
+                    startThumbnailLoad(img);
+                }
+            } else {
+                if (activeThumbnailLoads < MAX_THUMBNAIL_REQUESTS) {
+                    startThumbnailLoad(img);
+                } else if (!img.dataset.queued) {
+                    img.dataset.queued = 'true';
+                    thumbnailQueue.push(img);
+                }
+            }
+        }
+
+        function updatePageNumberInput() {
+            const input = document.getElementById('page-number-input');
+            const totalLabel = document.getElementById('page-number-total');
+            const total = bookPages.length || (navigationState && typeof navigationState.total === 'number' ? navigationState.total : 0);
+
+            if (totalLabel) {
+                totalLabel.textContent = total ? `/ ${total}` : '';
+            }
+
+            if (!input) {
+                return;
+            }
+
+            if (currentPage && typeof currentPage.index === 'number' && Number.isFinite(currentPage.index) && currentPage.index >= 0) {
+                input.value = String(currentPage.index + 1);
+            } else if (total) {
+                input.value = '1';
+            } else {
+                input.value = '';
+            }
+
+            input.disabled = total === 0;
+        }
+
+        function ensureThumbnailGrid(pages, bookUuid) {
+            const grid = document.getElementById('thumbnail-grid');
+            const scrollContainer = document.getElementById('thumbnail-scroll');
+
+            const normalizedPages = normalizePages(pages);
+            bookPages = normalizedPages;
+
+            if (!grid) {
+                lastRenderedBookUuid = null;
+                highlightActiveThumbnail(null);
+                updatePageNumberInput();
+                return;
+            }
+
+            if (!normalizedPages.length) {
+                lastRenderedBookUuid = null;
+                clearThumbnailGrid('Náhledy nejsou k dispozici.');
+                highlightActiveThumbnail(null);
+                updatePageNumberInput();
+                return;
+            }
+
+            const normalizedBookUuid = bookUuid || null;
+            const isSameBook = normalizedBookUuid === lastRenderedBookUuid;
+            const shouldRender = !isSameBook || grid.querySelectorAll('.page-thumbnail').length !== normalizedPages.length;
+
+            if (shouldRender) {
+                const previousScrollTop = isSameBook && scrollContainer ? scrollContainer.scrollTop : 0;
+                resetThumbnailObserver();
+                grid.innerHTML = '';
+
+                const priorityIndices = new Set();
+                for (let i = 0; i < 6 && i < normalizedPages.length; i += 1) {
+                    priorityIndices.add(i);
+                }
+                if (currentPage && typeof currentPage.index === 'number' && Number.isFinite(currentPage.index)) {
+                    const base = Math.max(Math.min(currentPage.index - 1, normalizedPages.length - 1), 0);
+                    for (let i = base; i <= Math.min(base + 2, normalizedPages.length - 1); i += 1) {
+                        priorityIndices.add(i);
+                    }
+                }
+
+                const observer = ensureThumbnailObserver();
+
+                normalizedPages.forEach((page, listIndex) => {
+                    const button = document.createElement('button');
+                    button.type = 'button';
+                    button.className = 'page-thumbnail';
+                    button.dataset.uuid = page.uuid || '';
+                    button.dataset.index = String(page.index);
+                    button.dataset.listIndex = String(listIndex);
+
+                    const labelText = page.pageNumber ? `Strana ${page.pageNumber}` : `Strana ${page.index + 1}`;
+                    button.setAttribute('aria-label', labelText);
+
+                    if (page.uuid) {
+                        button.addEventListener('click', () => navigateToUuid(page.uuid));
+                    } else {
+                        button.disabled = true;
+                    }
+
+                    const placeholder = document.createElement('div');
+                    placeholder.className = 'thumbnail-placeholder';
+                    button.appendChild(placeholder);
+
+                    const img = document.createElement('img');
+                    img.loading = 'lazy';
+                    img.decoding = 'async';
+                    img.alt = labelText;
+                    const normalizedUuid = typeof page.uuid === 'string' ? page.uuid : '';
+                    const providedThumb = typeof page.thumbnail === 'string' ? page.thumbnail : '';
+                    const fallbackThumb = normalizedUuid ? `/preview?uuid=${encodeURIComponent(normalizedUuid)}&stream=IMG_THUMB` : '';
+                    const thumbSrc = providedThumb || fallbackThumb;
+                    if (thumbSrc) {
+                        img.dataset.src = thumbSrc;
+                    }
+                    const markLoaded = () => {
+                        button.classList.add('is-loaded');
+                        img.dataset.loaded = 'true';
+                    };
+                    img.addEventListener('load', () => {
+                        const success = img.naturalWidth > 0 && img.naturalHeight > 0;
+                        if (success) {
+                            markLoaded();
+                        } else {
+                            button.classList.remove('is-loaded');
+                        }
+                        finalizeThumbnail(img, success);
+                    });
+                    img.addEventListener('error', () => {
+                        button.classList.remove('is-loaded');
+                        finalizeThumbnail(img, false);
+                    });
+                    button.appendChild(img);
+
+                    if (page.pageNumber) {
+                        const badge = document.createElement('span');
+                        badge.className = 'page-thumbnail-label';
+                        badge.textContent = page.pageNumber;
+                        button.appendChild(badge);
+                    }
+
+                    grid.appendChild(button);
+
+                    if (img.dataset.src) {
+                        if (priorityIndices.has(listIndex)) {
+                            loadThumbnailImage(img, true);
+                        } else if (observer) {
+                            observer.observe(img);
+                        } else {
+                            loadThumbnailImage(img);
+                        }
+                    }
+                });
+
+                if (scrollContainer) {
+                    scrollContainer.scrollTop = previousScrollTop;
+                }
+
+                lastRenderedBookUuid = normalizedBookUuid;
+            } else {
+                updateThumbnailLabels(normalizedPages);
+            }
+
+            highlightActiveThumbnail(currentPage ? currentPage.uuid : null);
+            updatePageNumberInput();
+            syncThumbnailDrawerHeight();
+        }
+
+        function handlePageNumberJump(rawValue) {
+            const input = document.getElementById('page-number-input');
+            if (!input || !bookPages.length) {
+                updatePageNumberInput();
+                return;
+            }
+
+            const value = rawValue !== undefined ? rawValue : input.value;
+            const parsed = Number.parseInt(String(value).trim(), 10);
+
+            if (!Number.isFinite(parsed)) {
+                updatePageNumberInput();
+                return;
+            }
+
+            const boundedIndex = Math.min(Math.max(parsed - 1, 0), bookPages.length - 1);
+            const target = bookPages[boundedIndex];
+
+            if (!target || !target.uuid) {
+                updatePageNumberInput();
+                return;
+            }
+
+            if (currentPage && currentPage.uuid === target.uuid) {
+                updatePageNumberInput();
+                return;
+            }
+
+            navigateToUuid(target.uuid);
+        }
+
+        function setupPageNumberJump() {
+            const input = document.getElementById('page-number-input');
+            if (!input) {
+                return;
+            }
+
+            input.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter') {
+                    event.preventDefault();
+                    handlePageNumberJump(input.value);
+                }
+            });
+
+            input.addEventListener('change', () => {
+                handlePageNumberJump(input.value);
+            });
+
+            input.addEventListener('blur', () => {
+                updatePageNumberInput();
+            });
+
+            updatePageNumberInput();
+        }
+
+        function initializeThumbnailDrawer() {
+            const toggle = document.getElementById('thumbnail-toggle');
+            if (!toggle) {
+                thumbnailDrawerCollapsed = false;
+                return;
+            }
+
+            toggle.addEventListener('click', () => {
+                setThumbnailDrawerCollapsed(!thumbnailDrawerCollapsed);
+            });
+
+            setThumbnailDrawerCollapsed(false);
+        }
+
         function setToolsVisible(show) {
             const tools = document.getElementById("page-tools");
             if (tools) {
@@ -707,6 +1492,9 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             }
             if (loading) {
                 loading.setAttribute('aria-hidden', isActive ? 'false' : 'true');
+            }
+            if (!isActive) {
+                syncThumbnailDrawerHeight();
             }
         }
 
@@ -735,7 +1523,6 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             const thumb = document.getElementById("preview-image-thumb");
             const largeImg = document.getElementById("preview-image-large");
             const largeBox = document.getElementById("preview-large");
-            const status = document.getElementById("preview-status");
 
             setLargePreviewActive();
 
@@ -775,16 +1562,23 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 largeBox.style.height = "";
             }
 
-            if (status) {
-                status.textContent = "";
-                status.style.display = "none";
-            }
-
             if (container) {
                 container.style.display = "none";
-                container.classList.remove("preview-visible", "preview-loaded", "preview-error");
+                container.classList.remove("preview-visible", "preview-loaded", "preview-error", "preview-has-status");
                 delete container.dataset.previewStream;
             }
+            updatePreviewStatus('');
+        }
+
+        function updatePreviewStatus(message) {
+            const status = document.getElementById('preview-status');
+            const container = document.getElementById('page-preview');
+            if (!status || !container) {
+                return;
+            }
+            status.textContent = message || '';
+            const hasMessage = Boolean(message);
+            container.classList.toggle('preview-has-status', hasMessage);
         }
 
         function computeThumbMaxHeight() {
@@ -948,9 +1742,8 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             const thumb = document.getElementById("preview-image-thumb");
             const largeImg = document.getElementById("preview-image-large");
             const largeBox = document.getElementById("preview-large");
-            const status = document.getElementById("preview-status");
 
-            if (!container || !thumb || !largeImg || !largeBox || !status || !previewObjectUrl) {
+            if (!container || !thumb || !largeImg || !largeBox || !previewObjectUrl) {
                 return;
             }
 
@@ -982,8 +1775,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 thumb.onload = finalize;
                 thumb.src = previewObjectUrl;
                 thumb.onerror = () => {
-                    status.textContent = "Náhled se nepodařilo načíst.";
-                    status.style.display = "block";
+                    updatePreviewStatus("Náhled se nepodařilo načíst.");
                     container.classList.add("preview-error");
                     container.classList.remove("preview-loaded");
                     setLargePreviewActive(false);
@@ -991,8 +1783,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 if (thumb.complete && thumb.naturalWidth > 0) {
                     finalize();
                 } else if (thumb.complete) {
-                    status.textContent = "Náhled se nepodařilo načíst.";
-                    status.style.display = "block";
+                    updatePreviewStatus("Náhled se nepodařilo načíst.");
                     container.classList.add("preview-error");
                     container.classList.remove("preview-loaded");
                     setLargePreviewActive();
@@ -1003,8 +1794,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 thumb.style.opacity = "0";
                 thumb.onload = finalize;
                 thumb.onerror = () => {
-                    status.textContent = "Náhled se nepodařilo načíst.";
-                    status.style.display = "block";
+                    updatePreviewStatus("Náhled se nepodařilo načíst.");
                     container.classList.add("preview-error");
                     container.classList.remove("preview-loaded");
                     setLargePreviewActive(false);
@@ -1014,10 +1804,10 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             container.style.display = "flex";
             container.classList.add("preview-visible", "preview-loaded");
             container.classList.remove("preview-error");
-            status.textContent = "";
-            status.style.display = "none";
+            updatePreviewStatus('');
 
             setLargePreviewActive();
+            container.style.height = "";
         }
 
         async function loadPreview(uuid) {
@@ -1025,16 +1815,20 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             const thumb = document.getElementById("preview-image-thumb");
             const largeImg = document.getElementById("preview-image-large");
             const largeBox = document.getElementById("preview-large");
-            const status = document.getElementById("preview-status");
-
-            if (!container || !thumb || !largeImg || !largeBox || !status || !uuid) {
+            if (!container || !thumb || !largeImg || !largeBox || !uuid) {
                 return;
             }
 
             setLargePreviewActive(false);
 
+            const preservedHeight = container.offsetHeight || 0;
+            if (preservedHeight > 0) {
+                container.style.height = `${preservedHeight}px`;
+            }
+
             if (previewImageUuid === uuid && previewObjectUrl) {
                 showPreviewFromCache();
+                container.style.height = "";
                 return;
             }
 
@@ -1043,6 +1837,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 previewImageUuid = uuid;
                 previewObjectUrl = cachedEntry.objectUrl;
                 showPreviewFromCache(cachedEntry);
+                container.style.height = "";
                 return;
             }
 
@@ -1056,8 +1851,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             container.style.display = "flex";
             container.classList.add("preview-visible");
             container.classList.remove("preview-loaded", "preview-error");
-            status.textContent = "Načítám náhled...";
-            status.style.display = "block";
+            updatePreviewStatus("Načítám náhled...");
             thumb.style.display = "block";
             thumb.style.opacity = "0";
 
@@ -1067,6 +1861,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 const entry = await ensurePreviewEntry(uuid);
 
                 if (!entry || previewImageUuid !== uuid) {
+                    container.style.height = "";
                     return;
                 }
 
@@ -1097,8 +1892,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 thumb.onerror = () => {
                     if (previewImageUuid === uuid) {
                         console.error("Chyba při načítání obrázku náhledu");
-                        status.textContent = "Náhled se nepodařilo načíst.";
-                        status.style.display = "block";
+                        updatePreviewStatus("Náhled se nepodařilo načíst.");
                         container.classList.add("preview-error");
                         container.classList.remove("preview-loaded");
                         setLargePreviewActive();
@@ -1109,8 +1903,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
 
                 if (thumb.complete && thumb.naturalWidth === 0) {
                     if (previewImageUuid === uuid) {
-                        status.textContent = "Náhled se nepodařilo načíst.";
-                        status.style.display = "block";
+                        updatePreviewStatus("Náhled se nepodařilo načíst.");
                         container.classList.add("preview-error");
                         container.classList.remove("preview-loaded");
                         setLargePreviewActive();
@@ -1120,15 +1913,13 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 container.dataset.previewStream = entry.stream;
 
                 container.classList.add("preview-loaded");
-                status.textContent = "";
-                status.style.display = "none";
+                updatePreviewStatus('');
 
                 setLargePreviewActive();
             } catch (error) {
                 if (previewImageUuid === uuid) {
                     console.error("Chyba při načítání náhledu:", error);
-                    status.textContent = "Náhled se nepodařilo načíst.";
-                    status.style.display = "block";
+                    updatePreviewStatus("Náhled se nepodařilo načíst.");
                     container.classList.add("preview-error");
                     setLargePreviewActive(false);
                 }
@@ -1139,6 +1930,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 if (handleLoad) {
                     thumb.removeEventListener("load", handleLoad);
                 }
+                container.style.height = "";
             }
         }
 
@@ -1340,6 +2132,8 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 resetPreview();
                 setToolsVisible(false);
                 refreshPagePosition();
+                highlightActiveThumbnail(null);
+                updatePageNumberInput();
                 return;
             }
 
@@ -1386,11 +2180,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             if (!targetUuid) {
                 return;
             }
-            const uuidField = document.getElementById("uuid");
-            if (uuidField) {
-                uuidField.value = targetUuid;
-            }
-            processAlto();
+            navigateToUuid(targetUuid);
         }
 
         function elementConsumesTextInput(element) {
@@ -1494,6 +2284,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             updateBookInfo();
             updatePageInfo();
             updateNavigationControls(data.navigation || null);
+            ensureThumbnailGrid(Array.isArray(data.pages) ? data.pages : [], currentBook && currentBook.uuid ? currentBook.uuid : null);
 
             if (currentPage && currentPage.uuid) {
                 loadPreview(currentPage.uuid);
@@ -1604,6 +2395,9 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 next.addEventListener("click", () => goToAdjacent("next"));
             }
 
+            setupPageNumberJump();
+            initializeThumbnailDrawer();
+
             const previewContainer = document.getElementById("page-preview");
             const largeBox = document.getElementById("preview-large");
             if (previewContainer) {
@@ -1697,6 +2491,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         window.addEventListener("resize", () => {
             refreshLargePreviewSizing();
             setLargePreviewActive();
+            syncThumbnailDrawerHeight();
         });
     </script>
     <div id="alto-modal" class="modal" tabindex="-1">
@@ -1851,8 +2646,8 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             last_error = None
 
             try:
-                for base in candidate_bases:
-                    for candidate in candidate_streams:
+                for candidate in candidate_streams:
+                    for base in candidate_bases:
                         upstream_url = f"{base}/item/uuid:{uuid}/streams/{candidate}"
                         response = requests.get(upstream_url, timeout=20)
 
@@ -1865,9 +2660,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                         if 'jp2' in content_type.lower():
                             last_error = f'Stream {candidate} vrací nepodporovaný formát {content_type}'
                             response.close()
-                            if stream == 'AUTO':
-                                continue
-                            break
+                            continue
 
                         self.send_response(200)
                         self.send_header('Content-type', content_type)

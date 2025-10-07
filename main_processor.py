@@ -32,15 +32,23 @@ CENTER_ALIGNMENT_ERROR_MARGIN = 0.05  # 5% margin for center alignment detection
 CENTER_ALIGNMENT_MIN_LINE_LEN_DIFF = 0.1  # 10% minimum difference between shortest and longest line for center alignment
 
 # Konstanty pro rozhodování o nadpisech na základě výšky slov
-HEADING_H2_RATIO = 1.08         # Práh pro h2: 1.08 * průměrná výška
-HEADING_H1_RATIO = 2         # Práh pro h1: 1.6 * průměrná výška
+HEADING_H2_RATIO = 1.08                 # Práh pro h2: 1.08 * průměrná výška
+HEADING_H1_RATIO = 2                    # Práh pro h1: 1.6 * průměrná výška
 HEADING_MIN_WORD_RATIO_DEFAULT = 0.81   # Výchozí minimální podíl slov v bloku, které musí překročit práh (margin of error pro OCR)
 HEADING_FONT_GAP_THRESHOLD = 1.2        # Práh pro rozdíl ve velikosti fontu pro identifikaci nadpisových fontů
 HEADING_FONT_RATIO_MULTIPLIER = 0.5     # Koeficient pro snížení prahu pro bloky s nadpisovými fonty
 HEADING_FONT_MAX_RATIO = 0.4            # Maximální podíl řádků s fontem, aby byl považován za nadpisový
 HEADING_FONT_MERGE_TOLERANCE = 0.1      # Povolená relativní odchylka mezi velikostmi písma při spojování nadpisů
 
+# Konstanty pro rozhodování o "malém" textu (poznámky pod čarou, popisky obrázků, atd.)
+SMALL_RATIO = 0.95                      # Práh pro "malý" text: 0.9 * průměrná výška
+SMALL_MIN_WORD_RATIO = 0.8              # Výchozí minimální podíl slov v bloku, které musí překročit práh "malého" textu (např. poznámky pod čarou)
+SMALL_H3_RATIO_MULTIPLIER = 0.5         # Koeficient pro snížení prahu pro bloky s h3 (malý text často detekován jako h3)
+
 PAGE_NUMBER_SHORT_LINE_RATIO_TO_PAGE = 0.2  # Procento šířky stránky, pod které je řádek považován za potenciální řádek s číslem stránky
+PAGE_NUMBER_ALPHA_REJECTION_RATIO = 0.5     # Pokud podíl písmen přesáhne tento poměr, řádek vyloučíme jako kandidáta
+PAGE_NUMBER_MIN_NONSPACE_FOR_REJECTION = 5  # Krátké řádky (méně znaků) ponecháme i při vysokém podílu písmen
+PAGE_NOTE_STYLE_ATTR = ' style="display:block;font-size:0.82em;color:#1e5aa8;"'
 
 # Centralized HTTP timeouts (seconds)
 API_TIMEOUT = 25
@@ -1836,6 +1844,7 @@ class AltoProcessor:
                 'line_font_sizes': line_font_sizes,
                 'line_bold_flags': line_bold_flags,
                 'line_count': len(block_data.get('lines', [])),
+                'word_heights': list(effective_word_heights),
             })
 
         def representative_font_size(font_sizes: List[int]) -> Optional[float]:
@@ -1954,6 +1963,7 @@ class AltoProcessor:
                     strings = text_line.findall('.//{http://www.loc.gov/standards/alto/ns-v2#}String')
 
                 line_parts: List[str] = []
+                alnum_segments: List[Tuple[int, int]] = []
                 for string_el in strings:
                     content = string_el.get('CONTENT', '') or ''
                     subs_content = string_el.get('SUBS_CONTENT', '') or ''
@@ -1962,17 +1972,41 @@ class AltoProcessor:
                     content = html.unescape(content)
                     subs_content = html.unescape(subs_content)
 
+                    try:
+                        string_hpos = int(string_el.get('HPOS', '0') or 0)
+                    except (TypeError, ValueError):
+                        string_hpos = None
+                    try:
+                        string_width = int(string_el.get('WIDTH', '0') or 0)
+                    except (TypeError, ValueError):
+                        string_width = 0
+
                     if subs_type == 'HypPart1':
-                        content = subs_content
+                        content_value = subs_content
                     elif subs_type == 'HypPart2':
                         continue
+                    else:
+                        content_value = content
 
-                    if content:
-                        line_parts.append(content)
+                    if content_value:
+                        line_parts.append(content_value)
+                        if string_hpos is not None and any(ch.isalnum() for ch in content_value):
+                            right_edge = string_hpos + max(string_width, 0)
+                            alnum_segments.append((string_hpos, right_edge))
+
+                effective_width = line_width
+                if alnum_segments:
+                    left_edge = min(segment[0] for segment in alnum_segments)
+                    right_edge = max(segment[1] for segment in alnum_segments)
+                    if right_edge > left_edge:
+                        effective_width = right_edge - left_edge
+                    else:
+                        effective_width = 0
 
                 line_entries.append({
                     'element': text_line,
                     'width': line_width,
+                    'effective_width': effective_width,
                     'vpos': line_vpos,
                     'text': ' '.join(line_parts).strip(),
                 })
@@ -1994,9 +2028,10 @@ class AltoProcessor:
                 matches: List[Dict[str, Any]] = []
                 suspects: List[Dict[str, Any]] = []
                 number_found = False
+                secondary_entries: List[Dict[str, Any]] = []
 
                 for entry in sorted_entries:
-                    width = entry['width']
+                    width = entry.get('effective_width', entry['width'])
                     if width <= 0 or width > short_threshold:
                         print(
                             f"DEBUG page-number: skipping line width={width} vpos={entry['vpos']} text='{entry['text']}'"
@@ -2010,6 +2045,18 @@ class AltoProcessor:
                         )
                         continue
 
+                    nonspace_chars = [ch for ch in text_value if not ch.isspace()]
+                    if len(nonspace_chars) >= PAGE_NUMBER_MIN_NONSPACE_FOR_REJECTION:
+                        alpha_count = sum(1 for ch in nonspace_chars if ch.isalpha())
+                        total_chars = len(nonspace_chars)
+                        if alpha_count >= PAGE_NUMBER_ALPHA_REJECTION_RATIO * total_chars:
+                            print(
+                                "DEBUG page-number: rejecting line due to alpha ratio "
+                                f"alpha={alpha_count} total={total_chars} width={width} "
+                                f"vpos={entry['vpos']} text='{text_value}'"
+                            )
+                            continue
+
                     if pattern.search(text_value):
                         print(
                             f"DEBUG page-number: FOUND match width={width} vpos={entry['vpos']} text='{text_value}'"
@@ -2017,7 +2064,30 @@ class AltoProcessor:
                         matches.append(entry)
                         number_found = True
                         suspects.clear()
-                    elif not number_found:
+                        continue
+
+                    secondary_match = re.search(r"(?<!\d)(\d+)[\s\W]*\*", text_value)
+                    if secondary_match:
+                        match_start, match_end = secondary_match.span()
+                        surrounding_text = text_value[:match_start] + text_value[match_end:]
+                        has_other_alnum = bool(re.search(r"[0-9A-Za-z]", surrounding_text))
+                        is_pure_secondary = not has_other_alnum
+                        if is_pure_secondary:
+                            print(
+                                f"DEBUG page-number: secondary detected (pure) vpos={entry['vpos']} text='{text_value}'"
+                            )
+                            page_number_line_ids.add(id(entry['element']))
+                        else:
+                            print(
+                                f"DEBUG page-number: secondary candidate vpos={entry['vpos']} text='{text_value}'"
+                            )
+                        secondary_entries.append({
+                            'text': text_value,
+                            'is_pure': is_pure_secondary,
+                        })
+                        continue
+
+                    if not number_found:
                         print(
                             f"DEBUG page-number: candidate width={width} vpos={entry['vpos']} text='{text_value}'"
                         )
@@ -2031,7 +2101,8 @@ class AltoProcessor:
                 if candidates:
                     annotation_is_found = bool(matches)
                     for entry in candidates:
-                        page_number_line_ids.add(id(entry['element']))
+                        if annotation_is_found:
+                            page_number_line_ids.add(id(entry['element']))
                         ocr_text_display = entry['text'] or ''
                         annotation_parts = [
                             f"Page number: {page_number_value}",
@@ -2041,10 +2112,32 @@ class AltoProcessor:
                             annotation_parts.append("!FOUND ONLY KANDIDATE!")
                         annotation_text = ' ; '.join(annotation_parts)
                         page_number_annotations.append(
-                            (entry['vpos'], f"<small>{html.escape(annotation_text, quote=False)}</small>")
+                            (
+                                entry['vpos'],
+                                f"<note{PAGE_NOTE_STYLE_ATTR}>{html.escape(annotation_text, quote=False)}</note>"
+                            )
                         )
                 else:
                     print("DEBUG page-number: no candidates detected after scanning")
+
+                if secondary_entries:
+                    reference_height_local = alto_height2 or alto_height
+                    current_max_vpos = max(
+                        (existing_vpos for existing_vpos, _ in page_number_annotations),
+                        default=(reference_height_local or 0)
+                    )
+                    base_vpos = max(current_max_vpos, (reference_height_local or 0)) + 1
+                    for index, secondary in enumerate(secondary_entries):
+                        suffix = '' if secondary['is_pure'] else ' ; !FOUND OLNY KANDIDATE!'
+                        annotation_text = (
+                            f"Secondary page number OCR: {secondary['text']}{suffix}"
+                        )
+                        page_number_annotations.append(
+                            (
+                                base_vpos + index,
+                                f"<note{PAGE_NOTE_STYLE_ATTR}>{html.escape(annotation_text, quote=False)}</note>"
+                            )
+                        )
 
             else:
                 print("DEBUG page-number: cannot compute short_threshold due to missing page width")
@@ -2054,7 +2147,10 @@ class AltoProcessor:
                 fallback_text = f"Page number: {page_number_value} ; OCR text: None ; !NOT FOUND!"
                 fallback_vpos = (reference_height_local or 0) + 1
                 page_number_annotations.append(
-                    (fallback_vpos, f"<small>{html.escape(fallback_text, quote=False)}</small>")
+                    (
+                        fallback_vpos,
+                        f"<note{PAGE_NOTE_STYLE_ATTR}>{html.escape(fallback_text, quote=False)}</note>"
+                    )
                 )
                 print(
                     "DEBUG page-number: appended fallback annotation due to missing candidates"
@@ -2264,6 +2360,7 @@ class AltoProcessor:
                     'tag': tag,
                     'font_sizes': set(),
                     'word_heights': [],
+                    'line_word_heights': [],
                     'centered': is_center_aligned,
                     'all_bold': True,
                     'source_block_id': block_id,
@@ -2330,19 +2427,20 @@ class AltoProcessor:
                             for idx, previous_line in enumerate(current_block['lines'][:-1]):
                                 line_font_size = current_block['line_font_sizes'][idx] if idx < len(current_block['line_font_sizes']) else 0
                                 line_bold_flag = current_block['line_bold_flags'][idx] if idx < len(current_block['line_bold_flags']) else False
+                                line_word_heights = current_block['line_word_heights'][idx] if idx < len(current_block['line_word_heights']) else []
                                 finalize_block(
                                     {
                                         'lines': [previous_line],
                                         'tag': tag,
                                         'font_sizes': {line_font_size} if line_font_size else set(),
-                                        'word_heights': [],
+                                        'word_heights': list(line_word_heights),
                                         'centered': is_center_aligned,
                                         'all_bold': line_bold_flag,
                                         'source_block_id': block_id,
                                         'line_font_sizes': [line_font_size],
                                         'line_bold_flags': [line_bold_flag],
                                     },
-                                    [],
+                                    list(line_word_heights),
                                     average_height,
                                     heading_fonts,
                                 )
@@ -2350,6 +2448,7 @@ class AltoProcessor:
                             last_line_text = current_block['lines'][-1]
                             last_font_size = current_block['line_font_sizes'][-1] if current_block['line_font_sizes'] else 0
                             last_bold_flag = current_block['line_bold_flags'][-1] if current_block['line_bold_flags'] else True
+                            last_line_word_heights = current_block['line_word_heights'][-1] if current_block['line_word_heights'] else []
 
                             current_block = new_block_state()
                             current_block['lines'].append(last_line_text)
@@ -2357,6 +2456,9 @@ class AltoProcessor:
                             current_block['line_bold_flags'].append(last_bold_flag)
                             if last_font_size:
                                 current_block['font_sizes'].add(last_font_size)
+                            if last_line_word_heights:
+                                current_block['word_heights'].extend(last_line_word_heights)
+                            current_block['line_word_heights'].append(list(last_line_word_heights))
                             current_block['all_bold'] = last_bold_flag
                             lines = 1
 
@@ -2372,6 +2474,7 @@ class AltoProcessor:
 
                 line_parts = []
                 line_all_bold = True
+                line_word_heights: List[float] = []
 
                 for string_el in strings:
                     style = string_el.get('STYLE', '')
@@ -2394,7 +2497,7 @@ class AltoProcessor:
 
                     height = string_el.get('HEIGHT')
                     if height:
-                        current_block['word_heights'].append(float(height))
+                        line_word_heights.append(float(height))
 
                     # Use the line's font size for all strings in the line
                     if current_line_font_size:
@@ -2406,6 +2509,10 @@ class AltoProcessor:
                 line_text = ' '.join(line_parts).strip()
                 if not line_text:
                     continue
+
+                if line_word_heights:
+                    current_block['word_heights'].extend(line_word_heights)
+                current_block['line_word_heights'].append(list(line_word_heights))
 
                 current_block['lines'].append(line_text)
                 current_block['line_font_sizes'].append(current_line_font_size)
@@ -2443,6 +2550,35 @@ class AltoProcessor:
                     print(f"DEBUG post-processing: changing block '{block['text'][:50]}...' to h3")
                     block['tag'] = 'h3'
 
+        if average_height is not None:
+            small_height_threshold = average_height * SMALL_RATIO
+            for block in blocks:
+                original_tag = block.get('tag')
+                if original_tag not in ('p', 'h3'):
+                    continue
+
+                valid_word_heights = [h for h in block.get('word_heights', []) if h and h > 0]
+                if not valid_word_heights:
+                    continue
+
+                small_word_count = sum(1 for h in valid_word_heights if h < small_height_threshold)
+                total_valid = len(valid_word_heights)
+                if total_valid == 0:
+                    continue
+
+                small_ratio_value = small_word_count / total_valid
+                ratio_threshold = SMALL_MIN_WORD_RATIO
+                if original_tag == 'h3':
+                    ratio_threshold *= SMALL_H3_RATIO_MULTIPLIER
+
+                if small_ratio_value >= ratio_threshold:
+                    block['tag'] = 'small'
+                    print(
+                        "DEBUG small demotion: demoted to <small>, "
+                        f"source_tag={original_tag}, ratio={small_ratio_value:.3f}, "
+                        f"required_ratio={ratio_threshold:.3f}, threshold={small_height_threshold:.2f}"
+                    )
+
         # Generování HTML - přesně jako v TypeScript
         result = ""
         for block in blocks:
@@ -2453,18 +2589,13 @@ class AltoProcessor:
                 result += f"<{block['tag']}{style_attr}>{block['text'].strip()}</{block['tag']}>"
 
         if page_number_annotations:
-            reference_height = alto_height2 or alto_height
             sorted_annotations = sorted(page_number_annotations, key=lambda item: item[0])
-            top_fragments: List[str] = []
-            bottom_fragments: List[str] = []
-
-            for vpos, fragment in sorted_annotations:
-                if reference_height and vpos > reference_height / 2:
-                    bottom_fragments.append(fragment)
-                else:
-                    top_fragments.append(fragment)
-
-            result = ''.join(top_fragments) + result + ''.join(bottom_fragments)
+            annotation_fragments = [fragment for _, fragment in sorted_annotations]
+            annotation_html = '<br>'.join(annotation_fragments)
+            if result and annotation_html:
+                result += '<br>' + annotation_html
+            else:
+                result += annotation_html
 
         return result
 

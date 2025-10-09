@@ -368,7 +368,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             border-radius: 4px;
             font-size: 14px;
         }
-        button:not(.page-thumbnail):not(.thumbnail-toggle) {
+        button:not(.page-thumbnail):not(.thumbnail-toggle):not(.diff-toggle) {
             background-color: #007bff;
             color: white;
             padding: 10px 20px;
@@ -377,10 +377,10 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             cursor: pointer;
             font-size: 14px;
         }
-        button:not(.page-thumbnail):not(.thumbnail-toggle):hover {
+        button:not(.page-thumbnail):not(.thumbnail-toggle):not(.diff-toggle):hover {
             background-color: #0056b3;
         }
-        button:not(.page-thumbnail):not(.thumbnail-toggle):disabled {
+        button:not(.page-thumbnail):not(.thumbnail-toggle):not(.diff-toggle):disabled {
             background-color: #9aa0a6;
             cursor: not-allowed;
         }
@@ -514,6 +514,88 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         .result-box h3 {
             margin-top: 0;
             color: #333;
+        }
+        .diff-section {
+            margin-top: 28px;
+            display: none;
+            flex-direction: column;
+            gap: 18px;
+        }
+        .diff-section.is-visible {
+            display: flex;
+        }
+        .diff-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+        .diff-heading {
+            margin: 0;
+            font-size: 24px;
+            font-weight: 700;
+            color: #1f2933;
+            letter-spacing: -0.01em;
+        }
+        .diff-controls {
+            display: inline-flex;
+            align-items: stretch;
+            border: 1px solid #cdd5e0;
+            border-radius: 999px;
+            overflow: hidden;
+            background: #f8f9fc;
+        }
+        .diff-toggle {
+            border: none;
+            background: transparent;
+            padding: 6px 18px;
+            font-size: 13px;
+            font-weight: 600;
+            color: #6b7280;
+            cursor: pointer;
+            transition: background 0.2s ease, color 0.2s ease;
+        }
+        .diff-toggle + .diff-toggle {
+            border-left: 1px solid #cdd5e0;
+        }
+        .diff-toggle.is-active {
+            background: #1f78ff;
+            color: #ffffff;
+        }
+        .diff-toggle:focus-visible {
+            outline: none;
+            box-shadow: inset 0 0 0 2px rgba(31, 120, 255, 0.4);
+        }
+        .result-rendered {
+            line-height: 1.65;
+        }
+        .result-html-section {
+            margin-top: 16px;
+        }
+        .diff-content {
+            background: #f8f9fa;
+            border-radius: 4px;
+            font-family: "Menlo", "Monaco", "Consolas", "Courier New", monospace;
+            padding: 12px;
+            white-space: pre-wrap;
+            word-break: break-word;
+            overflow-x: auto;
+            min-height: 64px;
+        }
+        .diff-html {
+            margin: 0;
+            line-height: 1.5;
+        }
+        .diff-added {
+            background: rgba(46, 160, 67, 0.25);
+            border-radius: 3px;
+            padding: 0 2px;
+        }
+        .diff-removed {
+            background: rgba(219, 68, 55, 0.25);
+            border-radius: 3px;
+            padding: 0 2px;
         }
         .loading {
             position: fixed;
@@ -760,15 +842,38 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                         <button id="next-page" type="button" aria-label="Další stránka">▶</button>
                     </div>
                 </div>
-
                 <div id="results" class="results" style="display: none;">
                     <div class="result-box">
                         <h3>Python výsledek</h3>
-                        <div id="python-result"></div>
+                        <div id="python-result" class="result-rendered"></div>
                     </div>
                     <div class="result-box">
                         <h3>TypeScript výsledek (simulace)</h3>
-                        <div id="typescript-result"></div>
+                        <div id="typescript-result" class="result-rendered"></div>
+                    </div>
+                </div>
+
+                <div id="diff-section" class="diff-section">
+                    <div class="diff-header">
+                        <h2 class="diff-heading">Rozdíly</h2>
+                        <div id="diff-mode-controls" class="diff-controls" role="group" aria-label="Zobrazení rozdílů">
+                            <button type="button" class="diff-toggle" data-diff-mode="word" aria-pressed="false">Slova</button>
+                            <button type="button" class="diff-toggle" data-diff-mode="char" aria-pressed="false">Znaky</button>
+                        </div>
+                    </div>
+                    <div id="html-diff" class="results" style="display: none;">
+                        <div class="result-box">
+                            <h3>Python – HTML struktura</h3>
+                            <div class="result-html-section">
+                                <div id="python-html"></div>
+                            </div>
+                        </div>
+                        <div class="result-box">
+                            <h3>TypeScript – HTML struktura</h3>
+                            <div class="result-html-section">
+                                <div id="typescript-html"></div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -797,12 +902,25 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         const previewCache = new Map();
         const inflightPreviewRequests = new Map();
         let cacheWindowUuids = new Set();
-        let currentAltoXml = '';
+        let currentAltoXml = "";
         let bookPages = [];
         let lastRenderedBookUuid = null;
         let lastActiveThumbnailUuid = null;
         let thumbnailDrawerCollapsed = false;
         let thumbnailObserver = null;
+        const DIFF_MODES = {
+            NONE: 'none',
+            WORD: 'word',
+            CHAR: 'char',
+        };
+        const DIFF_MODE_STORAGE_KEY = 'altoDiffMode';
+        let diffMode = DIFF_MODES.NONE;
+        const diffCache = new Map();
+        let currentResults = {
+            python: "",
+            typescript: "",
+            baseKey: "",
+        };
         function clearThumbnailQueue() {
             thumbnailQueue.length = 0;
         }
@@ -1084,7 +1202,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 if (typeof normalized.index !== "number" || !Number.isFinite(normalized.index)) {
                     normalized.index = idx;
                 }
-                normalized.uuid = normalized.uuid || '';
+                normalized.uuid = normalized.uuid || "";
                 return normalized;
             });
         }
@@ -1098,7 +1216,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             buttons.forEach(button => {
                 const listIndex = Number.parseInt(button.dataset.listIndex || "-1", 10);
                 const page = Number.isFinite(listIndex) && listIndex >= 0 && listIndex < pages.length ? pages[listIndex] : null;
-                const pageNumber = page && page.pageNumber ? page.pageNumber : '';
+                const pageNumber = page && page.pageNumber ? page.pageNumber : "";
                 const displayIndex = page && typeof page.index === "number" && Number.isFinite(page.index) ? page.index : listIndex;
                 const labelText = pageNumber ? `Strana ${pageNumber}` : `Strana ${displayIndex + 1}`;
 
@@ -1259,7 +1377,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             const total = bookPages.length || (navigationState && typeof navigationState.total === 'number' ? navigationState.total : 0);
 
             if (totalLabel) {
-                totalLabel.textContent = total ? `/ ${total}` : '';
+                totalLabel.textContent = total ? `/ ${total}` : "";
             }
 
             if (!input) {
@@ -1271,7 +1389,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             } else if (total) {
                 input.value = '1';
             } else {
-                input.value = '';
+                input.value = "";
             }
 
             input.disabled = total === 0;
@@ -1306,7 +1424,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             if (shouldRender) {
                 const previousScrollTop = isSameBook && scrollContainer ? scrollContainer.scrollTop : 0;
                 resetThumbnailObserver();
-                grid.innerHTML = '';
+                grid.innerHTML = "";
 
                 const priorityIndices = new Set();
                 for (let i = 0; i < 6 && i < normalizedPages.length; i += 1) {
@@ -1325,7 +1443,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     const button = document.createElement('button');
                     button.type = 'button';
                     button.className = 'page-thumbnail';
-                    button.dataset.uuid = page.uuid || '';
+                    button.dataset.uuid = page.uuid || "";
                     button.dataset.index = String(page.index);
                     button.dataset.listIndex = String(listIndex);
 
@@ -1346,9 +1464,9 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     img.loading = 'lazy';
                     img.decoding = 'async';
                     img.alt = labelText;
-                    const normalizedUuid = typeof page.uuid === 'string' ? page.uuid : '';
-                    const providedThumb = typeof page.thumbnail === 'string' ? page.thumbnail : '';
-                    const fallbackThumb = normalizedUuid ? `/preview?uuid=${encodeURIComponent(normalizedUuid)}&stream=IMG_THUMB` : '';
+                    const normalizedUuid = typeof page.uuid === 'string' ? page.uuid : "";
+                    const providedThumb = typeof page.thumbnail === 'string' ? page.thumbnail : "";
+                    const fallbackThumb = normalizedUuid ? `/preview?uuid=${encodeURIComponent(normalizedUuid)}&stream=IMG_THUMB` : "";
                     const thumbSrc = providedThumb || fallbackThumb;
                     if (thumbSrc) {
                         img.dataset.src = thumbSrc;
@@ -1567,7 +1685,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 container.classList.remove("preview-visible", "preview-loaded", "preview-error", "preview-has-status");
                 delete container.dataset.previewStream;
             }
-            updatePreviewStatus('');
+            updatePreviewStatus("");
         }
 
         function updatePreviewStatus(message) {
@@ -1576,7 +1694,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             if (!status || !container) {
                 return;
             }
-            status.textContent = message || '';
+            status.textContent = message || "";
             const hasMessage = Boolean(message);
             container.classList.toggle('preview-has-status', hasMessage);
         }
@@ -1804,7 +1922,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             container.style.display = "flex";
             container.classList.add("preview-visible", "preview-loaded");
             container.classList.remove("preview-error");
-            updatePreviewStatus('');
+            updatePreviewStatus("");
 
             setLargePreviewActive();
             container.style.height = "";
@@ -1913,7 +2031,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 container.dataset.previewStream = entry.stream;
 
                 container.classList.add("preview-loaded");
-                updatePreviewStatus('');
+                updatePreviewStatus("");
 
                 setLargePreviewActive();
             } catch (error) {
@@ -2264,7 +2382,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         function applyProcessResult(uuid, data, previousScrollY, toolsElement) {
             cacheProcessData(uuid, data);
 
-            currentAltoXml = data.alto_xml || '';
+            currentAltoXml = data.alto_xml || "";
             const altoBtn = document.getElementById("alto-preview-btn");
             if (altoBtn) {
                 altoBtn.style.display = currentAltoXml ? "block" : "none";
@@ -2292,20 +2410,19 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 resetPreview();
             }
 
-            const pythonResult = document.getElementById("python-result");
-            if (pythonResult) {
-                pythonResult.innerHTML = `<pre>${data.python || ""}</pre>`;
-            }
-
-            const tsResult = document.getElementById("typescript-result");
-            if (tsResult) {
-                tsResult.innerHTML = `<pre>${data.typescript || ""}</pre>`;
-            }
+            currentResults = {
+                python: data.python || "",
+                typescript: data.typescript || "",
+                baseKey: buildResultCacheKey(data.python || "", data.typescript || "", currentPage && currentPage.uuid ? currentPage.uuid : uuid),
+            };
+            renderComparisonResults();
 
             const results = document.getElementById("results");
             if (results) {
                 results.style.display = "grid";
             }
+
+            updateDiffToggleState();
 
             const uuidField = document.getElementById("uuid");
             if (uuidField && currentPage && currentPage.uuid) {
@@ -2314,6 +2431,486 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
 
             updateCacheWindow(currentPage ? currentPage.uuid : uuid, data.navigation || null);
             schedulePrefetch(data.navigation || null);
+        }
+
+        function loadStoredDiffMode() {
+            try {
+                const stored = localStorage.getItem(DIFF_MODE_STORAGE_KEY);
+                if (stored === DIFF_MODES.WORD || stored === DIFF_MODES.CHAR) {
+                    return stored;
+                }
+            } catch (error) {
+                console.warn('Nelze načíst uložený režim diffu:', error);
+            }
+            return DIFF_MODES.NONE;
+        }
+
+        function persistDiffMode(mode) {
+            try {
+                if (mode === DIFF_MODES.WORD || mode === DIFF_MODES.CHAR) {
+                    localStorage.setItem(DIFF_MODE_STORAGE_KEY, mode);
+                } else {
+                    localStorage.removeItem(DIFF_MODE_STORAGE_KEY);
+                }
+            } catch (error) {
+                console.warn('Nelze uložit režim diffu:', error);
+            }
+        }
+
+        function updateDiffToggleState() {
+            const container = document.getElementById("diff-mode-controls");
+            if (!container) {
+                return;
+            }
+            const buttons = container.querySelectorAll('.diff-toggle');
+            buttons.forEach((button) => {
+                if (!(button instanceof HTMLElement)) {
+                    return;
+                }
+                const mode = button.getAttribute('data-diff-mode');
+                const isActive = mode === diffMode;
+                button.classList.toggle('is-active', Boolean(isActive));
+                button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+                button.dataset.diffActive = isActive ? 'true' : 'false';
+            });
+        }
+
+        function setDiffMode(newMode) {
+            const normalized = newMode === DIFF_MODES.WORD || newMode === DIFF_MODES.CHAR ? newMode : DIFF_MODES.NONE;
+            const hasChanged = diffMode !== normalized;
+            diffMode = normalized;
+            if (diffMode === DIFF_MODES.NONE) {
+                persistDiffMode(null);
+            } else {
+                persistDiffMode(diffMode);
+            }
+            diffCache.clear();
+            updateDiffToggleState();
+            if (hasChanged) {
+                renderComparisonResults();
+            }
+        }
+
+        function initializeDiffControls() {
+            diffMode = loadStoredDiffMode();
+            const container = document.getElementById("diff-mode-controls");
+            if (!container) {
+                return;
+            }
+            container.addEventListener('click', (event) => {
+                const target = event.target;
+                if (!target || !(target instanceof HTMLElement)) {
+                    return;
+                }
+                if (!target.matches('.diff-toggle')) {
+                    return;
+                }
+                const requestedMode = target.getAttribute('data-diff-mode');
+                if (!requestedMode) {
+                    return;
+                }
+                const nextMode = diffMode === requestedMode ? DIFF_MODES.NONE : requestedMode;
+                setDiffMode(nextMode);
+            });
+            updateDiffToggleState();
+        }
+
+        function computeSimpleHash(text) {
+            if (!text) {
+                return 0;
+            }
+            let hash = 0;
+            for (let index = 0; index < text.length; index += 1) {
+                hash = ((hash << 5) - hash) + text.charCodeAt(index);
+                hash |= 0;
+            }
+            return hash >>> 0;
+        }
+
+        function buildResultCacheKey(pythonHtml, tsHtml, pageUuid) {
+            const leftHash = computeSimpleHash(pythonHtml || "");
+            const rightHash = computeSimpleHash(tsHtml || "");
+            return `${pageUuid || "standalone"}:${leftHash}:${rightHash}`;
+        }
+
+        function renderComparisonResults() {
+            const pythonRendered = document.getElementById("python-result");
+            const tsRendered = document.getElementById("typescript-result");
+            const pythonHtmlContainer = document.getElementById("python-html");
+            const tsHtmlContainer = document.getElementById("typescript-html");
+            const htmlDiffSection = document.getElementById("html-diff");
+            const diffSection = document.getElementById("diff-section");
+            if (!pythonRendered || !tsRendered || !pythonHtmlContainer || !tsHtmlContainer) {
+                return;
+            }
+
+            const pythonHtml = currentResults.python || "";
+            const tsHtml = currentResults.typescript || "";
+            pythonRendered.innerHTML = `<pre>${pythonHtml}</pre>`;
+            tsRendered.innerHTML = `<pre>${tsHtml}</pre>`;
+            const baseKey = currentResults.baseKey || buildResultCacheKey(pythonHtml, tsHtml, currentPage && currentPage.uuid ? currentPage.uuid : "");
+            const cacheKey = `${diffMode}:${baseKey}`;
+            try {
+                let cached = diffCache.get(cacheKey);
+                if (!cached) {
+                    cached = buildDiffMarkup(pythonHtml, tsHtml, diffMode);
+                    diffCache.set(cacheKey, cached);
+                }
+
+                pythonHtmlContainer.innerHTML = cached.python;
+                tsHtmlContainer.innerHTML = cached.typescript;
+                if (htmlDiffSection) {
+                    htmlDiffSection.style.display = "grid";
+                }
+                if (diffSection) {
+                    diffSection.classList.add('is-visible');
+                }
+            } catch (error) {
+                console.error('Chyba při vykreslování diffu:', error);
+                diffMode = DIFF_MODES.NONE;
+                persistDiffMode(null);
+                diffCache.clear();
+                updateDiffToggleState();
+                pythonHtmlContainer.innerHTML = wrapCodeContent(escapeHtml(pythonHtml));
+                tsHtmlContainer.innerHTML = wrapCodeContent(escapeHtml(tsHtml));
+                if (htmlDiffSection) {
+                    htmlDiffSection.style.display = "grid";
+                }
+                if (diffSection) {
+                    diffSection.classList.add('is-visible');
+                }
+            }
+        }
+
+        function wrapCodeContent(content, mode) {
+            const modeAttr = mode && mode !== DIFF_MODES.NONE ? ` data-diff-mode="${mode}"` : "";
+            return `<pre class="diff-content diff-html"${modeAttr}>${content}</pre>`;
+        }
+
+        function buildDiffMarkup(pythonHtml, tsHtml, mode) {
+            const safePython = pythonHtml || "";
+            const safeTs = tsHtml || "";
+            if (!mode || mode === DIFF_MODES.NONE) {
+                return {
+                    python: wrapCodeContent(escapeHtml(safePython), mode),
+                    typescript: wrapCodeContent(escapeHtml(safeTs), mode),
+                };
+            }
+
+            const pythonTokens = tokenizeHtml(safePython);
+            const tsTokens = tokenizeHtml(safeTs);
+            const operations = diffUsingLcs(pythonTokens, tsTokens, tokensEqual);
+
+            if (mode === DIFF_MODES.WORD) {
+                const pythonHighlights = new Array(pythonTokens.length).fill(null);
+                const tsHighlights = new Array(tsTokens.length).fill(null);
+                operations.forEach((operation) => {
+                    if (operation.type === 'delete') {
+                        const token = pythonTokens[operation.indexA];
+                        if (token && !(token.type === 'text' && token.isWhitespace)) {
+                            pythonHighlights[operation.indexA] = 'added';
+                        }
+                    } else if (operation.type === 'insert') {
+                        const token = tsTokens[operation.indexB];
+                        if (token && !(token.type === 'text' && token.isWhitespace)) {
+                            tsHighlights[operation.indexB] = 'removed';
+                        }
+                    }
+                });
+
+                return {
+                    python: wrapCodeContent(renderTokens(pythonTokens, pythonHighlights), mode),
+                    typescript: wrapCodeContent(renderTokens(tsTokens, tsHighlights), mode),
+                };
+            }
+
+            const { pythonHighlights, tsHighlights } = buildCharDiffHighlights(pythonTokens, tsTokens, operations);
+
+            return {
+                python: wrapCodeContent(renderTokens(pythonTokens, pythonHighlights), mode),
+                typescript: wrapCodeContent(renderTokens(tsTokens, tsHighlights), mode),
+            };
+        }
+
+        function tokenizeHtml(html) {
+            if (!html) {
+                return [];
+            }
+            const tokens = [];
+            const tagRegex = /<[^>]+?>/g;
+            let lastIndex = 0;
+            let match;
+            while ((match = tagRegex.exec(html)) !== null) {
+                if (match.index > lastIndex) {
+                    const textChunk = html.slice(lastIndex, match.index);
+                    appendTextTokens(tokens, textChunk);
+                }
+                tokens.push(createTagToken(match[0]));
+                lastIndex = match.index + match[0].length;
+            }
+            if (lastIndex < html.length) {
+                const remainder = html.slice(lastIndex);
+                appendTextTokens(tokens, remainder);
+            }
+            return tokens;
+        }
+
+        function appendTextTokens(target, text) {
+            if (!text) {
+                return;
+            }
+            let splitter = unicodeAwareSplitter;
+            if (!splitter) {
+                splitter = fallbackSplitter;
+            }
+            splitter.lastIndex = 0;
+            let lastIndex = 0;
+            let match;
+            while ((match = splitter.exec(text)) !== null) {
+                if (match.index > lastIndex) {
+                    target.push(createTextToken(text.slice(lastIndex, match.index)));
+                }
+                target.push(createTextToken(match[0]));
+                lastIndex = splitter.lastIndex;
+            }
+            if (lastIndex < text.length) {
+                target.push(createTextToken(text.slice(lastIndex)));
+            }
+        }
+
+        let unicodeAwareSplitter = null;
+        let fallbackSplitter = /(\s+|[^\w]+)/g;
+        try {
+            unicodeAwareSplitter = new RegExp('([\\s]+|[^\\p{L}\\p{N}]+)', 'gu');
+        } catch (error) {
+            unicodeAwareSplitter = null;
+            fallbackSplitter = /(\s+|[^A-Za-z0-9_]+)/g;
+        }
+
+        function createTextToken(raw) {
+            return {
+                type: 'text',
+                raw,
+                isWhitespace: /^\s+$/.test(raw),
+            };
+        }
+
+        function createTagToken(raw) {
+            const isClosing = /^<\s*\//.test(raw);
+            const tagNameMatch = raw.match(/^<\s*\/?\s*([a-zA-Z0-9:-]+)/);
+            return {
+                type: 'tag',
+                raw,
+                isClosing,
+                tagName: tagNameMatch ? tagNameMatch[1].toLowerCase() : "",
+            };
+        }
+
+        function tokensEqual(leftToken, rightToken) {
+            if (!leftToken || !rightToken || leftToken.type !== rightToken.type) {
+                return false;
+            }
+            return leftToken.raw === rightToken.raw;
+        }
+
+        function diffUsingLcs(leftTokens, rightTokens, comparator) {
+            const n = leftTokens.length;
+            const m = rightTokens.length;
+            if (!n && !m) {
+                return [];
+            }
+
+            const table = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+            for (let i = n - 1; i >= 0; i -= 1) {
+                for (let j = m - 1; j >= 0; j -= 1) {
+                    if (comparator(leftTokens[i], rightTokens[j])) {
+                        table[i][j] = table[i + 1][j + 1] + 1;
+                    } else {
+                        table[i][j] = Math.max(table[i + 1][j], table[i][j + 1]);
+                    }
+                }
+            }
+
+            const operations = [];
+            let i = 0;
+            let j = 0;
+            while (i < n && j < m) {
+                if (comparator(leftTokens[i], rightTokens[j])) {
+                    operations.push({ type: 'equal', indexA: i, indexB: j });
+                    i += 1;
+                    j += 1;
+                } else if (table[i + 1][j] >= table[i][j + 1]) {
+                    operations.push({ type: 'delete', indexA: i });
+                    i += 1;
+                } else {
+                    operations.push({ type: 'insert', indexB: j });
+                    j += 1;
+                }
+            }
+
+            while (i < n) {
+                operations.push({ type: 'delete', indexA: i });
+                i += 1;
+            }
+            while (j < m) {
+                operations.push({ type: 'insert', indexB: j });
+                j += 1;
+            }
+
+            return operations;
+        }
+
+        function buildCharDiffHighlights(pythonTokens, tsTokens, operations) {
+            const pythonHighlights = new Array(pythonTokens.length).fill(null);
+            const tsHighlights = new Array(tsTokens.length).fill(null);
+
+            let cursor = 0;
+            while (cursor < operations.length) {
+                const op = operations[cursor];
+                if (op.type === 'equal') {
+                    cursor += 1;
+                    continue;
+                }
+
+                const deleteBatch = [];
+                const insertBatch = [];
+
+                while (cursor < operations.length && operations[cursor].type === 'delete') {
+                    deleteBatch.push(operations[cursor]);
+                    cursor += 1;
+                }
+                while (cursor < operations.length && operations[cursor].type === 'insert') {
+                    insertBatch.push(operations[cursor]);
+                    cursor += 1;
+                }
+
+                if (!deleteBatch.length && !insertBatch.length) {
+                    cursor += 1;
+                    continue;
+                }
+
+                if (deleteBatch.length === 1 && insertBatch.length === 1) {
+                    const deleteToken = pythonTokens[deleteBatch[0].indexA];
+                    const insertToken = tsTokens[insertBatch[0].indexB];
+                    if (deleteToken && insertToken && deleteToken.type === 'text' && insertToken.type === 'text' && !deleteToken.isWhitespace && !insertToken.isWhitespace) {
+                        const charDiff = diffChars(deleteToken.raw, insertToken.raw);
+                        pythonHighlights[deleteBatch[0].indexA] = { segments: charDiff.pythonSegments };
+                        tsHighlights[insertBatch[0].indexB] = { segments: charDiff.tsSegments };
+                        continue;
+                    }
+                }
+
+                deleteBatch.forEach((entry) => {
+                    const token = pythonTokens[entry.indexA];
+                    if (token && !(token.type === 'text' && token.isWhitespace)) {
+                        pythonHighlights[entry.indexA] = 'added';
+                    }
+                });
+                insertBatch.forEach((entry) => {
+                    const token = tsTokens[entry.indexB];
+                    if (token && !(token.type === 'text' && token.isWhitespace)) {
+                        tsHighlights[entry.indexB] = 'removed';
+                    }
+                });
+            }
+
+            return { pythonHighlights, tsHighlights };
+        }
+
+        function diffChars(leftText, rightText) {
+            const leftChars = Array.from(leftText || "");
+            const rightChars = Array.from(rightText || "");
+            const operations = diffUsingLcs(leftChars, rightChars, (a, b) => a === b);
+            const pythonSegments = [];
+            const tsSegments = [];
+
+            operations.forEach((operation) => {
+                if (operation.type === 'equal') {
+                    appendSegment(pythonSegments, leftChars[operation.indexA], null);
+                    appendSegment(tsSegments, rightChars[operation.indexB], null);
+                } else if (operation.type === 'delete') {
+                    appendSegment(pythonSegments, leftChars[operation.indexA], 'added');
+                } else if (operation.type === 'insert') {
+                    appendSegment(tsSegments, rightChars[operation.indexB], 'removed');
+                }
+            });
+
+            return { pythonSegments, tsSegments };
+        }
+
+        function appendSegment(target, text, highlight) {
+            if (!text) {
+                return;
+            }
+            const last = target[target.length - 1];
+            if (last && last.highlight === highlight) {
+                last.text += text;
+            } else {
+                target.push({ text, highlight });
+            }
+        }
+
+        function renderTokens(tokens, highlights) {
+            if (!tokens.length) {
+                return "";
+            }
+            const parts = [];
+            for (let index = 0; index < tokens.length; index += 1) {
+                const token = tokens[index];
+                const highlight = highlights ? highlights[index] : null;
+
+                if (highlight && typeof highlight === 'object' && Array.isArray(highlight.segments)) {
+                    parts.push(renderSegments(highlight.segments));
+                    continue;
+                }
+
+                const tokenText = escapeHtml(token.raw);
+
+                if (highlight === 'added' || highlight === 'removed') {
+                    if (token.type === 'text' && token.isWhitespace) {
+                        parts.push(tokenText);
+                    } else {
+                        const className = highlight === 'added' ? 'diff-added' : 'diff-removed';
+                        parts.push(`<span class="${className}">${tokenText}</span>`);
+                    }
+                } else {
+                    parts.push(tokenText);
+                }
+            }
+            return parts.join("");
+        }
+
+        function renderSegments(segments) {
+            return segments.map((segment) => {
+                const safeText = escapeHtml(segment.text || "");
+                if (!segment.highlight) {
+                    return safeText;
+                }
+                const className = segment.highlight === 'added' ? 'diff-added' : 'diff-removed';
+                return `<span class="${className}">${safeText}</span>`;
+            }).join("");
+        }
+
+        function escapeHtml(input) {
+            if (!input) {
+                return "";
+            }
+            return input.replace(/[&<>"']/g, (char) => {
+                switch (char) {
+                    case '&':
+                        return '&amp;';
+                    case '<':
+                        return '&lt;';
+                    case '>':
+                        return '&gt;';
+                    case '"':
+                        return '&quot;';
+                    case "'":
+                        return '&#39;';
+                    default:
+                        return char;
+                }
+            });
         }
 
         async function processAlto() {
@@ -2397,6 +2994,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
 
             setupPageNumberJump();
             initializeThumbnailDrawer();
+            initializeDiffControls();
 
             const previewContainer = document.getElementById("page-preview");
             const largeBox = document.getElementById("preview-large");
@@ -2439,8 +3037,8 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     const modalHeader = modal.querySelector('.modal-header');
                     if (modalContent) {
                         // Set initial position to center
-                        modalContent.style.top = '';
-                        modalContent.style.left = '';
+                        modalContent.style.top = "";
+                        modalContent.style.left = "";
                         modalContent.style.transform = 'translate(-50%, -50%)';
                         // Make draggable only on header
                         if (modalHeader) {

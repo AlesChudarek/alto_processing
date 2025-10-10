@@ -1007,7 +1007,18 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             }
 
             const promise = (async () => {
-                const response = await fetch(`/process?uuid=${encodeURIComponent(uuid)}`, { cache: "no-store" });
+                // When available, forward the currently selected library api_base so the server
+                // queries the same Kramerius instance the UI is showing. This prevents
+                // thumbnail clicks from switching the source library unexpectedly.
+                let processUrl = `/process?uuid=${encodeURIComponent(uuid)}`;
+                try {
+                    if (currentLibrary && currentLibrary.api_base) {
+                        processUrl += `&api_base=${encodeURIComponent(currentLibrary.api_base)}`;
+                    }
+                } catch (err) {
+                    // ignore and fall back to default
+                }
+                const response = await fetch(processUrl, { cache: "no-store" });
                 const data = await response.json();
                 if (!response.ok || data.error) {
                     const message = data && data.error ? data.error : response.statusText || `HTTP ${response.status}`;
@@ -3114,13 +3125,16 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             query_params = parse_qs(parsed_url.query)
 
             uuid = query_params.get('uuid', [''])[0]
+            api_base_override = query_params.get('api_base', [''])[0] or None
 
             if not uuid:
                 self.wfile.write(json.dumps({'error': 'UUID je povinný'}).encode('utf-8'))
                 return
 
             try:
-                processor = AltoProcessor()
+                # Create processor with optional api_base_override so the server-side
+                # calls are made against the same Kramerius instance the UI selected.
+                processor = AltoProcessor(api_base_url=api_base_override)
                 context = processor.get_book_context(uuid)
 
                 if not context:
@@ -3135,6 +3149,8 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     return
 
                 book_uuid = context.get('book_uuid')
+                # Prefer explicit api_base from context, otherwise use processor's base (which
+                # may have been initialized from api_base_override)
                 active_api_base = context.get('api_base') or processor.api_base_url
                 library_info = describe_library(active_api_base)
                 handle_base = library_info.get('handle_base') or ''

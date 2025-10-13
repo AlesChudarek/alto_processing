@@ -22,10 +22,10 @@ import json
 VERTICAL_GAP_MULTIPLIER = 2.5   # Kolikrát musí být mezera mezi řádky větší než typická mezera, aby vznikl nový blok.
 VERTICAL_HEIGHT_RATIO = 0.85    # Poměr k mediánu výšky řádku, přispívá k prahu pro rozdělení bloku.
 VERTICAL_MAX_FACTOR = 3         # Horní limit pro vertikální práh v násobcích mediánu výšky řádku.
-HORIZONTAL_WIDTH_RATIO = 0.045  # Kandidát prahu = medián šířek řádků * tato hodnota (nižší = citlivější).
+HORIZONTAL_WIDTH_RATIO = 0.04  # Kandidát prahu = medián šířek řádků * tato hodnota (nižší = citlivější). [<0.041]
 HORIZONTAL_SHIFT_MULTIPLIER = 0.85  # Kandidát prahu = medián kladných posunů * tato hodnota.
 HORIZONTAL_MIN_THRESHOLD = 12   # Minimální povolený práh pro horizontální dělení (v ALTO jednotkách).
-NEGATIVE_SHIFT_MULTIPLIER = 0.85  # Negativní hranice = horizontální práh * tato hodnota (víc citlivá než pozitivní).
+NEGATIVE_SHIFT_MULTIPLIER = 0.95  # Negativní hranice = horizontální práh * tato hodnota (víc citlivá než pozitivní).
 FALLBACK_THRESHOLD = 40        # Záložní hodnota, pokud nelze heuristiku spočítat.
 
 CENTER_ALIGNMENT_ERROR_MARGIN = 0.02  # 5% margin for center alignment detection relative to median line width
@@ -37,18 +37,23 @@ SINGLE_LINE_VERTICAL_GAP_RATIO = 3.0  # Tolerated gap multiplier for re-centerin
 # Konstanty pro rozhodování o nadpisech na základě výšky slov
 HEADING_H2_RATIO = 1.08                 # Práh pro h2: 1.08 * průměrná výška
 HEADING_H1_RATIO = 2                    # Práh pro h1: 1.6 * průměrná výška
-HEADING_MIN_WORD_RATIO_DEFAULT = 0.81   # Výchozí minimální podíl slov v bloku, které musí překročit práh (margin of error pro OCR)
+HEADING_MIN_WORD_RATIO_DEFAULT = 0.82   # Výchozí minimální podíl slov v bloku, které musí překročit práh (margin of error pro OCR) [> 0.819]
 HEADING_FONT_GAP_THRESHOLD = 1.2        # Práh pro rozdíl ve velikosti fontu pro identifikaci nadpisových fontů
-HEADING_FONT_RATIO_MULTIPLIER = 0.5     # Koeficient pro snížení prahu pro bloky s nadpisovými fonty
+HEADING_FONT_RATIO_MULTIPLIER = 0.56    # Koeficient pro snížení prahu pro bloky s nadpisovými fonty [>0.55]
 HEADING_FONT_MAX_RATIO = 0.4            # Maximální podíl řádků s fontem, aby byl považován za nadpisový
 HEADING_FONT_MERGE_TOLERANCE = 0.1      # Povolená relativní odchylka mezi velikostmi písma při spojování nadpisů
 
 # Konstanty pro rozhodování o "malém" textu (poznámky pod čarou, popisky obrázků, atd.)
 SMALL_RATIO = 0.92                      # Práh pro "malý" text: 0.92 * průměrná výška
-SMALL_MIN_WORD_RATIO = 0.6              # Výchozí minimální podíl slov v bloku, které musí překročit práh "malého" textu (např. poznámky pod čarou)
-SMALL_H3_RATIO_MULTIPLIER = 0.7         # Koeficient pro snížení prahu pro bloky s h3 (malý text často detekován jako h3)
+SMALL_MIN_WORD_RATIO = 0.61             # Výchozí minimální podíl slov v bloku, které musí překročit práh "malého" textu (např. poznámky pod čarou) [>0.6]
+SMALL_RATIO_MULTIPLIER = 0.7            # Koeficient pro snížení prahu pro malé bloky (např. při detekci h3 nebo "*" porefix")
 
 HYPHEN_LIKE_CHARS = "-–—‑‒−‐"           # Znaky, které vyhodnocujeme jako spojovník při rozdělených slovech
+
+# Znaky, které považujeme za možné "noise" na začátku řádku (OCR tečky, závorky apod.)
+NOISE_LEADING_PUNCT = set('.:,;)]"\'“”’')
+# Kolik prvních tokenů prohledáme při hledání "effective" levého hpos
+EFFECTIVE_LEFT_MAX_TOKEN_SCAN = 3
 
 WORD_LENGTH_FILTER_INITIAL = 1          # Počáteční délka (včetně) pro filtr krátkých slov; iterativně snižujeme
 WORD_LENGTH_FILTER_MIN_WORDS = 5        # Filtrovaný seznam musí mít více než tolik slov, jinak použijeme kompletní data
@@ -66,8 +71,10 @@ ALTO_TIMEOUT = 30
 
 # Nastavení pro analýzu typického formátu základního textu v rámci knihy.
 TEXT_SAMPLE_WAVE_SIZE = 10           # Kolik stran z každé vlny odečíst.
-TEXT_SAMPLE_MAX_WAVES = 3           # Maximální počet vln načítání.
-MIN_CONFIDENCE_FOR_EARLY_STOP = 75  # Pokud confidence (v %) dosáhne této hodnoty, další vlny nejsou třeba.
+TEXT_SAMPLE_MAX_WAVES = 5           # Maximální počet vln načítání.
+# Minimální požadovaná "confidence" (jako zlomek, např. 0.9 = 90%). Pokud odhadovaná
+# confidence (v rozsahu 0.0-1.0) dosáhne této hodnoty, přestaneme přidávat další vlny.
+MIN_CONFIDENCE_FOR_EARLY_STOP = 0.9
 BLOCK_MIN_TOTAL_CHARS = 40          # Minimální množství znaků v TextBlocku, aby šel do analýzy.
 MIN_WORDS_PER_PAGE = 20             # Minimální počet slov na stránce pro výpočet průměrné výšky.
 
@@ -362,6 +369,8 @@ class AltoProcessor:
             if not text_lines:
                 text_lines = block_elem.findall('.//{http://www.loc.gov/standards/alto/ns-v2#}TextLine')
 
+            # local set for page-number detection (not used here but kept for compatibility with flows)
+            page_number_line_ids: set[int] = set()
             line_records = []
             for text_line in text_lines:
                 if page_number_line_ids and id(text_line) in page_number_line_ids:
@@ -565,6 +574,9 @@ class AltoProcessor:
                 line_all_bold = True
                 line_has_content = False
 
+                # Collect token-level HPOS/CONTENT so we can compute an effective left
+                current_line_token_hpos: List[Optional[int]] = []
+                current_line_token_texts: List[str] = []
                 for string_el in strings:
                     style = string_el.get('STYLE', '')
                     if not style or 'bold' not in style:
@@ -1018,6 +1030,17 @@ class AltoProcessor:
             stdev = statistics.stdev(heights_per_page)
             mean = statistics.mean(heights_per_page)
             print(f"[text-format] Wave {wave_index} stdev: {stdev}, mean: {mean}")
+
+            # Estimate confidence from relative variance and allow early stop.
+            # Use fractional confidence in range 0.0..1.0 (1 - relative_variance).
+            rel_var_wave = (stdev / mean) if mean else 1.0
+            estimated_confidence_frac = max(0.0, min(1.0, 1.0 - rel_var_wave))
+            estimated_confidence_percent = int(round(estimated_confidence_frac * 100))
+            print(f"[text-format] Wave {wave_index} estimated confidence: {estimated_confidence_frac:.3f} ({estimated_confidence_percent}%)")
+            if estimated_confidence_frac >= MIN_CONFIDENCE_FOR_EARLY_STOP:
+                print(f"[text-format] Confidence {estimated_confidence_percent}% >= MIN_CONFIDENCE_FOR_EARLY_STOP ({MIN_CONFIDENCE_FOR_EARLY_STOP:.2f}), stopping early")
+                break
+
             if stdev > 0.1 * mean:
                 wave_index += 1
                 additional_indices = self._compute_wave_indices(len(text_pages), wave_index)
@@ -1078,9 +1101,10 @@ class AltoProcessor:
 
         if len(heights_per_page) > 1:
             stdev = statistics.stdev(heights_per_page)
-            rel_var = stdev / final_mean if final_mean else 1
-            confidence = max(0, int(round(100 - rel_var * 100)))
-            print(f"[text-format] Final stdev: {stdev}, relative variance: {rel_var}, confidence: {confidence}")
+            rel_var = stdev / final_mean if final_mean else 1.0
+            confidence_frac = max(0.0, min(1.0, 1.0 - rel_var))
+            confidence = int(round(confidence_frac * 100))
+            print(f"[text-format] Final stdev: {stdev}, relative variance: {rel_var:.3f}, confidence: {confidence_frac:.3f} ({confidence}%)")
         else:
             confidence = 100
             print(f"[text-format] Single page, confidence: 100")
@@ -1948,20 +1972,26 @@ class AltoProcessor:
                 else:
                     min_ratio = HEADING_MIN_WORD_RATIO_DEFAULT
 
-                heights_for_ratio = list(effective_word_heights)
+                # Start from triples so we can consistently filter punctuation-only tokens
+                pairs = list(zip(effective_word_heights, effective_word_lengths, effective_word_tokens))
+                # Remove punctuation-only tokens (no alnum chars)
+                punct_removed = [token for _, _, token in pairs if not any(ch.isalnum() for ch in (token or ""))]
+                if punct_removed:
+                    print(f"DEBUG finalize_block: removing punctuation-only tokens before ratio: {punct_removed}")
+                pairs = [p for p in pairs if any(ch.isalnum() for ch in (p[2] or ""))]
+
+                heights_for_ratio = [h for h, _, _ in pairs]
                 applied_length_filter = None
 
-                if effective_word_lengths and WORD_LENGTH_FILTER_INITIAL > 0:
-                    pairs = list(zip(effective_word_heights, effective_word_lengths, effective_word_tokens))
+                # Apply same iterative length-filter logic as used elsewhere: try to ignore very short tokens
+                if pairs and WORD_LENGTH_FILTER_INITIAL > 0:
                     total_pairs = len(pairs)
                     print(
                         "DEBUG finalize_block: length-filter precheck total_pairs=%s initial_threshold=%s"
                         % (total_pairs, WORD_LENGTH_FILTER_INITIAL)
                     )
                     for length_threshold in range(WORD_LENGTH_FILTER_INITIAL, 0, -1):
-                        filtered = [
-                            height for height, length, _ in pairs if length > length_threshold
-                        ]
+                        filtered = [h for h, length, _ in pairs if length > length_threshold]
                         filtered_count = len(filtered)
                         ignored_count = total_pairs - filtered_count
                         print(
@@ -1976,9 +2006,7 @@ class AltoProcessor:
                         if filtered_count > WORD_LENGTH_FILTER_MIN_WORDS:
                             heights_for_ratio = filtered
                             applied_length_filter = length_threshold
-                            ignored_tokens = [
-                                token for _, length, token in pairs if length <= length_threshold
-                            ]
+                            ignored_tokens = [token for _, length, token in pairs if length <= length_threshold]
                             print(
                                 "DEBUG finalize_block: applying length filter>%s; ignored_tokens=%s"
                                 % (length_threshold, ignored_tokens)
@@ -1992,15 +2020,38 @@ class AltoProcessor:
                 total_words = len(heights_for_ratio)
 
                 if total_words > 0:
-                    if count_above_h1 / total_words >= min_ratio:
-                        tag = 'h1'
-                        print(f"DEBUG finalize_block: changed to h1, count_above_h1={count_above_h1}, total_words={total_words}, ratio={count_above_h1 / total_words:.3f} >= {min_ratio:.3f}")
-                    elif count_above_h2 / total_words >= min_ratio:
-                        tag = 'h2'
-                        print(f"DEBUG finalize_block: changed to h2, count_above_h2={count_above_h2}, total_words={total_words}, ratio={count_above_h2 / total_words:.3f} >= {min_ratio:.3f}")
-                    else:
+                    # If this block was created by a negative horizontal split (back-split), require
+                    # a minimum number of words to consider promoting it to a heading. This avoids
+                    # single-word fragments (often caused by layout splits) being misclassified as h2/h1.
+                    if block_data.get('split_reason') == 'horizontal_indent' and total_words < 3:
                         tag = 'p'
-                        print(f"DEBUG finalize_block: stayed p, count_above_h1={count_above_h1}, count_above_h2={count_above_h2}, total_words={total_words}, min_ratio={min_ratio:.3f}")
+                        print(
+                            f"DEBUG finalize_block: prevented promoting to h1/h2 due to negative-split and total_words={total_words} < 3"
+                        )
+                    # Additional guard: if the fragment starts with any quote-like character,
+                    # it's very likely a continuation/dialogue line (OCR often puts opening
+                    # quotes on a wrapped line). Such lines should not be promoted to headings.
+                    elif block_data.get('split_reason') == 'horizontal_indent':
+                        # Check leading character(s) of the textual content (strip leading whitespace)
+                        leading = text_content.lstrip()[:1]
+                        # Include a set of common opening quote characters (straight/directional)
+                        quote_chars = set('"' + "'“”‹›«»‚‛‟`´ʺʹ")
+                        if leading and leading in quote_chars:
+                            tag = 'p'
+                            print(f"DEBUG finalize_block: prevented promoting to h1/h2 because fragment starts with quote '{leading}' and split_reason=horizontal_indent")
+                        else:
+                            # fall through to normal heading checks below
+                            pass
+                    else:
+                        if count_above_h1 / total_words >= min_ratio:
+                            tag = 'h1'
+                            print(f"DEBUG finalize_block: changed to h1, count_above_h1={count_above_h1}, total_words={total_words}, ratio={count_above_h1 / total_words:.3f} >= {min_ratio:.3f}")
+                        elif count_above_h2 / total_words >= min_ratio:
+                            tag = 'h2'
+                            print(f"DEBUG finalize_block: changed to h2, count_above_h2={count_above_h2}, total_words={total_words}, ratio={count_above_h2 / total_words:.3f} >= {min_ratio:.3f}")
+                        else:
+                            tag = 'p'
+                            print(f"DEBUG finalize_block: stayed p, count_above_h1={count_above_h1}, count_above_h2={count_above_h2}, total_words={total_words}, min_ratio={min_ratio:.3f}")
                 else:
                     tag = 'p'
 
@@ -2385,9 +2436,12 @@ class AltoProcessor:
                                 "DEBUG page-number: secondary numeric candidate "
                                 f"vpos={entry['vpos']} text='{text_value}'"
                             )
+                            # Mark simple numeric lines as pure secondary candidates and
+                            # keep the original entry so we can promote it to primary later
                             secondary_entries.append({
                                 'text': text_value,
-                                'is_pure': False,
+                                'is_pure': True,
+                                'entry': entry,
                             })
                             continue
 
@@ -2398,6 +2452,25 @@ class AltoProcessor:
                             suspects.append(entry)
 
                     candidates = matches if matches else suspects
+                    # If we found no matches/suspects but have exactly one pure numeric
+                    # secondary candidate, promote it to primary. This covers OCR errors
+                    # where the OCR reads a different number than metadata but a clear
+                    # numeric line exists on the page.
+                    if not candidates and not matches and not suspects and len(secondary_entries) == 1:
+                        sec = secondary_entries[0]
+                        if sec.get('is_pure') and sec.get('entry'):
+                            promoted_entry = sec['entry']
+                            print(
+                                f"DEBUG page-number: promoting single pure secondary '{sec.get('text')}' to primary candidate vpos={promoted_entry['vpos']}"
+                            )
+                            candidates = [promoted_entry]
+                            # Remove the promoted secondary so it won't be reported again
+                            secondary_entries.clear()
+                            # Ensure the promoted line is treated as primary (skip it in later text processing)
+                            try:
+                                page_number_line_ids.add(id(promoted_entry['element']))
+                            except Exception:
+                                pass
                     print(
                         f"DEBUG page-number: matches={len(matches)}, suspects={len(suspects)}, using_candidates={len(candidates)}"
                     )
@@ -2608,24 +2681,20 @@ class AltoProcessor:
             median_width = statistics.median(line_widths) if line_widths else 0
             margin_median = median_width * CENTER_ALIGNMENT_ERROR_MARGIN if median_width else 0
             margin_center = alto_width * CENTER_ALIGNMENT_ERROR_MARGIN if alto_width else 0
- 
 
-            # Check if all line centers are within median_center ± margin or all within page_center ± margin
-            centers_aligned_median = all(abs(center - median_center) <= margin_median for center in line_centers)
-            centers_aligned_page = all(abs(center - page_center) <= margin_center for center in line_centers)
-            centers_aligned = centers_aligned_median or centers_aligned_page
-
-            # Check if line widths vary enough (not a justified block)
+            # Check if line widths vary enough (not a justified block) overall
             if line_widths:
                 min_width = min(line_widths)
                 max_width = max(line_widths)
                 width_diff = max_width - min_width
                 width_diff_threshold = median_width * CENTER_ALIGNMENT_MIN_LINE_LEN_DIFF if median_width else 0
-                widths_vary = width_diff > width_diff_threshold
+                widths_vary_overall = width_diff > width_diff_threshold
             else:
-                widths_vary = False
+                widths_vary_overall = False
 
-            is_center_aligned = centers_aligned and widths_vary
+            # We'll compute vertical/horizontal gaps and thresholds first; subgrouping will follow after thresholds are set
+            group_centered_flags: List[bool] = []
+            record_group_idxs: List[int] = []
 
             for record in line_records:
                 if previous_bottom is not None:
@@ -2681,6 +2750,8 @@ class AltoProcessor:
             else:
                 horizontal_threshold = FALLBACK_THRESHOLD
 
+            # overall center decision (used for debugging fallback)
+            is_center_aligned = (all(abs(center - median_center) <= margin_median for center in line_centers) or all(abs(center - page_center) <= margin_center for center in line_centers)) and widths_vary_overall
             print(f"DEBUG: line_heights={line_heights}")
             print(f"DEBUG: line_widths={line_widths}")
             print(f"DEBUG: vertical_gaps={vertical_gaps}, horizontal_shifts={horizontal_shifts}")
@@ -2691,10 +2762,83 @@ class AltoProcessor:
             print(f"DEBUG: heading_fonts={heading_fonts}, font_counts={dict(font_counts)}")
             print(f"DEBUG: is_center_aligned={is_center_aligned}")
 
+            # Now split the TextBlock into vertical subgroups using the computed vertical_threshold
+            groups: List[List[dict]] = []
+            current_group: List[dict] = []
+            prev_bottom_local = None
+            for rec in line_records:
+                if prev_bottom_local is not None:
+                    gap_local = rec['vpos'] - prev_bottom_local
+                    if gap_local > vertical_threshold:
+                        if current_group:
+                            groups.append(current_group)
+                        current_group = []
+                current_group.append(rec)
+                prev_bottom_local = rec['bottom']
+            if current_group:
+                groups.append(current_group)
+
+            # Compute center-alignment flag for each subgroup (centers aligned AND widths vary within subgroup)
+            for gidx, grp in enumerate(groups):
+                centers_grp = [r['hpos'] + r['width'] / 2 for r in grp]
+                median_center_grp = statistics.median(centers_grp) if centers_grp else 0
+                median_width_grp = statistics.median([r['width'] for r in grp]) if grp else 0
+                margin_median_grp = median_width_grp * CENTER_ALIGNMENT_ERROR_MARGIN if median_width_grp else 0
+
+                centers_aligned_median_grp = all(abs(c - median_center_grp) <= margin_median_grp for c in centers_grp) if centers_grp else False
+                centers_aligned_page_grp = all(abs(c - page_center) <= margin_center for c in centers_grp) if centers_grp else False
+                centers_aligned_grp = centers_aligned_median_grp or centers_aligned_page_grp
+
+                widths_vary_grp = False
+                if grp:
+                    widths = [r['width'] for r in grp]
+                    min_w = min(widths)
+                    max_w = max(widths)
+                    width_diff_grp = max_w - min_w
+                    width_diff_threshold_grp = median_width_grp * CENTER_ALIGNMENT_MIN_LINE_LEN_DIFF if median_width_grp else 0
+                    widths_vary_grp = width_diff_grp > width_diff_threshold_grp
+
+                group_centered = centers_aligned_grp and widths_vary_grp
+                group_centered_flags.append(group_centered)
+
+                # record mapping for each line in group
+                for _ in grp:
+                    record_group_idxs.append(gidx)
+
+            # Extra debug: report group info for specific lines of interest
+            interesting_a = 'O mluvícím ptáku, živé vodě a třech'
+            interesting_b = 'zlatých jabloních.'
+            for ridx, rec in enumerate(line_records):
+                # try to extract a text snippet from the underlying element (may be filled later)
+                try:
+                    el = rec.get('element')
+                    strings = el.findall('.//{http://www.loc.gov/standards/alto/ns-v3#}String')
+                    if not strings:
+                        strings = el.findall('.//{http://www.loc.gov/standards/alto/ns-v2#}String')
+                    snippet = ' '.join([html.unescape(s.get('CONTENT','') or s.get('SUBS_CONTENT','') or '') for s in strings]).strip()
+                except Exception:
+                    snippet = ''
+
+                if interesting_a in snippet or interesting_b in snippet:
+                    gidx = record_group_idxs[ridx] if ridx < len(record_group_idxs) else None
+                    group_cent = group_centered_flags[gidx] if (gidx is not None and gidx < len(group_centered_flags)) else None
+                    centers_grp = [r['hpos'] + r['width'] / 2 for r in groups[gidx]] if gidx is not None and gidx < len(groups) else []
+                    median_center_grp = statistics.median(centers_grp) if centers_grp else None
+                    median_width_grp = statistics.median([r['width'] for r in groups[gidx]]) if gidx is not None and gidx < len(groups) and groups[gidx] else None
+                    print(
+                        f"DEBUG-INTEREST idx={ridx} text='{snippet[:80]}...' group={gidx} group_centered={group_cent} median_center_grp={median_center_grp} median_width_grp={median_width_grp} vertical_threshold={vertical_threshold} horizontal_threshold={horizontal_threshold}"
+                    )
+
+            # If no groups found, fallback to overall decision
+            if not group_centered_flags:
+                is_center_aligned = (all(abs(center - median_center) <= margin_median for center in line_centers) or all(abs(center - page_center) <= margin_center for center in line_centers)) and widths_vary_overall
+                group_centered_flags = [is_center_aligned]
+                record_group_idxs = [0 for _ in line_records]
+
             tag = 'p'
             block_id = block_elem.get('ID')
 
-            def new_block_state():
+            def new_block_state(centered: bool = False):
                 return {
                     'lines': [],
                     'tag': tag,
@@ -2705,7 +2849,7 @@ class AltoProcessor:
                     'line_word_heights': [],
                     'line_word_lengths': [],
                     'line_word_tokens': [],
-                    'centered': is_center_aligned,
+                    'centered': centered,
                     'all_bold': True,
                     'source_block_id': block_id,
                     'line_font_sizes': [],
@@ -2717,13 +2861,15 @@ class AltoProcessor:
                     'split_reason': None,
                 }
 
-            current_block = new_block_state()
+            # start with centered flag of the first subgroup
+            first_centered = group_centered_flags[record_group_idxs[0]] if record_group_idxs else False
+            current_block = new_block_state(centered=first_centered)
             lines = 0
             last_bottom = None
             last_left = None
             last_line_font_size = 0
 
-            for record in line_records:
+            for idx, record in enumerate(line_records):
                 text_line = record['element']
                 text_line_vpos = record['vpos']
                 text_line_hpos = record['hpos']
@@ -2754,7 +2900,12 @@ class AltoProcessor:
                                 average_height,
                                 heading_fonts,
                             )
-                        current_block = new_block_state()
+                        # Start a new block and inherit the centered flag for the subgroup this line belongs to
+                        grp_idx_for_record = record_group_idxs[idx] if idx < len(record_group_idxs) else None
+                        next_centered = False
+                        if grp_idx_for_record is not None and grp_idx_for_record < len(group_centered_flags):
+                            next_centered = group_centered_flags[grp_idx_for_record]
+                        current_block = new_block_state(centered=next_centered)
                         lines = 0
 
                 last_bottom = bottom
@@ -2768,6 +2919,9 @@ class AltoProcessor:
                 current_line_word_heights: List[float] = []
                 current_line_word_lengths: List[int] = []
                 current_line_word_tokens: List[str] = []
+                # Token-level arrays used for effective-left calculation
+                current_line_token_hpos: List[Optional[int]] = []
+                current_line_token_texts: List[str] = []
 
                 for string_el in strings:
                     style = string_el.get('STYLE', '')
@@ -2783,14 +2937,36 @@ class AltoProcessor:
                     content = html.unescape(content)
                     subs_content = html.unescape(subs_content)
 
+                    # When a word is hyphen-split across lines, ALTO uses SUBS_CONTENT with
+                    # SUBS_TYPE 'HypPart1'/'HypPart2'. To compute effective_left correctly we
+                    # must consider the HypPart2 token's HPOS on the continuation line. However
+                    # we should avoid duplicating the full SUBS_CONTENT into the visible line
+                    # text (that was already included on the previous line). Therefore:
+                    # - For HypPart1: use SUBS_CONTENT as the visible content_value (same as before)
+                    # - For HypPart2: do NOT append to line_parts (leave content_value empty) but
+                    #   include the SUBS_CONTENT in the token-level arrays so its HPOS is considered
+                    #   when computing effective_left.
                     if subs_type == 'HypPart1':
                         content_value = subs_content
+                        token_text_for_hpos = content_value
                     elif subs_type == 'HypPart2':
-                        continue
+                        # continuation fragment: use the full reconstructed word for HPOS purposes,
+                        # but don't add it to line_parts to avoid duplication.
+                        content_value = ''
+                        token_text_for_hpos = subs_content or content
                     else:
                         content_value = content
+                        token_text_for_hpos = content_value
 
-                    token_text = content_value or ''
+                    token_text = (token_text_for_hpos or '')
+                    # token-level HPOS (fallback to line hpos if missing)
+                    try:
+                        token_hpos = int(string_el.get('HPOS')) if string_el.get('HPOS') else None
+                    except (TypeError, ValueError):
+                        token_hpos = None
+                    # Always record token HPOS/text for effective-left computation, including HypPart2
+                    current_line_token_texts.append(token_text)
+                    current_line_token_hpos.append(token_hpos)
                     non_space_length = len([ch for ch in token_text if not ch.isspace()])
 
                     height = string_el.get('HEIGHT')
@@ -2808,9 +2984,26 @@ class AltoProcessor:
                 line_text = ' '.join(line_parts).strip()
                 line_width = record['width']
                 line_center = text_line_hpos + line_width / 2 if line_width else float(text_line_hpos)
+                # compute effective left using first non-noise token HPOS if available
+                def compute_effective_left(token_texts: List[str], token_hpos: List[Optional[int]], fallback: int) -> int:
+                    for i in range(min(len(token_texts), EFFECTIVE_LEFT_MAX_TOKEN_SCAN)):
+                        t = (token_texts[i] or '').strip()
+                        if not t:
+                            continue
+                        # if token contains alnum, consider it significant
+                        if any(ch.isalnum() for ch in t):
+                            return token_hpos[i] if token_hpos[i] is not None else fallback
+                        # if token is single punctuation likely OCR noise, skip it
+                        if len(t) == 1 and t in NOISE_LEADING_PUNCT:
+                            continue
+                        # otherwise treat as significant
+                        return token_hpos[i] if token_hpos[i] is not None else fallback
+                    return fallback
+
+                text_line_effective_left = compute_effective_left(current_line_token_texts, current_line_token_hpos, text_line_hpos)
                 previous_left = last_left
                 print(
-                    f"DEBUG: Processing line at hpos={text_line_hpos}, previous_left={previous_left}, line_text='{line_text[:50]}...'"
+                    f"DEBUG: Processing line at hpos={text_line_hpos} (effective_left={text_line_effective_left}), previous_left={previous_left}, line_text='{line_text[:50]}...'"
                 )
 
                 if not line_text:
@@ -2853,10 +3046,17 @@ class AltoProcessor:
                     if font_size_differs or height_differs:
                         should_split_center = True
 
-                if previous_left is not None and not is_center_aligned:
-                    h_diff = text_line_hpos - previous_left
+                # Only consider horizontal shifts for non-centered current blocks.
+                # If the current block/subgroup is centered, horizontal shift is not informative and should be ignored.
+                if previous_left is not None and not current_block.get('centered', False):
+                    # use effective left positions for h_diff calculation
+                    left_for_prev = previous_left
+                    if isinstance(previous_left, (int, float)):
+                        # previous_left is a simple number (line hpos); try to use stored effective if available
+                        left_for_prev = previous_left
+                    h_diff = text_line_effective_left - left_for_prev
                     print(
-                        f"DEBUG: h_diff={h_diff}, horizontal_threshold={horizontal_threshold}, font_size_differs={font_size_differs}"
+                        f"DEBUG: h_diff={h_diff}, horizontal_threshold={horizontal_threshold}, font_size_differs={font_size_differs}, effective_prev_left={left_for_prev}, effective_cur_left={text_line_effective_left}"
                     )
 
                     if h_diff > horizontal_threshold or font_size_differs:
@@ -2873,7 +3073,12 @@ class AltoProcessor:
                                 average_height,
                                 heading_fonts,
                             )
-                        current_block = new_block_state()
+                        # Create a new block and inherit the centered flag of the subgroup the current line belongs to
+                        grp_idx_for_record = record_group_idxs[idx] if idx < len(record_group_idxs) else None
+                        next_centered = current_block.get('centered', False)
+                        if grp_idx_for_record is not None and grp_idx_for_record < len(group_centered_flags):
+                            next_centered = group_centered_flags[grp_idx_for_record]
+                        current_block = new_block_state(centered=next_centered)
                         lines = 0
                     elif h_diff < 0 and abs(h_diff) > horizontal_threshold * NEGATIVE_SHIFT_MULTIPLIER and current_block['lines']:
                         print(
@@ -3030,6 +3235,8 @@ class AltoProcessor:
                         "DEBUG: Center-aligned block split due to font/height difference: "
                         f"font_size_ratio={font_size_ratio}, height_ratio={height_ratio}"
                     )
+                    # remember whether current block was centered so the new block can inherit it
+                    was_centered = bool(current_block.get('centered', False))
                     current_block['split_reason'] = 'center_font_change'
                     finalize_block(
                         current_block,
@@ -3039,7 +3246,8 @@ class AltoProcessor:
                         average_height,
                         heading_fonts,
                     )
-                    current_block = new_block_state()
+                    # create a new block preserving the centered flag only if it was set
+                    current_block = new_block_state(centered=was_centered)
                     lines = 0
 
                 if current_line_font_size:
@@ -3068,7 +3276,8 @@ class AltoProcessor:
                 prospective_count = lines + 1
                 lines = len(current_block['lines'])
 
-                last_left = text_line_hpos
+                # store effective left as last_left for next iteration
+                last_left = text_line_effective_left
                 last_line_font_size = current_line_font_size
 
             if current_block['lines']:
@@ -3112,7 +3321,58 @@ class AltoProcessor:
                 if original_tag not in ('p', 'h3'):
                     continue
 
-                valid_word_heights = [h for h in block.get('word_heights', []) if h and h > 0]
+                # Build triples from block tokens so we can apply same filters as in finalize_block
+                word_heights = list(block.get('word_heights', []))
+                word_lengths = list(block.get('word_lengths', []))
+                word_tokens = list(block.get('word_tokens', []))
+
+                pairs = list(zip(word_heights, word_lengths, word_tokens))
+                # Keep only valid positive heights
+                pairs = [(h, l, t) for (h, l, t) in pairs if h and h > 0]
+                if not pairs:
+                    continue
+
+                # Remove punctuation-only tokens
+                punct_removed = [t for _, _, t in pairs if not any(ch.isalnum() for ch in (t or ""))]
+                if punct_removed:
+                    print(f"DEBUG small: removing punctuation-only tokens before ratio: {punct_removed}")
+                pairs = [p for p in pairs if any(ch.isalnum() for ch in (p[2] or ""))]
+                if not pairs:
+                    continue
+
+                # Now apply the same length filter logic used for headings
+                heights_for_small = [h for h, _, _ in pairs]
+                applied_length_filter_small = None
+                if pairs and WORD_LENGTH_FILTER_INITIAL > 0:
+                    total_pairs = len(pairs)
+                    print(
+                        "DEBUG small: length-filter precheck total_pairs=%s initial_threshold=%s"
+                        % (total_pairs, WORD_LENGTH_FILTER_INITIAL)
+                    )
+                    for length_threshold in range(WORD_LENGTH_FILTER_INITIAL, 0, -1):
+                        filtered = [h for h, length, _ in pairs if length > length_threshold]
+                        filtered_count = len(filtered)
+                        ignored_count = total_pairs - filtered_count
+                        print(
+                            "DEBUG small: try length>%s -> kept=%s ignored=%s min_required>%s"
+                            % (
+                                length_threshold,
+                                filtered_count,
+                                ignored_count,
+                                WORD_LENGTH_FILTER_MIN_WORDS,
+                            )
+                        )
+                        if filtered_count > WORD_LENGTH_FILTER_MIN_WORDS:
+                            heights_for_small = filtered
+                            applied_length_filter_small = length_threshold
+                            ignored_tokens = [token for _, length, token in pairs if length <= length_threshold]
+                            print(
+                                "DEBUG small: applying length filter>%s; ignored_tokens=%s"
+                                % (length_threshold, ignored_tokens)
+                            )
+                            break
+
+                valid_word_heights = list(heights_for_small)
                 if not valid_word_heights:
                     continue
 
@@ -3123,8 +3383,11 @@ class AltoProcessor:
 
                 small_ratio_value = small_word_count / total_valid
                 ratio_threshold = SMALL_MIN_WORD_RATIO
-                if original_tag == 'h3':
-                    ratio_threshold *= SMALL_H3_RATIO_MULTIPLIER
+                # Ulevit prah pro malé bloky pokud byl původní tag 'h3'
+                # nebo pokud odstavec začíná znakem '*'
+                block_text_for_check = (block.get('text') or '').lstrip()
+                if original_tag == 'h3' or block_text_for_check.startswith('*'):
+                    ratio_threshold *= SMALL_RATIO_MULTIPLIER
 
                 if small_ratio_value >= ratio_threshold:
                     block['tag'] = 'small'

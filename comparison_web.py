@@ -44,6 +44,161 @@ KNOWN_LIBRARY_OVERRIDES: Dict[str, Dict[str, str]] = {
 }
 
 
+# Agents storage/helpers
+AGENTS_DIR = ROOT_DIR / 'agents'
+AGENT_NAME_RE = re.compile(r'^[A-Za-z0-9._-]{1,64}$')
+
+def ensure_agents_dir():
+    try:
+        AGENTS_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+def safe_agent_name(name: str) -> Optional[str]:
+    if not name or not isinstance(name, str):
+        return None
+    nm = name.strip()
+    if AGENT_NAME_RE.match(nm):
+        return nm
+    return None
+
+
+def sanitize_agent_name(name: str) -> Optional[str]:
+    """Produce a filesystem-safe agent filename from arbitrary display name.
+    Returns None if result would be empty."""
+    if not name or not isinstance(name, str):
+        return None
+    # replace spaces and disallowed chars with -
+    s = name.strip()
+    # normalize: replace long sequences of non-allowed chars with '-'
+    s = re.sub(r'[^A-Za-z0-9._-]+', '-', s)
+    s = re.sub(r'-{2,}', '-', s)
+    s = s.strip('-')
+    if not s:
+        return None
+    # limit length
+    if len(s) > 64:
+        s = s[:64]
+    # ensure it matches the allowed pattern
+    if AGENT_NAME_RE.match(s):
+        return s
+    return None
+
+def agent_filepath(name: str) -> Path:
+    return AGENTS_DIR / f"{name}.json"
+
+def list_agents_files():
+    ensure_agents_dir()
+    out = []
+    for p in sorted(AGENTS_DIR.glob('*.json')):
+        try:
+            stat = p.stat()
+            parsed = None
+            display_name = p.stem
+            try:
+                raw = p.read_text(encoding='utf-8')
+                parsed = json.loads(raw)
+                display_name = parsed.get('display_name') or parsed.get('name') or p.stem
+            except Exception:
+                parsed = None
+                display_name = p.stem
+            out.append({
+                'name': p.stem,
+                'display_name': display_name,
+                'agent': parsed,
+                'path': str(p),
+                'updated_at': stat.st_mtime,
+                'size': stat.st_size,
+            })
+        except Exception:
+            continue
+    return out
+
+def read_agent_file(name: str) -> Optional[dict]:
+    nm = safe_agent_name(name)
+    if not nm:
+        return None
+    p = agent_filepath(nm)
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding='utf-8'))
+    except Exception:
+        return None
+
+def write_agent_file(data: dict) -> bool:
+    name = data.get('name') if isinstance(data, dict) else None
+    nm = safe_agent_name(name)
+    display_name = name if isinstance(name, str) else ''
+    if not nm:
+        nm = sanitize_agent_name(display_name)
+    if not nm:
+        return False
+    ensure_agents_dir()
+    p = agent_filepath(nm)
+    # sanitize and limit
+    # parse and clamp numeric fields carefully so that 0 values are preserved
+    try:
+        temp_val = data.get('temperature') if isinstance(data, dict) else None
+        if temp_val is None:
+            temperature = 0.0
+        else:
+            temperature = float(temp_val)
+    except Exception:
+        temperature = 0.0
+    try:
+        top_val = data.get('top_p') if isinstance(data, dict) else None
+        if top_val is None:
+            top_p = 1.0
+        else:
+            top_p = float(top_val)
+    except Exception:
+        top_p = 1.0
+    # clamp to valid range
+    temperature = max(0.0, min(1.0, temperature))
+    top_p = max(0.0, min(1.0, top_p))
+
+    safe = {
+        'name': nm,
+        'display_name': display_name,
+        'prompt': str(data.get('prompt') or '')[:200000],
+        'temperature': temperature,
+        'top_p': top_p,
+        'updated_at': time.time(),
+    }
+    if not p.parent.exists():
+        p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix('.json.tmp')
+    try:
+        tmp.write_text(json.dumps(safe, ensure_ascii=False, indent=2), encoding='utf-8')
+        tmp.replace(p)
+        try:
+            p.chmod(0o600)
+        except Exception:
+            pass
+        # return the canonical stored agent name
+        return nm
+    except Exception:
+        try:
+            if tmp.exists(): tmp.unlink()
+        except Exception:
+            pass
+        return None
+
+def delete_agent_file(name: str) -> bool:
+    nm = safe_agent_name(name)
+    if not nm:
+        return False
+    p = agent_filepath(nm)
+    try:
+        if p.exists():
+            p.unlink()
+            return True
+    except Exception:
+        return False
+    return False
+
+
 def _api_base_to_handle_base(api_base: str) -> str:
     if not api_base:
         return ""
@@ -82,7 +237,33 @@ def describe_library(api_base: Optional[str]) -> Dict[str, str]:
 
 class ComparisonHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == '/':
+        parsed = urlparse(self.path)
+        path = parsed.path
+        # Agents API endpoints
+        if path == '/agents' or path == '/agents/list':
+            items = list_agents_files()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(json.dumps({'agents': items}, ensure_ascii=False).encode('utf-8'))
+            return
+        if path == '/agents/get':
+            qs = parse_qs(parsed.query)
+            name = (qs.get('name') or [''])[0]
+            data = read_agent_file(name)
+            if data is None:
+                self.send_response(404)
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': 'not_found'}).encode('utf-8'))
+                return
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
+            return
+
+        if path == '/':
             self.send_response(200)
             self.send_header('Content-type', 'text/html; charset=utf-8')
             self.end_headers()
@@ -627,6 +808,17 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             border-top-color: #007bff;
             animation: spin 0.8s linear infinite;
         }
+        /* small inline spinner used next to dropdowns */
+        .inline-spinner {
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            border: 2px solid rgba(0,0,0,0.08);
+            border-top-color: #007bff;
+            animation: spin 0.8s linear infinite;
+            display: inline-block;
+            vertical-align: middle;
+        }
         .loading p {
             margin: 0;
             color: #333;
@@ -844,35 +1036,61 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 </div>
                 <div id="results" class="results" style="display: none;">
                     <div class="result-box">
-                        <h3>Python výsledek</h3>
-                        <div id="python-result" class="result-rendered"></div>
-                    </div>
-                    <div class="result-box">
                         <h3>TypeScript výsledek (simulace)</h3>
                         <div id="typescript-result" class="result-rendered"></div>
                     </div>
+                    <div class="result-box">
+                        <h3>Python výsledek</h3>
+                        <div id="python-result" class="result-rendered"></div>
+                    </div>
                 </div>
 
-                <div id="diff-section" class="diff-section">
-                    <div class="diff-header">
-                        <h2 class="diff-heading">Rozdíly</h2>
-                        <div id="diff-mode-controls" class="diff-controls" role="group" aria-label="Zobrazení rozdílů">
-                            <button type="button" class="diff-toggle" data-diff-mode="word" aria-pressed="false">Slova</button>
-                            <button type="button" class="diff-toggle" data-diff-mode="char" aria-pressed="false">Znaky</button>
+                <!-- LLM agent settings UI -->
+                <div id="agent-row" class="info-section" style="margin-top:18px;">
+                    <div style="display:flex;align-items:center;gap:8px;">
+                        <label for="agent-select" style="margin:0;font-weight:600;">Agent:</label>
+                        <select id="agent-select" aria-label="Vyberte agenta"></select>
+                        <div id="agent-select-spinner" title="Načítám agenty" style="margin-left:8px;display:none;">
+                            <span class="inline-spinner" aria-hidden="true"></span>
+                        </div>
+                        <div style="margin-left:auto;display:flex;align-items:center;gap:8px;">
+                            <label style="display:inline-flex;align-items:center;gap:6px;">
+                                <input id="agent-auto-correct" type="checkbox">
+                                <span style="font-size:13px;">Automaticky opravovat</span>
+                            </label>
+                            <button id="agent-run" type="button" style="height:36px;display:inline-flex;align-items:center;justify-content:center;padding:6px 12px;">Oprav</button>
+                            <button id="agent-expand-toggle" type="button" aria-expanded="false" title="Zobrazit nastavení agenta" style="height:36px;display:inline-flex;align-items:center;justify-content:center;padding:6px 10px;">⚙️</button>
                         </div>
                     </div>
-                    <div id="html-diff" class="results" style="display: none;">
-                        <div class="result-box">
-                            <h3>Python – HTML struktura</h3>
-                            <div class="result-html-section">
-                                <div id="python-html"></div>
+
+                    <div id="agent-settings" style="display:none;margin-top:12px;border-top:1px solid #e6e9ef;padding-top:12px;">
+                        <div class="form-group">
+                            <label for="agent-name">Název agenta</label>
+                            <input type="text" id="agent-name" placeholder="Např. default-editor">
+                        </div>
+                        <div class="form-group">
+                            <label for="agent-prompt">Prompt</label>
+                            <textarea id="agent-prompt" rows="6" style="width:100%;font-family:monospace;">Zadejte prompt...</textarea>
+                        </div>
+                        <div style="display:flex;gap:12px;align-items:center;">
+                            <div style="flex:1;">
+                                <label for="agent-temperature">Temperature</label>
+                                <div style="display:flex;gap:8px;align-items:center;">
+                                    <input id="agent-temperature" type="range" min="0" max="1" step="0.01" value="0.2" style="flex:1;">
+                                    <input id="agent-temperature-number" type="number" min="0" max="1" step="0.01" value="0.2" style="width:80px;">
+                                </div>
+                            </div>
+                            <div style="flex:1;">
+                                <label for="agent-top-p">Top P</label>
+                                <div style="display:flex;gap:8px;align-items:center;">
+                                    <input id="agent-top-p" type="range" min="0" max="1" step="0.01" value="1.0" style="flex:1;">
+                                    <input id="agent-top-p-number" type="number" min="0" max="1" step="0.01" value="1.0" style="width:80px;">
+                                </div>
                             </div>
                         </div>
-                        <div class="result-box">
-                            <h3>TypeScript – HTML struktura</h3>
-                            <div class="result-html-section">
-                                <div id="typescript-html"></div>
-                            </div>
+                        <div style="display:flex;gap:8px;margin-top:12px;">
+                            <button id="agent-save" type="button">Uložit agenta</button>
+                            <button id="agent-delete" type="button" style="background:#e53e3e;">Smazat</button>
                         </div>
                     </div>
                 </div>
@@ -921,6 +1139,338 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             typescript: "",
             baseKey: "",
         };
+        // --- LLM agent management ---
+        const AGENTS_STORAGE_KEY = 'altoAgents_v1';
+        const AGENT_SELECTED_KEY = 'altoAgentSelected_v1';
+        const AGENT_AUTO_CORRECT_KEY = 'altoAgentAutoCorrect_v1';
+
+        // client-side in-memory cache of agents (name -> agent object)
+        const agentsCache = {};
+
+        async function loadAgents() {
+            // if cache already populated, return a shallow map
+            const keys = Object.keys(agentsCache);
+            if (keys.length) {
+                const out = {};
+                keys.sort().forEach(k => { out[k] = { name: k, display_name: agentsCache[k].display_name || k }; });
+                return out;
+            }
+            try {
+                const res = await fetch('/agents/list', { cache: 'no-store' });
+                if (!res.ok) return {};
+                const data = await res.json();
+                const out = {};
+                // server returns list items which may include parsed agent object
+                (data.agents || []).forEach(a => {
+                    // prefer full agent object if present
+                    if (a.agent && typeof a.agent === 'object') {
+                        agentsCache[a.name] = a.agent;
+                    } else {
+                        agentsCache[a.name] = agentsCache[a.name] || { name: a.name, display_name: a.display_name || a.name, prompt: '', temperature: 0.2, top_p: 1.0 };
+                    }
+                    out[a.name] = { name: a.name, display_name: agentsCache[a.name].display_name || a.name };
+                });
+                return out;
+            } catch (err) {
+                console.warn('Nelze načíst agenty ze serveru, fallback na empty:', err);
+                return {};
+            }
+        }
+
+        // saveAgents is no longer used client-side; server persists agents
+
+        function persistSelectedAgent(name) {
+            try { localStorage.setItem(AGENT_SELECTED_KEY, name || ''); } catch (e) {}
+        }
+
+        function loadSelectedAgent() {
+            try { return localStorage.getItem(AGENT_SELECTED_KEY) || ''; } catch (e) { return ''; }
+        }
+
+        function persistAutoCorrect(value) {
+            try { localStorage.setItem(AGENT_AUTO_CORRECT_KEY, value ? '1' : '0'); } catch (e) {}
+        }
+
+        function loadAutoCorrect() {
+            try { return localStorage.getItem(AGENT_AUTO_CORRECT_KEY) === '1'; } catch (e) { return false; }
+        }
+
+        async function renderAgentSelector() {
+            const select = document.getElementById('agent-select');
+            const spinnerWrapper = document.getElementById('agent-select-spinner');
+            if (spinnerWrapper) spinnerWrapper.style.display = 'inline-block';
+            if (!select) {
+                if (spinnerWrapper) spinnerWrapper.style.display = 'none';
+                return;
+            }
+            select.innerHTML = '';
+            const agents = await loadAgents();
+            const selected = loadSelectedAgent();
+            const names = Object.keys(agents).sort();
+            // If no agents on server, create some defaults client-side and save
+            if (!names.length) {
+                const defaults = ['editor-default','cleanup-a','semantic-fix'];
+                for (const n of defaults) {
+                    await fetch('/agents/save', {
+                        method: 'POST', headers: {'Content-Type':'application/json'},
+                        body: JSON.stringify({ name: n, prompt: `Agent ${n} - test prompt`, temperature: 0.2, top_p: 1.0 })
+                    });
+                }
+                if (spinnerWrapper) spinnerWrapper.style.display = 'none';
+                return renderAgentSelector();
+            }
+
+            // show nicer labels when display_name exists
+            for (const name of names) {
+                const option = document.createElement('option');
+                option.value = name;
+                // prefer display_name from cache
+                option.textContent = (agents[name] && agents[name].display_name) ? agents[name].display_name : name;
+                select.appendChild(option);
+            }
+
+            if (selected && names.includes(selected)) {
+                select.value = selected;
+            } else {
+                select.selectedIndex = 0;
+                persistSelectedAgent(select.value);
+            }
+            if (spinnerWrapper) spinnerWrapper.style.display = 'none';
+            // update the UI fields for the selected agent from cache (avoid extra fetch)
+            try {
+                const sel = select.value;
+                if (sel && agentsCache[sel]) {
+                    setAgentFields(agentsCache[sel]);
+                    persistSelectedAgent(sel);
+                } else {
+                    await updateAgentUIFromSelection();
+                }
+            } catch (e) {
+                await updateAgentUIFromSelection();
+            }
+        }
+
+        async function updateAgentUIFromSelection() {
+            const select = document.getElementById('agent-select');
+            if (!select) return;
+            const name = select.value;
+            const auto = document.getElementById('agent-auto-correct');
+            if (auto) auto.checked = loadAutoCorrect();
+            try {
+                    // prefer in-memory cache where possible
+                    if (agentsCache[name]) {
+                        setAgentFields(agentsCache[name]);
+                        persistSelectedAgent(name);
+                        return;
+                    }
+                    const res = await fetch(`/agents/get?name=${encodeURIComponent(name)}`, { cache: 'no-store' });
+                    if (!res.ok) {
+                        setAgentFields({name:'', prompt:'', temperature:0.2, top_p:1.0});
+                        persistSelectedAgent('');
+                        return;
+                    }
+                    const agent = await res.json();
+                    // populate cache and use it
+                    agentsCache[name] = agent || {};
+                    setAgentFields(agentsCache[name]);
+                    persistSelectedAgent(name);
+            } catch (err) {
+                console.warn('Nelze načíst agenta:', err);
+                setAgentFields({name:'', prompt:'', temperature:0.2, top_p:1.0});
+            }
+        }
+
+        function setAgentFields(agent) {
+            const nameEl = document.getElementById('agent-name');
+            const promptEl = document.getElementById('agent-prompt');
+            const tempRange = document.getElementById('agent-temperature');
+            const tempNum = document.getElementById('agent-temperature-number');
+            const topRange = document.getElementById('agent-top-p');
+            const topNum = document.getElementById('agent-top-p-number');
+            if (nameEl) nameEl.value = agent.name || '';
+            if (promptEl) promptEl.value = agent.prompt || '';
+            if (tempRange) tempRange.value = (agent.temperature !== undefined ? agent.temperature : 0.2);
+            if (tempNum) tempNum.value = (agent.temperature !== undefined ? agent.temperature : 0.2);
+            if (topRange) topRange.value = (agent.top_p !== undefined ? agent.top_p : 1.0);
+            if (topNum) topNum.value = (agent.top_p !== undefined ? agent.top_p : 1.0);
+        }
+
+        function syncRangeAndNumber(rangeEl, numberEl) {
+            if (!rangeEl || !numberEl) return;
+            rangeEl.addEventListener('input', () => { numberEl.value = rangeEl.value; });
+            numberEl.addEventListener('change', () => {
+                let v = parseFloat(numberEl.value);
+                if (!Number.isFinite(v)) v = parseFloat(rangeEl.value) || 0;
+                v = Math.max(0, Math.min(1, v));
+                rangeEl.value = v;
+                numberEl.value = v;
+            });
+        }
+
+        async function saveCurrentAgent() {
+            const nameEl = document.getElementById('agent-name');
+            const promptEl = document.getElementById('agent-prompt');
+            const tempNum = document.getElementById('agent-temperature-number');
+            const topNum = document.getElementById('agent-top-p-number');
+            if (!nameEl) return;
+            const name = String(nameEl.value || '').trim();
+            if (!name) {
+                alert('Agent must have a name');
+                return;
+            }
+            // parse numeric fields carefully so that 0 is preserved
+            let tempVal = parseFloat(tempNum ? tempNum.value : '0.2');
+            if (!Number.isFinite(tempVal)) tempVal = 0.0;
+            let topVal = parseFloat(topNum ? topNum.value : '1.0');
+            if (!Number.isFinite(topVal)) topVal = 1.0;
+            const payload = {
+                name,
+                prompt: promptEl ? promptEl.value : '',
+                temperature: tempVal,
+                top_p: topVal,
+            };
+            try {
+                const res = await fetch('/agents/save', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+                if (!res.ok) {
+                    const txt = await res.text().catch(()=>'');
+                    throw new Error('save failed ' + txt);
+                }
+                const data = await res.json().catch(() => null);
+                const stored = (data && data.stored_name) ? data.stored_name : name;
+                const agent = (data && data.agent) ? data.agent : payload;
+
+                // update in-memory cache and DOM without re-fetching everything
+                agentsCache[stored] = agent;
+                if (!agent.display_name) agent.display_name = agent.name || stored;
+
+                const select = document.getElementById('agent-select');
+                if (select) {
+                    // find existing option with this value
+                    let opt = select.querySelector(`option[value="${stored}"]`);
+                    if (!opt) {
+                        // try to remove old option with previous name if user changed it
+                        const oldOpt = select.querySelector(`option[value="${name}"]`);
+                        if (oldOpt) oldOpt.remove();
+                        opt = document.createElement('option');
+                        opt.value = stored;
+                        opt.textContent = agent.display_name || stored;
+                        select.appendChild(opt);
+                    } else {
+                        opt.textContent = agent.display_name || stored;
+                    }
+                    select.value = stored;
+                    persistSelectedAgent(stored);
+                }
+
+                // update UI fields from saved agent
+                setAgentFields(agent || payload);
+            } catch (err) {
+                alert('Nelze uložit agenta: ' + err);
+            }
+        }
+
+        async function deleteCurrentAgent() {
+            const select = document.getElementById('agent-select');
+            if (!select) return;
+            const name = select.value;
+            if (!name) return;
+            if (!confirm(`Opravdu chcete agenta "${name}" smazat?`)) return;
+            try {
+                const res = await fetch('/agents/delete', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name }) });
+                if (!res.ok) throw new Error('delete failed');
+                const currentSel = loadSelectedAgent();
+                // remove from in-memory cache and DOM
+                delete agentsCache[name];
+                const select = document.getElementById('agent-select');
+                if (select) {
+                    const opt = select.querySelector(`option[value="${name}"]`);
+                    if (opt) opt.remove();
+                }
+                if (currentSel === name) {
+                    persistSelectedAgent('');
+                    // select first available if any
+                    if (select && select.options && select.options.length) {
+                        select.selectedIndex = 0;
+                        const newSel = select.value;
+                        persistSelectedAgent(newSel);
+                        if (agentsCache[newSel]) setAgentFields(agentsCache[newSel]);
+                    } else {
+                        setAgentFields({name:'', prompt:'', temperature:0.2, top_p:1.0});
+                    }
+                }
+            } catch (err) {
+                alert('Nelze smazat agenta: ' + err);
+            }
+        }
+
+        // newAgent removed — creation/editing handled via saveCurrentAgent and changing name
+
+        async function runSelectedAgent() {
+            const select = document.getElementById('agent-select');
+            if (!select) return;
+            const name = select.value;
+            if (!name) {
+                alert('Žádný agent není vybrán');
+                return;
+            }
+            const auto = document.getElementById('agent-auto-correct');
+            const willAuto = auto && auto.checked;
+            persistAutoCorrect(Boolean(willAuto));
+            // For now simulate as before; in future call a /agents/run endpoint
+            const res = await fetch(`/agents/get?name=${encodeURIComponent(name)}`, { cache: 'no-store' });
+            let agent = null;
+            if (res.ok) {
+                agent = await res.json();
+            }
+            const pythonRendered = document.getElementById('python-result');
+            if (pythonRendered) {
+                const note = `<!-- Applied by agent: ${name} (auto=${willAuto}) -->\n`;
+                pythonRendered.innerHTML = note + `<pre>${currentResults.python || ''}</pre>`;
+            }
+        }
+
+        async function initializeAgentUI() {
+            // Attach listeners immediately so UI is responsive while agent list loads
+            const select = document.getElementById('agent-select');
+            const runBtn = document.getElementById('agent-run');
+            const auto = document.getElementById('agent-auto-correct');
+            const toggle = document.getElementById('agent-expand-toggle');
+            const settings = document.getElementById('agent-settings');
+            const saveBtn = document.getElementById('agent-save');
+            const deleteBtn = document.getElementById('agent-delete');
+
+            if (select) select.addEventListener('change', updateAgentUIFromSelection);
+            if (runBtn) runBtn.addEventListener('click', runSelectedAgent);
+            if (auto) {
+                auto.checked = loadAutoCorrect();
+                auto.addEventListener('change', () => persistAutoCorrect(auto.checked));
+            }
+            if (toggle && settings) {
+                toggle.addEventListener('click', async () => {
+                    const visible = settings.style.display !== 'none';
+                    const nowVisible = !visible;
+                    settings.style.display = visible ? 'none' : 'block';
+                    toggle.setAttribute('aria-expanded', (nowVisible).toString());
+                    // when opening, refresh fields for the currently selected agent
+                    if (nowVisible) {
+                        try { await updateAgentUIFromSelection(); } catch (e) { /* ignore */ }
+                    }
+                    // after layout changes, sync thumbnail drawer sizing to account for new page height
+                    setTimeout(() => {
+                        try { syncThumbnailDrawerHeight(); } catch (e) {}
+                    }, 60);
+                });
+            }
+            if (saveBtn) saveBtn.addEventListener('click', async () => { await saveCurrentAgent(); syncThumbnailDrawerHeight(); });
+            if (deleteBtn) deleteBtn.addEventListener('click', async () => { await deleteCurrentAgent(); syncThumbnailDrawerHeight(); });
+
+            // wire up syncs
+            syncRangeAndNumber(document.getElementById('agent-temperature'), document.getElementById('agent-temperature-number'));
+            syncRangeAndNumber(document.getElementById('agent-top-p'), document.getElementById('agent-top-p-number'));
+
+            // Load selector asynchronously; don't block UI interactivity
+            renderAgentSelector().catch(() => {});
+        }
         function clearThumbnailQueue() {
             thumbnailQueue.length = 0;
         }
@@ -2551,14 +3101,23 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             const tsHtmlContainer = document.getElementById("typescript-html");
             const htmlDiffSection = document.getElementById("html-diff");
             const diffSection = document.getElementById("diff-section");
-            if (!pythonRendered || !tsRendered || !pythonHtmlContainer || !tsHtmlContainer) {
+            if (!pythonRendered || !tsRendered) {
                 return;
             }
 
             const pythonHtml = currentResults.python || "";
             const tsHtml = currentResults.typescript || "";
+
+            // Always render the simple preformatted outputs into the visible result boxes.
             pythonRendered.innerHTML = `<pre>${pythonHtml}</pre>`;
             tsRendered.innerHTML = `<pre>${tsHtml}</pre>`;
+
+            // Only attempt full HTML diff rendering when the HTML containers are present
+            // (they were intentionally commented out earlier while preparing the LLM UI).
+            if (!pythonHtmlContainer || !tsHtmlContainer) {
+                return;
+            }
+
             const baseKey = currentResults.baseKey || buildResultCacheKey(pythonHtml, tsHtml, currentPage && currentPage.uuid ? currentPage.uuid : "");
             const cacheKey = `${diffMode}:${baseKey}`;
             try {
@@ -3006,6 +3565,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             setupPageNumberJump();
             initializeThumbnailDrawer();
             initializeDiffControls();
+            initializeAgentUI();
 
             const previewContainer = document.getElementById("page-preview");
             const largeBox = document.getElementById("preview-large");
@@ -3301,6 +3861,50 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         else:
             self.send_response(404)
             self.end_headers()
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        content_length = int(self.headers.get('Content-Length') or 0)
+        body = self.rfile.read(content_length) if content_length else b''
+        try:
+            payload = json.loads(body.decode('utf-8')) if body else {}
+        except Exception:
+            payload = {}
+
+        if path == '/agents/save':
+            stored = write_agent_file(payload if isinstance(payload, dict) else {})
+            # write_agent_file now returns canonical name on success, or None on failure
+            if stored:
+                # return the saved agent data back to client for immediate UI sync
+                data = read_agent_file(stored) or {}
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.end_headers()
+                self.wfile.write(json.dumps({'ok': True, 'stored_name': stored, 'agent': data}, ensure_ascii=False).encode('utf-8'))
+                return
+            else:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.end_headers()
+                self.wfile.write(json.dumps({'ok': False, 'error': 'invalid'}).encode('utf-8'))
+                return
+
+        if path == '/agents/delete':
+            name = payload.get('name') if isinstance(payload, dict) else None
+            ok = delete_agent_file(name or '')
+            if ok:
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.end_headers()
+                self.wfile.write(json.dumps({'ok': True}).encode('utf-8'))
+                return
+            else:
+                self.send_response(404)
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.end_headers()
+                self.wfile.write(json.dumps({'ok': False, 'error': 'not_found'}).encode('utf-8'))
+                return
             self.wfile.write(b'404 - Nenalezeno')
 
 def ensure_typescript_build() -> bool:

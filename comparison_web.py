@@ -13,13 +13,15 @@ import json
 import requests
 import subprocess
 import shutil
+from dataclasses import dataclass
+from difflib import SequenceMatcher
 from urllib.parse import urlparse, parse_qs
 import xml.etree.ElementTree as ET
 import xml.dom.minidom as minidom
 import html
 import re
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, List, Tuple
 
 # Import původního procesoru
 from main_processor import AltoProcessor, DEFAULT_API_BASES
@@ -51,6 +53,241 @@ KNOWN_LIBRARY_OVERRIDES: Dict[str, Dict[str, str]] = {
         "handle_base": "https://kramerius5.nkp.cz/search",
     },
 }
+
+DIFF_MODE_WORD = 'word'
+DIFF_MODE_CHAR = 'char'
+DIFF_MODE_NONE = 'none'
+
+_VOID_HTML_ELEMENTS = {
+    'br', 'hr', 'img', 'input', 'meta', 'link', 'source', 'track',
+    'area', 'col', 'embed', 'param', 'wbr', 'base'
+}
+_TAG_REGEX = re.compile(r'<[^>]+?>')
+_TAG_NAME_REGEX = re.compile(r'^<\s*/?\s*([a-zA-Z0-9:-]+)')
+_WORD_SPLIT_REGEX = re.compile(r'(\s+|[^\w]+)', re.UNICODE)
+
+
+@dataclass(frozen=True)
+class HtmlToken:
+    kind: str  # 'tag' or 'text'
+    value: str
+    is_whitespace: bool = False
+
+
+def _normalize_diff_mode(mode: Optional[str]) -> str:
+    if mode == DIFF_MODE_CHAR:
+        return DIFF_MODE_CHAR
+    return DIFF_MODE_WORD
+
+
+def _extract_tag_name(tag_text: str) -> str:
+    match = _TAG_NAME_REGEX.match(tag_text)
+    return match.group(1).lower() if match else ''
+
+
+def split_html_blocks(html_content: str) -> List[str]:
+    if not html_content:
+        return []
+
+    blocks: List[str] = []
+    depth = 0
+    block_start: Optional[int] = None
+    last_index = 0
+
+    for match in _TAG_REGEX.finditer(html_content):
+        start, end = match.span()
+        tag_text = match.group(0)
+
+        if depth == 0 and start > last_index:
+            segment = html_content[last_index:start]
+            if segment:
+                blocks.append(segment)
+
+        tag_name = _extract_tag_name(tag_text)
+        is_closing = tag_text.startswith('</')
+        is_self_closing = tag_text.endswith('/>') or tag_name in _VOID_HTML_ELEMENTS
+
+        if not is_closing and not is_self_closing:
+            if depth == 0:
+                block_start = start
+            depth += 1
+        elif is_self_closing:
+            if depth == 0:
+                blocks.append(tag_text)
+        else:
+            depth = max(depth - 1, 0)
+            if depth == 0 and block_start is not None:
+                blocks.append(html_content[block_start:end])
+                block_start = None
+
+        last_index = end
+
+    if block_start is not None and block_start < len(html_content):
+        blocks.append(html_content[block_start:])
+    elif last_index < len(html_content):
+        remainder = html_content[last_index:]
+        if remainder:
+            blocks.append(remainder)
+
+    if not blocks and html_content:
+        return [html_content]
+    return blocks
+
+
+def split_text_tokens(text: str, mode: str) -> List[HtmlToken]:
+    if not text:
+        return []
+
+    if mode == DIFF_MODE_CHAR:
+        return [
+            HtmlToken('text', ch, ch.isspace())
+            for ch in text
+        ]
+
+    tokens: List[HtmlToken] = []
+    last_index = 0
+    for match in _WORD_SPLIT_REGEX.finditer(text):
+        start, end = match.span()
+        if start > last_index:
+            chunk = text[last_index:start]
+            tokens.append(HtmlToken('text', chunk, chunk.isspace()))
+        chunk = match.group(0)
+        if chunk:
+            tokens.append(HtmlToken('text', chunk, chunk.isspace()))
+        last_index = end
+    if last_index < len(text):
+        chunk = text[last_index:]
+        tokens.append(HtmlToken('text', chunk, chunk.isspace()))
+    return tokens
+
+
+def tokenize_block(block_html: str, mode: str) -> List[HtmlToken]:
+    if not block_html:
+        return []
+
+    tokens: List[HtmlToken] = []
+    last_index = 0
+    for match in _TAG_REGEX.finditer(block_html):
+        start, end = match.span()
+        if start > last_index:
+            tokens.extend(split_text_tokens(block_html[last_index:start], mode))
+        tokens.append(HtmlToken('tag', match.group(0), False))
+        last_index = end
+    if last_index < len(block_html):
+        tokens.extend(split_text_tokens(block_html[last_index:], mode))
+    return tokens
+
+
+def render_tokens(tokens: List[HtmlToken], highlight: Optional[str] = None) -> str:
+    parts: List[str] = []
+    for token in tokens:
+        if token.kind == 'tag':
+            parts.append(token.value)
+            continue
+        if highlight in ('added', 'removed') and not token.is_whitespace and token.value:
+            parts.append(f'<span class="diff-{highlight}">{token.value}</span>')
+        else:
+            parts.append(token.value)
+    return ''.join(parts)
+
+
+def diff_block_content(left_block: str, right_block: str, mode: str) -> Tuple[str, str]:
+    mode_normalized = _normalize_diff_mode(mode)
+    left_tokens = tokenize_block(left_block, mode_normalized)
+    right_tokens = tokenize_block(right_block, mode_normalized)
+    matcher = SequenceMatcher(None, left_tokens, right_tokens, autojunk=False)
+
+    left_parts: List[str] = []
+    right_parts: List[str] = []
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        left_slice = left_tokens[i1:i2]
+        right_slice = right_tokens[j1:j2]
+
+        if tag == 'equal':
+            left_parts.append(render_tokens(left_slice))
+            right_parts.append(render_tokens(right_slice))
+        elif tag == 'delete':
+            left_parts.append(render_tokens(left_slice, 'added'))
+        elif tag == 'insert':
+            right_parts.append(render_tokens(right_slice, 'removed'))
+        elif tag == 'replace':
+            left_parts.append(render_tokens(left_slice, 'added'))
+            right_parts.append(render_tokens(right_slice, 'removed'))
+
+    return ''.join(left_parts), ''.join(right_parts)
+
+
+def wrap_block(content: str, change: str) -> str:
+    classes = ['diff-block']
+    if change == 'added':
+        classes.append('diff-block--added')
+    elif change == 'removed':
+        classes.append('diff-block--removed')
+    elif change == 'changed':
+        classes.append('diff-block--changed')
+    class_attr = ' '.join(classes)
+    data_attr = f' data-diff-change="{change}"' if change != 'equal' else ''
+    return f'<div class="{class_attr}"{data_attr}>{content}</div>'
+
+
+def wrap_diff_content(blocks: List[str], mode: str) -> str:
+    mode_attr = f' data-diff-mode="{mode}"' if mode in {DIFF_MODE_WORD, DIFF_MODE_CHAR} else ''
+    inner = ''.join(blocks)
+    if not inner:
+        inner = '<div class="diff-placeholder">Bez obsahu</div>'
+    return f'<div class="diff-content diff-html"{mode_attr}>{inner}</div>'
+
+
+def build_html_diff(python_html: str, ts_html: str, mode: str) -> Dict[str, str]:
+    mode_normalized = _normalize_diff_mode(mode)
+    python_blocks = split_html_blocks(python_html or '')
+    ts_blocks = split_html_blocks(ts_html or '')
+
+    matcher = SequenceMatcher(None, python_blocks, ts_blocks, autojunk=False)
+
+    python_render: List[str] = []
+    ts_render: List[str] = []
+    changes_detected = False
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        py_slice = python_blocks[i1:i2]
+        ts_slice = ts_blocks[j1:j2]
+
+        if tag == 'equal':
+            for block in py_slice:
+                python_render.append(wrap_block(block, 'equal'))
+            for block in ts_slice:
+                ts_render.append(wrap_block(block, 'equal'))
+            continue
+
+        changes_detected = True
+
+        if tag == 'delete':
+            for block in py_slice:
+                python_render.append(wrap_block(block, 'added'))
+            continue
+        if tag == 'insert':
+            for block in ts_slice:
+                ts_render.append(wrap_block(block, 'removed'))
+            continue
+
+        if len(py_slice) == 1 and len(ts_slice) == 1:
+            left_markup, right_markup = diff_block_content(py_slice[0], ts_slice[0], mode_normalized)
+            python_render.append(wrap_block(left_markup, 'changed'))
+            ts_render.append(wrap_block(right_markup, 'changed'))
+        else:
+            for block in py_slice:
+                python_render.append(wrap_block(block, 'added'))
+            for block in ts_slice:
+                ts_render.append(wrap_block(block, 'removed'))
+
+    return {
+        'python': wrap_diff_content(python_render, mode_normalized),
+        'typescript': wrap_diff_content(ts_render, mode_normalized),
+        'has_changes': changes_detected,
+        'mode': mode_normalized,
+    }
 
 
 # Agents storage/helpers
@@ -243,6 +480,11 @@ def describe_library(api_base: Optional[str]) -> Dict[str, str]:
         'handle_base': handle_base,
         'netloc': parsed.netloc or '',
     }
+
+class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
 
 class ComparisonHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -574,6 +816,48 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             background-color: #9aa0a6;
             cursor: not-allowed;
         }
+        .form-group.uuid-group {
+            width: 100%;
+        }
+        .uuid-input-group {
+            display: flex;
+            align-items: stretch;
+            gap: 8px;
+        }
+        .uuid-input-group input {
+            flex: 1;
+            min-width: 0;
+        }
+        .uuid-input-group button {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border: 1px solid #cfd4dc;
+            background: #f9fafb;
+            color: #4b5563;
+            border-radius: 4px;
+            padding: 0;
+            font-size: 16px;
+            line-height: 1;
+            cursor: pointer;
+            transition: background 0.2s ease, color 0.2s ease;
+            width: 40px;
+            height: 38px;
+        }
+        .uuid-input-group button:hover {
+            background: #e5e7eb;
+            color: #111827;
+        }
+        .uuid-input-group button:focus-visible {
+            outline: none;
+            box-shadow: 0 0 0 2px rgba(31, 120, 255, 0.25);
+        }
+        .uuid-input-group button:disabled {
+            border-color: #cfd4dc;
+            color: #9aa0a6;
+            background: #f5f6f8;
+            cursor: not-allowed;
+        }
         .results {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -765,27 +1049,61 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         }
         .diff-content {
             background: #f8f9fa;
-            border-radius: 4px;
-            font-family: "Menlo", "Monaco", "Consolas", "Courier New", monospace;
-            padding: 12px;
-            white-space: pre-wrap;
+            border-radius: 6px;
+            padding: 16px;
+            white-space: normal;
             word-break: break-word;
             overflow-x: auto;
             min-height: 64px;
+            font-family: inherit;
+            line-height: 1.6;
         }
         .diff-html {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
             margin: 0;
-            line-height: 1.5;
+        }
+        .diff-block {
+            background: #ffffff;
+            border: 1px solid transparent;
+            border-radius: 6px;
+            padding: 10px 12px;
+            box-shadow: inset 0 0 0 1px rgba(0,0,0,0.02);
+        }
+        .diff-block--added {
+            background: rgba(46, 160, 67, 0.12);
+            border-color: rgba(46, 160, 67, 0.35);
+        }
+        .diff-block--removed {
+            background: rgba(219, 68, 55, 0.12);
+            border-color: rgba(219, 68, 55, 0.35);
+        }
+        .diff-block--changed {
+            background: rgba(255, 196, 0, 0.18);
+            border-color: rgba(255, 196, 0, 0.5);
         }
         .diff-added {
-            background: rgba(46, 160, 67, 0.25);
+            background: rgba(46, 160, 67, 0.38);
             border-radius: 3px;
             padding: 0 2px;
         }
         .diff-removed {
-            background: rgba(219, 68, 55, 0.25);
+            background: rgba(219, 68, 55, 0.38);
             border-radius: 3px;
             padding: 0 2px;
+        }
+        .diff-loading {
+            color: #52606d;
+            font-style: italic;
+        }
+        .diff-error {
+            color: #b91c1c;
+            font-weight: 600;
+        }
+        .diff-placeholder {
+            color: #6b7280;
+            font-style: italic;
         }
         .loading {
             position: fixed;
@@ -996,9 +1314,14 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 <h1>ALTO Processing Comparison</h1>
                 <p>Porovnání původního TypeScript a nového Python zpracování ALTO XML</p>
 
-                <div class="form-group">
+                <div class="form-group uuid-group">
                     <label for="uuid">UUID stránky nebo dokumentu:</label>
-                    <input type="text" id="uuid" placeholder="Zadejte UUID (např. 673320dd-0071-4a03-bf82-243ee206bc0b)" value="673320dd-0071-4a03-bf82-243ee206bc0b">
+                    <div class="uuid-input-group">
+                        <input type="text" id="uuid" placeholder="Zadejte UUID (např. 673320dd-0071-4a03-bf82-243ee206bc0b)" value="673320dd-0071-4a03-bf82-243ee206bc0b" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false">
+                        <button type="button" id="uuid-copy" title="Zkopírovat UUID" aria-label="Zkopírovat UUID">📋</button>
+                        <button type="button" id="uuid-paste" title="Vložit UUID ze schránky" aria-label="Vložit UUID ze schránky">📥</button>
+                        <button type="button" id="uuid-clear" title="Vymazat UUID" aria-label="Vymazat UUID">✕</button>
+                    </div>
                 </div>
 
                 <div class="action-row">
@@ -1053,6 +1376,25 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                         <div id="python-result" class="result-rendered"></div>
                     </div>
                 </div>
+                <section id="diff-section" class="diff-section">
+                    <div class="diff-header">
+                        <h2 class="diff-heading">Porovnání formátovaného HTML</h2>
+                        <div id="diff-mode-controls" class="diff-controls" role="group" aria-label="Režim zvýraznění">
+                            <button type="button" class="diff-toggle" data-diff-mode="word">Slova</button>
+                            <button type="button" class="diff-toggle" data-diff-mode="char">Znaky</button>
+                        </div>
+                    </div>
+                    <div id="html-diff" class="results">
+                        <div class="result-box">
+                            <h3>Python diff</h3>
+                            <div id="python-html" class="diff-html"></div>
+                        </div>
+                        <div class="result-box">
+                            <h3>TypeScript diff</h3>
+                            <div id="typescript-html" class="diff-html"></div>
+                        </div>
+                    </div>
+                </section>
 
                 <!-- LLM agent settings UI -->
                 <div id="agent-row" class="info-section" style="margin-top:18px;">
@@ -1158,11 +1500,13 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         const DIFF_MODE_STORAGE_KEY = 'altoDiffMode';
         let diffMode = DIFF_MODES.NONE;
         const diffCache = new Map();
+        const agentResultCache = new Map();
         let currentResults = {
             python: "",
             typescript: "",
             baseKey: "",
         };
+        let autoRunScheduled = false;
         const NOTE_STYLE_ATTR = ' style="display:block;font-size:0.82em;color:#1e5aa8;font-weight:bold;"';
         // --- LLM agent management ---
         const AGENTS_STORAGE_KEY = 'altoAgents_v1';
@@ -1480,6 +1824,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 const type = (block.type || '').toLowerCase();
                 let tag = 'p';
                 let attrs = '';
+                let markup = '';
                 switch (type) {
                     case 'h1':
                     case 'h2':
@@ -1487,7 +1832,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                         tag = type;
                         break;
                     case 'small':
-                        tag = 'small';
+                        markup = `<p><small>${escapeHtml(text)}</small></p>`;
                         break;
                     case 'note':
                         tag = 'note';
@@ -1511,7 +1856,14 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                         }
                         break;
                 }
-                parts.push(`<${tag}${attrs}>${escapeHtml(text)}</${tag}>`);
+                if (!markup) {
+                    if (tag === 'note') {
+                        markup = `<br><${tag}${attrs}>${escapeHtml(text)}</${tag}>`;
+                    } else {
+                        markup = `<${tag}${attrs}>${escapeHtml(text)}</${tag}>`;
+                    }
+                }
+                parts.push(markup);
             }
             return parts.length ? parts.join("") : null;
         }
@@ -1539,8 +1891,20 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             if (!container || !statusEl || !textEl) {
                 return;
             }
+
+            const normalizedStatus = statusText ? String(statusText).trim() : '';
+            const normalizedBody = bodyText ? String(bodyText).trim() : '';
+            if (!normalizedStatus && !normalizedBody) {
+                container.style.display = 'none';
+                statusEl.textContent = '';
+                statusEl.style.color = '';
+                statusEl.style.fontWeight = '';
+                textEl.textContent = '';
+                return;
+            }
+
             container.style.display = 'block';
-            statusEl.textContent = statusText || '';
+            statusEl.textContent = normalizedStatus;
             if (state === 'error') {
                 statusEl.style.color = '#b91c1c';
                 statusEl.style.fontWeight = '';
@@ -1551,7 +1915,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 statusEl.style.color = '';
                 statusEl.style.fontWeight = '';
             }
-            textEl.textContent = bodyText || '';
+            textEl.textContent = normalizedBody;
         }
 
         function formatHtmlForPre(html) {
@@ -1601,6 +1965,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         }
 
         async function runSelectedAgent() {
+            autoRunScheduled = false;
             const select = document.getElementById('agent-select');
             if (!select) return;
             const name = select.value;
@@ -1648,6 +2013,16 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             const runBtn = document.getElementById('agent-run');
             const originalLabel = runBtn ? runBtn.textContent : '';
 
+            const pythonHash = computeSimpleHash(pythonHtml);
+            const cacheKey = name ? `${name}:${pythonHash}` : null;
+            const cachedResult = cacheKey ? agentResultCache.get(cacheKey) : null;
+
+            if (cachedResult) {
+                setAgentResultPanels(originalPythonHtml, cachedResult.correctedContent, cachedResult.correctedIsHtml);
+                setAgentOutput('', '', 'success');
+                return;
+            }
+
             try {
                 if (runBtn) {
                     runBtn.disabled = true;
@@ -1666,49 +2041,36 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 }
                 const result = data.result || {};
                 const text = typeof result.text === 'string' ? result.text.trim() : '';
-                const usage = result.usage || {};
-                const statusParts = [`Agent ${name}`];
-                if (result.model) {
-                    statusParts.push(`Model: ${result.model}`);
-                }
-                if (result.stop_reason) {
-                    statusParts.push(`Stop reason: ${result.stop_reason}`);
-                }
-                if (usage.input_tokens !== undefined && usage.output_tokens !== undefined) {
-                    statusParts.push(`Tokeny in/out: ${usage.input_tokens}/${usage.output_tokens}`);
-                } else if (usage.total_tokens !== undefined) {
-                    statusParts.push(`Tokeny celkem: ${usage.total_tokens}`);
-                }
+                const statusParts = [];
 
                 const parsedDoc = parseAgentResultDocument(text);
                 const htmlFromDoc = parsedDoc ? documentBlocksToHtml(parsedDoc) : null;
-                if (parsedDoc && Array.isArray(parsedDoc.blocks)) {
-                    statusParts.push(`Bloků: ${parsedDoc.blocks.length}`);
-                }
-
                 const autoRequested = Boolean(data.auto_correct);
-                if (autoRequested) {
-                    if (htmlFromDoc) {
-                        currentResults.python = htmlFromDoc;
-                        currentResults.baseKey = buildResultCacheKey(
-                            htmlFromDoc,
-                            currentResults.typescript || '',
-                            currentPage && currentPage.uuid ? currentPage.uuid : ''
-                        );
-                        renderComparisonResults();
-                        statusParts.push('Výsledek aplikován');
-                    } else {
-                        statusParts.push('Výsledek nelze aplikovat (očekáván JSON se strukturou blocks)');
-                    }
+                if (autoRequested && !htmlFromDoc) {
+                    statusParts.push('Výsledek nelze aplikovat (očekáván JSON se strukturou blocks)');
                 }
 
                 const correctedContent = htmlFromDoc || (text || '');
                 const correctedIsHtml = Boolean(htmlFromDoc);
                 setAgentResultPanels(originalPythonHtml, correctedContent, correctedIsHtml);
 
-                const statusText = statusParts.join(' · ');
-                const displayText = parsedDoc ? JSON.stringify(parsedDoc, null, 2) : (text || '(Agent nevrátil text)');
-                setAgentOutput(statusText, displayText, 'success');
+                if (cacheKey) {
+                    agentResultCache.set(cacheKey, {
+                        correctedContent,
+                        correctedIsHtml,
+                    });
+                }
+
+                if (statusParts.length) {
+                    const statusText = statusParts.join(' · ');
+                    if (statusText.toLowerCase().includes('nelze')) {
+                        setAgentOutput(statusText, '', 'error');
+                    } else {
+                        setAgentOutput('', '', 'success');
+                    }
+                } else {
+                    setAgentOutput('', '', 'success');
+                }
             } catch (err) {
                 const message = err && err.message ? err.message : String(err);
                 setAgentOutput(`Chyba agenta: ${message}`, '', 'error');
@@ -1735,7 +2097,23 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             if (runBtn) runBtn.addEventListener('click', runSelectedAgent);
             if (auto) {
                 auto.checked = loadAutoCorrect();
-                auto.addEventListener('change', () => persistAutoCorrect(auto.checked));
+                auto.addEventListener('change', () => {
+                    persistAutoCorrect(auto.checked);
+                    if (auto.checked) {
+                        autoRunScheduled = false;
+                        const selectEl = document.getElementById('agent-select');
+                        const runButton = document.getElementById('agent-run');
+                        const hasAgent = Boolean(selectEl && selectEl.value);
+                        const hasPython = currentResults && typeof currentResults.python === 'string' && currentResults.python.trim().length > 0;
+                        if (hasAgent && hasPython && !(runButton && runButton.disabled)) {
+                            runSelectedAgent().catch((error) => {
+                                console.warn('Automatické spuštění agenta po změně zaškrtávacího políčka selhalo:', error);
+                            });
+                        }
+                    } else {
+                        autoRunScheduled = false;
+                    }
+                });
             }
             if (toggle && settings) {
                 toggle.addEventListener('click', async () => {
@@ -1763,67 +2141,136 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             // Load selector asynchronously; don't block UI interactivity
             renderAgentSelector().catch(() => {});
         }
-        function clearThumbnailQueue() {
-            thumbnailQueue.length = 0;
+        function createThumbnailLoadManager(concurrency = 6) {
+            const queue = [];
+            let active = 0;
+
+            function insertTask(task) {
+                if (!queue.length) {
+                    queue.push(task);
+                    return;
+                }
+                const index = queue.findIndex(item => item.priority > task.priority || (item.priority === task.priority && item.created > task.created));
+                if (index === -1) {
+                    queue.push(task);
+                } else {
+                    queue.splice(index, 0, task);
+                }
+            }
+
+            function startTask(task) {
+                const img = task && task.img;
+                if (!img || !img.dataset || !img.dataset.src) {
+                    if (img && img.dataset) {
+                        delete img.dataset.queueId;
+                        delete img.dataset.loading;
+                    }
+                    if (active > 0) {
+                        active -= 1;
+                    }
+                    schedule();
+                    return;
+                }
+
+                delete img.dataset.queueId;
+                if (img.dataset.loaded === 'true' || img.dataset.loading === 'true') {
+                    if (active > 0) {
+                        active -= 1;
+                    }
+                    schedule();
+                    return;
+                }
+
+                active += 1;
+                img.dataset.loading = 'true';
+                img.src = img.dataset.src;
+                if (img.complete) {
+                    if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+                        img.dispatchEvent(new Event('load'));
+                    } else if (img.naturalWidth === 0) {
+                        img.dispatchEvent(new Event('error'));
+                    }
+                }
+            }
+
+            function schedule() {
+                while (active < concurrency && queue.length) {
+                    const task = queue.shift();
+                    if (!task) {
+                        continue;
+                    }
+                    startTask(task);
+                }
+            }
+
+            function enqueue(img, priority = 1) {
+                if (!img || !img.dataset || !img.dataset.src) {
+                    return;
+                }
+                if (img.dataset.loaded === 'true' || img.dataset.loading === 'true') {
+                    return;
+                }
+
+                const normalizedPriority = Number.isFinite(priority) ? priority : 1;
+
+                if (normalizedPriority <= 0 && active < concurrency) {
+                    startTask({ img, priority: normalizedPriority, created: performance.now() });
+                    return;
+                }
+
+                if (img.dataset.queueId) {
+                    return;
+                }
+
+                const task = {
+                    img,
+                    priority: normalizedPriority,
+                    created: performance.now(),
+                };
+                img.dataset.queueId = String(task.created);
+                insertTask(task);
+                schedule();
+            }
+
+            function markComplete(img, success) {
+                if (img && img.dataset) {
+                    delete img.dataset.loading;
+                    delete img.dataset.queueId;
+                    if (success) {
+                        img.dataset.loaded = 'true';
+                    } else {
+                        delete img.dataset.loaded;
+                    }
+                }
+                if (active > 0) {
+                    active -= 1;
+                }
+                schedule();
+            }
+
+            function reset() {
+                while (queue.length) {
+                    const task = queue.shift();
+                    if (task && task.img && task.img.dataset) {
+                        delete task.img.dataset.queueId;
+                        delete task.img.dataset.loading;
+                    }
+                }
+                active = 0;
+            }
+
+            return {
+                enqueue,
+                markComplete,
+                reset,
+            };
         }
 
-        function drainThumbnailQueue() {
-            while (thumbnailQueue.length && activeThumbnailLoads < MAX_THUMBNAIL_REQUESTS) {
-                const img = thumbnailQueue.shift();
-                if (!img || !img.dataset) {
-                    continue;
-                }
-                delete img.dataset.queued;
-                startThumbnailLoad(img);
-            }
-        }
+        const thumbnailLoader = createThumbnailLoadManager(6);
 
         function finalizeThumbnail(img, success) {
-            if (img && img.dataset) {
-                delete img.dataset.loading;
-                delete img.dataset.queued;
-                if (success) {
-                    img.dataset.loaded = 'true';
-                } else {
-                    delete img.dataset.loaded;
-                }
-            }
-            if (activeThumbnailLoads > 0) {
-                activeThumbnailLoads -= 1;
-            }
-            drainThumbnailQueue();
+            thumbnailLoader.markComplete(img, success);
         }
-
-        function startThumbnailLoad(img) {
-            if (!img || !img.dataset) {
-                return;
-            }
-            if (img.dataset.loaded === 'true' || img.dataset.loading === 'true') {
-                return;
-            }
-            const src = img.dataset.src;
-            if (!src) {
-                return;
-            }
-            img.dataset.loading = 'true';
-            activeThumbnailLoads += 1;
-            img.src = src;
-            if (img.complete) {
-                if (img.naturalWidth > 0 && img.naturalHeight > 0) {
-                    img.dispatchEvent(new Event('load'));
-                } else if (img.naturalWidth === 0) {
-                    img.dispatchEvent(new Event('error'));
-                }
-            }
-        }
-
-        function flushAllThumbnailLoads() {
-            activeThumbnailLoads = 0;
-            clearThumbnailQueue();
-        }
-        const MAX_THUMBNAIL_REQUESTS = 6;
-        const thumbnailQueue = [];
-        let activeThumbnailLoads = 0;
 
         function cacheProcessData(uuid, payload) {
             if (!uuid || !payload) {
@@ -2027,6 +2474,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             const uuidField = document.getElementById("uuid");
             if (uuidField) {
                 uuidField.value = targetUuid;
+                setUuidButtonsState();
             }
             processAlto();
         }
@@ -2158,7 +2606,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 thumbnailObserver.disconnect();
                 thumbnailObserver = null;
             }
-            flushAllThumbnailLoads();
+            thumbnailLoader.reset();
         }
 
         function ensureThumbnailObserver() {
@@ -2176,7 +2624,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 entries.forEach(entry => {
                     if (entry.isIntersecting) {
                         const img = entry.target;
-                        loadThumbnailImage(img);
+                        loadThumbnailImage(img, 1);
                         if (thumbnailObserver) {
                             thumbnailObserver.unobserve(img);
                         }
@@ -2198,30 +2646,22 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             return thumbnailObserver;
         }
 
-        function loadThumbnailImage(img, immediate = false) {
-            if (!img || !img.dataset || img.dataset.loaded === 'true' || !img.dataset.src) {
+        function loadThumbnailImage(img, priority = 1) {
+            if (!img || !img.dataset || !img.dataset.src) {
                 return;
             }
-            if (img.dataset.loading === 'true') {
+            if (img.dataset.loaded === 'true' || img.dataset.loading === 'true') {
                 return;
             }
-            if (immediate) {
-                startThumbnailLoad(img);
-            } else if (thumbnailObserver) {
-                if (!img.dataset.queued && activeThumbnailLoads >= MAX_THUMBNAIL_REQUESTS) {
-                    img.dataset.queued = 'true';
-                    thumbnailQueue.push(img);
-                } else {
-                    startThumbnailLoad(img);
-                }
+            let normalizedPriority;
+            if (typeof priority === 'boolean') {
+                normalizedPriority = priority ? 0 : 1;
+            } else if (Number.isFinite(priority)) {
+                normalizedPriority = priority;
             } else {
-                if (activeThumbnailLoads < MAX_THUMBNAIL_REQUESTS) {
-                    startThumbnailLoad(img);
-                } else if (!img.dataset.queued) {
-                    img.dataset.queued = 'true';
-                    thumbnailQueue.push(img);
-                }
+                normalizedPriority = 1;
             }
+            thumbnailLoader.enqueue(img, normalizedPriority);
         }
 
         function updatePageNumberInput() {
@@ -2354,11 +2794,11 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
 
                     if (img.dataset.src) {
                         if (priorityIndices.has(listIndex)) {
-                            loadThumbnailImage(img, true);
+                            loadThumbnailImage(img, 0);
                         } else if (observer) {
                             observer.observe(img);
                         } else {
-                            loadThumbnailImage(img);
+                            loadThumbnailImage(img, 1);
                         }
                     }
                 });
@@ -3174,6 +3614,89 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             return false;
         }
 
+        function setUuidButtonsState() {
+            const uuidField = document.getElementById("uuid");
+            const copyBtn = document.getElementById("uuid-copy");
+            const clearBtn = document.getElementById("uuid-clear");
+            const hasValue = Boolean(uuidField && uuidField.value.trim().length);
+            if (copyBtn) copyBtn.disabled = !hasValue;
+            if (clearBtn) clearBtn.disabled = !hasValue;
+        }
+
+        function copyCurrentUuid() {
+            const uuidField = document.getElementById("uuid");
+            if (!uuidField) {
+                return;
+            }
+            const value = uuidField.value.trim();
+            if (!value) {
+                return;
+            }
+            const fallbackCopy = () => {
+                try {
+                    const currentSelectionStart = uuidField.selectionStart;
+                    const currentSelectionEnd = uuidField.selectionEnd;
+                    uuidField.focus();
+                    uuidField.select();
+                    document.execCommand("copy");
+                    if (typeof currentSelectionStart === "number" && typeof currentSelectionEnd === "number") {
+                        uuidField.setSelectionRange(currentSelectionStart, currentSelectionEnd);
+                    } else {
+                        uuidField.setSelectionRange(value.length, value.length);
+                    }
+                } catch (error) {
+                    console.warn("Nelze zkopírovat UUID do schránky:", error);
+                }
+            };
+
+            if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+                navigator.clipboard.writeText(value).catch(() => fallbackCopy());
+            } else {
+                fallbackCopy();
+            }
+        }
+
+        function clearUuidInput() {
+            const uuidField = document.getElementById("uuid");
+            if (!uuidField) {
+                return;
+            }
+            uuidField.value = "";
+            uuidField.focus();
+            setUuidButtonsState();
+        }
+
+        async function pasteUuidFromClipboard() {
+            const uuidField = document.getElementById("uuid");
+            if (!uuidField) {
+                return;
+            }
+
+            const fallback = () => {
+                uuidField.focus();
+                console.warn('Schránku nelze přečíst - použijte klávesovou zkratku pro vložení.');
+            };
+
+            if (navigator.clipboard && typeof navigator.clipboard.readText === "function") {
+                try {
+                    const text = await navigator.clipboard.readText();
+                    const trimmed = (text || "").trim();
+                    uuidField.value = trimmed;
+                    setUuidButtonsState();
+                    if (trimmed) {
+                        handleLoadClick();
+                    } else {
+                        uuidField.focus();
+                    }
+                    return;
+                } catch (error) {
+                    console.warn('Nelze načíst obsah schránky:', error);
+                }
+            }
+
+            fallback();
+        }
+
         function blurUuidField() {
             const uuidField = document.getElementById("uuid");
             if (uuidField && typeof uuidField.blur === "function") {
@@ -3268,6 +3791,8 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 typescript: data.typescript || "",
                 baseKey: buildResultCacheKey(data.python || "", data.typescript || "", currentPage && currentPage.uuid ? currentPage.uuid : uuid),
             };
+            diffRequestToken += 1;
+            diffCache.clear();
             clearAgentOutput();
             renderComparisonResults();
 
@@ -3281,6 +3806,36 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             const uuidField = document.getElementById("uuid");
             if (uuidField && currentPage && currentPage.uuid) {
                 uuidField.value = currentPage.uuid;
+                setUuidButtonsState();
+            }
+
+            const autoCheckbox = document.getElementById("agent-auto-correct");
+            if (autoCheckbox && autoCheckbox.checked) {
+                const attemptAutoRun = (attemptsRemaining) => {
+                    const runButton = document.getElementById("agent-run");
+                    const select = document.getElementById("agent-select");
+                    const hasAgent = Boolean(select && select.value);
+                    const hasPython = currentResults && typeof currentResults.python === "string" && currentResults.python.trim().length > 0;
+                    if ((runButton && runButton.disabled) || !hasAgent || !hasPython) {
+                        if (attemptsRemaining > 0 && autoCheckbox.checked) {
+                            window.setTimeout(() => attemptAutoRun(attemptsRemaining - 1), 200);
+                        } else {
+                            autoRunScheduled = false;
+                        }
+                        return;
+                    }
+                    runSelectedAgent().catch((error) => {
+                        autoRunScheduled = false;
+                        console.warn('Automatické spuštění agenta se nezdařilo:', error);
+                    });
+                };
+
+                if (!autoRunScheduled) {
+                    autoRunScheduled = true;
+                    attemptAutoRun(5);
+                }
+            } else {
+                autoRunScheduled = false;
             }
 
             updateCacheWindow(currentPage ? currentPage.uuid : uuid, data.navigation || null);
@@ -3387,13 +3942,11 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             return `${pageUuid || "standalone"}:${leftHash}:${rightHash}`;
         }
 
+        let diffRequestToken = 0;
+
         function renderComparisonResults() {
             const pythonRendered = document.getElementById("python-result");
             const tsRendered = document.getElementById("typescript-result");
-            const pythonHtmlContainer = document.getElementById("python-html");
-            const tsHtmlContainer = document.getElementById("typescript-html");
-            const htmlDiffSection = document.getElementById("html-diff");
-            const diffSection = document.getElementById("diff-section");
             if (!pythonRendered || !tsRendered) {
                 return;
             }
@@ -3401,357 +3954,96 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             const pythonHtml = currentResults.python || "";
             const tsHtml = currentResults.typescript || "";
 
-            // Always render the simple preformatted outputs into the visible result boxes.
-            pythonRendered.innerHTML = `<pre>${pythonHtml}</pre>`;
-            tsRendered.innerHTML = `<pre>${tsHtml}</pre>`;
+            pythonRendered.innerHTML = pythonHtml
+                ? `<pre>${pythonHtml}</pre>`
+                : '<div class="muted">Žádná data.</div>';
+            tsRendered.innerHTML = tsHtml
+                ? `<pre>${tsHtml}</pre>`
+                : '<div class="muted">Žádná data.</div>';
 
-            // Only attempt full HTML diff rendering when the HTML containers are present
-            // (they were intentionally commented out earlier while preparing the LLM UI).
-            if (!pythonHtmlContainer || !tsHtmlContainer) {
+            const baseKey = currentResults.baseKey || buildResultCacheKey(
+                pythonHtml,
+                tsHtml,
+                currentPage && currentPage.uuid ? currentPage.uuid : ""
+            );
+            updateDiffSection(pythonHtml, tsHtml, baseKey);
+        }
+
+        function hideDiffSection() {
+            const diffSection = document.getElementById("diff-section");
+            const pythonHtmlContainer = document.getElementById("python-html");
+            const tsHtmlContainer = document.getElementById("typescript-html");
+            if (pythonHtmlContainer) {
+                pythonHtmlContainer.innerHTML = "";
+            }
+            if (tsHtmlContainer) {
+                tsHtmlContainer.innerHTML = "";
+            }
+            if (diffSection) {
+                diffSection.classList.remove("is-visible");
+            }
+        }
+
+        async function updateDiffSection(pythonHtml, tsHtml, baseKey) {
+            const diffSection = document.getElementById("diff-section");
+            const pythonHtmlContainer = document.getElementById("python-html");
+            const tsHtmlContainer = document.getElementById("typescript-html");
+
+            if (!diffSection || !pythonHtmlContainer || !tsHtmlContainer) {
                 return;
             }
 
-            const baseKey = currentResults.baseKey || buildResultCacheKey(pythonHtml, tsHtml, currentPage && currentPage.uuid ? currentPage.uuid : "");
-            const cacheKey = `${diffMode}:${baseKey}`;
+            if (diffMode === DIFF_MODES.NONE) {
+                hideDiffSection();
+                return;
+            }
+
+            const requestedMode = diffMode;
+            const cacheKey = `${requestedMode}:${baseKey}`;
+            if (diffCache.has(cacheKey)) {
+                const cached = diffCache.get(cacheKey) || {};
+                pythonHtmlContainer.innerHTML = cached.python || "";
+                tsHtmlContainer.innerHTML = cached.typescript || "";
+                diffSection.classList.add("is-visible");
+                return;
+            }
+
+            const requestId = ++diffRequestToken;
+            pythonHtmlContainer.innerHTML = '<div class="diff-loading">Načítám diff…</div>';
+            tsHtmlContainer.innerHTML = '<div class="diff-loading">Načítám diff…</div>';
+            diffSection.classList.add("is-visible");
+
             try {
-                let cached = diffCache.get(cacheKey);
-                if (!cached) {
-                    cached = buildDiffMarkup(pythonHtml, tsHtml, diffMode);
-                    diffCache.set(cacheKey, cached);
+                const response = await fetch('/diff', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        python: pythonHtml,
+                        typescript: tsHtml,
+                        mode: requestedMode,
+                    }),
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || !data || data.ok === false || !data.diff) {
+                    const message = data && data.error ? data.error : response.statusText || 'Neznámá chyba';
+                    throw new Error(message);
                 }
-
-                pythonHtmlContainer.innerHTML = cached.python;
-                tsHtmlContainer.innerHTML = cached.typescript;
-                if (htmlDiffSection) {
-                    htmlDiffSection.style.display = "grid";
+                diffCache.set(cacheKey, data.diff);
+                if (requestId !== diffRequestToken || diffMode !== requestedMode) {
+                    return;
                 }
-                if (diffSection) {
-                    diffSection.classList.add('is-visible');
-                }
+                pythonHtmlContainer.innerHTML = data.diff.python || "";
+                tsHtmlContainer.innerHTML = data.diff.typescript || "";
+                diffSection.classList.add("is-visible");
             } catch (error) {
-                console.error('Chyba při vykreslování diffu:', error);
-                diffMode = DIFF_MODES.NONE;
-                persistDiffMode(null);
-                diffCache.clear();
-                updateDiffToggleState();
-                pythonHtmlContainer.innerHTML = wrapCodeContent(escapeHtml(pythonHtml));
-                tsHtmlContainer.innerHTML = wrapCodeContent(escapeHtml(tsHtml));
-                if (htmlDiffSection) {
-                    htmlDiffSection.style.display = "grid";
-                }
-                if (diffSection) {
-                    diffSection.classList.add('is-visible');
+                console.error('Chyba při načítání diffu:', error);
+                if (requestId === diffRequestToken) {
+                    const message = typeof error?.message === 'string' ? error.message : String(error);
+                    pythonHtmlContainer.innerHTML = `<div class="diff-error">Diff se nepodařilo načíst: ${escapeHtml(message)}</div>`;
+                    tsHtmlContainer.innerHTML = `<div class="diff-error">Diff se nepodařilo načíst.</div>`;
+                    diffSection.classList.add("is-visible");
                 }
             }
-        }
-
-        function wrapCodeContent(content, mode) {
-            const modeAttr = mode && mode !== DIFF_MODES.NONE ? ` data-diff-mode="${mode}"` : "";
-            return `<pre class="diff-content diff-html"${modeAttr}>${content}</pre>`;
-        }
-
-        function buildDiffMarkup(pythonHtml, tsHtml, mode) {
-            const safePython = pythonHtml || "";
-            const safeTs = tsHtml || "";
-            if (!mode || mode === DIFF_MODES.NONE) {
-                return {
-                    python: wrapCodeContent(escapeHtml(safePython), mode),
-                    typescript: wrapCodeContent(escapeHtml(safeTs), mode),
-                };
-            }
-
-            const pythonTokens = tokenizeHtml(safePython);
-            const tsTokens = tokenizeHtml(safeTs);
-            const operations = diffUsingLcs(pythonTokens, tsTokens, tokensEqual);
-
-            if (mode === DIFF_MODES.WORD) {
-                const pythonHighlights = new Array(pythonTokens.length).fill(null);
-                const tsHighlights = new Array(tsTokens.length).fill(null);
-                operations.forEach((operation) => {
-                    if (operation.type === 'delete') {
-                        const token = pythonTokens[operation.indexA];
-                        if (token && !(token.type === 'text' && token.isWhitespace)) {
-                            pythonHighlights[operation.indexA] = 'added';
-                        }
-                    } else if (operation.type === 'insert') {
-                        const token = tsTokens[operation.indexB];
-                        if (token && !(token.type === 'text' && token.isWhitespace)) {
-                            tsHighlights[operation.indexB] = 'removed';
-                        }
-                    }
-                });
-
-                return {
-                    python: wrapCodeContent(renderTokens(pythonTokens, pythonHighlights), mode),
-                    typescript: wrapCodeContent(renderTokens(tsTokens, tsHighlights), mode),
-                };
-            }
-
-            const { pythonHighlights, tsHighlights } = buildCharDiffHighlights(pythonTokens, tsTokens, operations);
-
-            return {
-                python: wrapCodeContent(renderTokens(pythonTokens, pythonHighlights), mode),
-                typescript: wrapCodeContent(renderTokens(tsTokens, tsHighlights), mode),
-            };
-        }
-
-        function tokenizeHtml(html) {
-            if (!html) {
-                return [];
-            }
-            const tokens = [];
-            const tagRegex = /<[^>]+?>/g;
-            let lastIndex = 0;
-            let match;
-            while ((match = tagRegex.exec(html)) !== null) {
-                if (match.index > lastIndex) {
-                    const textChunk = html.slice(lastIndex, match.index);
-                    appendTextTokens(tokens, textChunk);
-                }
-                tokens.push(createTagToken(match[0]));
-                lastIndex = match.index + match[0].length;
-            }
-            if (lastIndex < html.length) {
-                const remainder = html.slice(lastIndex);
-                appendTextTokens(tokens, remainder);
-            }
-            return tokens;
-        }
-
-        function appendTextTokens(target, text) {
-            if (!text) {
-                return;
-            }
-            let splitter = unicodeAwareSplitter;
-            if (!splitter) {
-                splitter = fallbackSplitter;
-            }
-            splitter.lastIndex = 0;
-            let lastIndex = 0;
-            let match;
-            while ((match = splitter.exec(text)) !== null) {
-                if (match.index > lastIndex) {
-                    target.push(createTextToken(text.slice(lastIndex, match.index)));
-                }
-                target.push(createTextToken(match[0]));
-                lastIndex = splitter.lastIndex;
-            }
-            if (lastIndex < text.length) {
-                target.push(createTextToken(text.slice(lastIndex)));
-            }
-        }
-
-        let unicodeAwareSplitter = null;
-        let fallbackSplitter = /(\s+|[^\w]+)/g;
-        try {
-            unicodeAwareSplitter = new RegExp('([\\s]+|[^\\p{L}\\p{N}]+)', 'gu');
-        } catch (error) {
-            unicodeAwareSplitter = null;
-            fallbackSplitter = /(\s+|[^A-Za-z0-9_]+)/g;
-        }
-
-        function createTextToken(raw) {
-            return {
-                type: 'text',
-                raw,
-                isWhitespace: /^\s+$/.test(raw),
-            };
-        }
-
-        function createTagToken(raw) {
-            const isClosing = /^<\s*\//.test(raw);
-            const tagNameMatch = raw.match(/^<\s*\/?\s*([a-zA-Z0-9:-]+)/);
-            return {
-                type: 'tag',
-                raw,
-                isClosing,
-                tagName: tagNameMatch ? tagNameMatch[1].toLowerCase() : "",
-            };
-        }
-
-        function tokensEqual(leftToken, rightToken) {
-            if (!leftToken || !rightToken || leftToken.type !== rightToken.type) {
-                return false;
-            }
-            return leftToken.raw === rightToken.raw;
-        }
-
-        function diffUsingLcs(leftTokens, rightTokens, comparator) {
-            const n = leftTokens.length;
-            const m = rightTokens.length;
-            if (!n && !m) {
-                return [];
-            }
-
-            const table = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
-            for (let i = n - 1; i >= 0; i -= 1) {
-                for (let j = m - 1; j >= 0; j -= 1) {
-                    if (comparator(leftTokens[i], rightTokens[j])) {
-                        table[i][j] = table[i + 1][j + 1] + 1;
-                    } else {
-                        table[i][j] = Math.max(table[i + 1][j], table[i][j + 1]);
-                    }
-                }
-            }
-
-            const operations = [];
-            let i = 0;
-            let j = 0;
-            while (i < n && j < m) {
-                if (comparator(leftTokens[i], rightTokens[j])) {
-                    operations.push({ type: 'equal', indexA: i, indexB: j });
-                    i += 1;
-                    j += 1;
-                } else if (table[i + 1][j] >= table[i][j + 1]) {
-                    operations.push({ type: 'delete', indexA: i });
-                    i += 1;
-                } else {
-                    operations.push({ type: 'insert', indexB: j });
-                    j += 1;
-                }
-            }
-
-            while (i < n) {
-                operations.push({ type: 'delete', indexA: i });
-                i += 1;
-            }
-            while (j < m) {
-                operations.push({ type: 'insert', indexB: j });
-                j += 1;
-            }
-
-            return operations;
-        }
-
-        function buildCharDiffHighlights(pythonTokens, tsTokens, operations) {
-            const pythonHighlights = new Array(pythonTokens.length).fill(null);
-            const tsHighlights = new Array(tsTokens.length).fill(null);
-
-            let cursor = 0;
-            while (cursor < operations.length) {
-                const op = operations[cursor];
-                if (op.type === 'equal') {
-                    cursor += 1;
-                    continue;
-                }
-
-                const deleteBatch = [];
-                const insertBatch = [];
-
-                while (cursor < operations.length && operations[cursor].type === 'delete') {
-                    deleteBatch.push(operations[cursor]);
-                    cursor += 1;
-                }
-                while (cursor < operations.length && operations[cursor].type === 'insert') {
-                    insertBatch.push(operations[cursor]);
-                    cursor += 1;
-                }
-
-                if (!deleteBatch.length && !insertBatch.length) {
-                    cursor += 1;
-                    continue;
-                }
-
-                if (deleteBatch.length === 1 && insertBatch.length === 1) {
-                    const deleteToken = pythonTokens[deleteBatch[0].indexA];
-                    const insertToken = tsTokens[insertBatch[0].indexB];
-                    if (deleteToken && insertToken && deleteToken.type === 'text' && insertToken.type === 'text' && !deleteToken.isWhitespace && !insertToken.isWhitespace) {
-                        const charDiff = diffChars(deleteToken.raw, insertToken.raw);
-                        pythonHighlights[deleteBatch[0].indexA] = { segments: charDiff.pythonSegments };
-                        tsHighlights[insertBatch[0].indexB] = { segments: charDiff.tsSegments };
-                        continue;
-                    }
-                }
-
-                deleteBatch.forEach((entry) => {
-                    const token = pythonTokens[entry.indexA];
-                    if (token && !(token.type === 'text' && token.isWhitespace)) {
-                        pythonHighlights[entry.indexA] = 'added';
-                    }
-                });
-                insertBatch.forEach((entry) => {
-                    const token = tsTokens[entry.indexB];
-                    if (token && !(token.type === 'text' && token.isWhitespace)) {
-                        tsHighlights[entry.indexB] = 'removed';
-                    }
-                });
-            }
-
-            return { pythonHighlights, tsHighlights };
-        }
-
-        function diffChars(leftText, rightText) {
-            const leftChars = Array.from(leftText || "");
-            const rightChars = Array.from(rightText || "");
-            const operations = diffUsingLcs(leftChars, rightChars, (a, b) => a === b);
-            const pythonSegments = [];
-            const tsSegments = [];
-
-            operations.forEach((operation) => {
-                if (operation.type === 'equal') {
-                    appendSegment(pythonSegments, leftChars[operation.indexA], null);
-                    appendSegment(tsSegments, rightChars[operation.indexB], null);
-                } else if (operation.type === 'delete') {
-                    appendSegment(pythonSegments, leftChars[operation.indexA], 'added');
-                } else if (operation.type === 'insert') {
-                    appendSegment(tsSegments, rightChars[operation.indexB], 'removed');
-                }
-            });
-
-            return { pythonSegments, tsSegments };
-        }
-
-        function appendSegment(target, text, highlight) {
-            if (!text) {
-                return;
-            }
-            const last = target[target.length - 1];
-            if (last && last.highlight === highlight) {
-                last.text += text;
-            } else {
-                target.push({ text, highlight });
-            }
-        }
-
-        function renderTokens(tokens, highlights) {
-            if (!tokens.length) {
-                return "";
-            }
-            const parts = [];
-            for (let index = 0; index < tokens.length; index += 1) {
-                const token = tokens[index];
-                const highlight = highlights ? highlights[index] : null;
-
-                if (highlight && typeof highlight === 'object' && Array.isArray(highlight.segments)) {
-                    parts.push(renderSegments(highlight.segments));
-                    continue;
-                }
-
-                const tokenText = escapeHtml(token.raw);
-
-                if (highlight === 'added' || highlight === 'removed') {
-                    if (token.type === 'text' && token.isWhitespace) {
-                        parts.push(tokenText);
-                    } else {
-                        const className = highlight === 'added' ? 'diff-added' : 'diff-removed';
-                        parts.push(`<span class="${className}">${tokenText}</span>`);
-                    }
-                } else {
-                    parts.push(tokenText);
-                }
-            }
-            return parts.join("");
-        }
-
-        function renderSegments(segments) {
-            return segments.map((segment) => {
-                const safeText = escapeHtml(segment.text || "");
-                if (!segment.highlight) {
-                    return safeText;
-                }
-                const className = segment.highlight === 'added' ? 'diff-added' : 'diff-removed';
-                return `<span class="${className}">${safeText}</span>`;
-            }).join("");
         }
 
         function escapeHtml(input) {
@@ -3854,6 +4146,28 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             if (next) {
                 next.addEventListener("click", () => goToAdjacent("next"));
             }
+
+            const uuidField = document.getElementById("uuid");
+            const uuidCopyBtn = document.getElementById("uuid-copy");
+            const uuidPasteBtn = document.getElementById("uuid-paste");
+            const uuidClearBtn = document.getElementById("uuid-clear");
+            if (uuidField) {
+                uuidField.addEventListener("input", () => setUuidButtonsState());
+            }
+            if (uuidCopyBtn) {
+                uuidCopyBtn.addEventListener("click", copyCurrentUuid);
+            }
+            if (uuidPasteBtn) {
+                uuidPasteBtn.addEventListener("click", () => {
+                    pasteUuidFromClipboard().catch((error) => {
+                        console.warn('Vložení UUID ze schránky se nezdařilo:', error);
+                    });
+                });
+            }
+            if (uuidClearBtn) {
+                uuidClearBtn.addEventListener("click", clearUuidInput);
+            }
+            setUuidButtonsState();
 
             setupPageNumberJump();
             initializeThumbnailDrawer();
@@ -4166,6 +4480,33 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         except Exception:
             payload = {}
 
+        if path == '/diff':
+            python_html = ''
+            ts_html = ''
+            mode = DIFF_MODE_WORD
+            if isinstance(payload, dict):
+                python_html = str(payload.get('python') or payload.get('python_html') or '')
+                ts_html = str(payload.get('typescript') or payload.get('typescript_html') or '')
+                requested_mode = payload.get('mode')
+                if isinstance(requested_mode, str):
+                    mode = requested_mode
+            try:
+                diff_result = build_html_diff(python_html, ts_html, mode)
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.end_headers()
+                response = {
+                    'ok': True,
+                    'diff': diff_result,
+                }
+                self.wfile.write(json.dumps(response, ensure_ascii=False).encode('utf-8'))
+            except Exception as err:
+                self.send_response(500)
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.end_headers()
+                self.wfile.write(json.dumps({'ok': False, 'error': str(err)}).encode('utf-8'))
+            return
+
         if path == '/agents/save':
             stored = write_agent_file(payload if isinstance(payload, dict) else {})
             # write_agent_file now returns canonical name on success, or None on failure
@@ -4303,8 +4644,7 @@ def simulate_typescript_processing(alto_xml: str, uuid: str, width: int, height:
 
 def run_server(port=8000):
     """Spuštění webového serveru"""
-    socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("", port), ComparisonHandler) as httpd:
+    with ThreadingHTTPServer(("", port), ComparisonHandler) as httpd:
         print(f"Server běží na http://localhost:{port}")
         print("Otevírám prohlížeč...")
         webbrowser.open(f'http://localhost:{port}')

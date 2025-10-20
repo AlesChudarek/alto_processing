@@ -122,6 +122,23 @@ def _infer_block_type(element) -> str:
     name = (element.name or "").lower()
     if name in {"h1", "h2", "h3"}:
         return name
+    if name == "p":
+        has_small_child = False
+        for child in element.contents:
+            if getattr(child, "name", None):
+                child_name = child.name.lower()
+                if child_name == "small":
+                    has_small_child = True
+                    continue
+                if child_name == "br":
+                    continue
+                return "p"
+            else:
+                if isinstance(child, str) and child.strip():
+                    return "p"
+        if has_small_child:
+            return "small"
+        return "p"
     if name == "small":
         return "small"
     if name == "note":

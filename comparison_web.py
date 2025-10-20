@@ -23,12 +23,21 @@ from typing import Dict, Optional
 
 # Import původního procesoru
 from main_processor import AltoProcessor, DEFAULT_API_BASES
+from agent_runner import AgentRunnerError, run_agent as run_agent_via_responses
 
 
 ROOT_DIR = Path(__file__).resolve().parent
 TS_DIST_PATH = ROOT_DIR / 'dist' / 'run_original.js'
 DEFAULT_WIDTH = 800
 DEFAULT_HEIGHT = 1200
+DEFAULT_AGENT_PROMPT_TEXT = (
+    "Jsi pečlivý korektor češtiny. Dostaneš JSON s klíči "
+    "\"language_hint\", \"page_meta\" a \"blocks\". Blocks je pole "
+    "objektů {id, type, text}. Oprav překlepy a zjevné OCR chyby pouze "
+    "v hodnotách \"text\". Nesjednocuj styl, neměň typy bloků ani jejich "
+    "pořadí. Zachovej diakritiku, pokud lze. Odpovídej pouze validním "
+    "JSON se stejnou strukturou a klíči jako vstup."
+)
 
 KNOWN_LIBRARY_OVERRIDES: Dict[str, Dict[str, str]] = {
     "https://kramerius.mzk.cz/search/api/v5.0": {
@@ -1093,6 +1102,20 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                             <button id="agent-delete" type="button" style="background:#e53e3e;">Smazat</button>
                         </div>
                     </div>
+                    <div id="agent-output" style="display:none;margin-top:12px;">
+                        <div id="agent-output-status" class="muted" style="margin-bottom:6px;"></div>
+                        <pre id="agent-output-text" style="white-space:pre-wrap;"></pre>
+                    </div>
+                    <div id="agent-results" class="results" style="display:none;margin-top:16px;">
+                        <div class="result-box">
+                            <h3>Agent – původní Python</h3>
+                            <div id="agent-result-original" class="result-rendered"></div>
+                        </div>
+                        <div class="result-box">
+                            <h3>Agent – opravený náhled</h3>
+                            <div id="agent-result-corrected" class="result-rendered"></div>
+                        </div>
+                    </div>
                 </div>
             </div>
             <div id="loading" class="loading" aria-live="polite" aria-hidden="true">
@@ -1104,6 +1127,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         </div>
     </div>
 
+    <script type="application/json" id="default-agent-prompt-data">__DEFAULT_AGENT_PROMPT__</script>
     <script>
         let previewObjectUrl = null;
         let previewFetchToken = null;
@@ -1139,6 +1163,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             typescript: "",
             baseKey: "",
         };
+        const NOTE_STYLE_ATTR = ' style="display:block;font-size:0.82em;color:#1e5aa8;font-weight:bold;"';
         // --- LLM agent management ---
         const AGENTS_STORAGE_KEY = 'altoAgents_v1';
         const AGENT_SELECTED_KEY = 'altoAgentSelected_v1';
@@ -1146,6 +1171,22 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
 
         // client-side in-memory cache of agents (name -> agent object)
         const agentsCache = {};
+        const DEFAULT_AGENT_PROMPT = (() => {
+            const fallback = 'Jsi pečlivý korektor češtiny. Dostaneš JSON s klíči "language_hint", "page_meta" a "blocks". Blocks je pole objektů {id, type, text}. Oprav překlepy a zjevné OCR chyby pouze v hodnotách "text". Nesjednocuj styl, neměň typy bloků ani jejich pořadí. Zachovej diakritiku, pokud lze. Odpovídej pouze validním JSON se stejnou strukturou a klíči jako vstup.';
+            const element = document.getElementById('default-agent-prompt-data');
+            if (!element) {
+                return fallback;
+            }
+            const raw = element.textContent || '';
+            try {
+                const parsed = JSON.parse(raw);
+                return typeof parsed === 'string' && parsed.trim().length ? parsed : fallback;
+            } catch (err) {
+                console.warn('Nelze načíst výchozí prompt agenta:', err);
+                return raw.trim().length ? raw : fallback;
+            }
+        })();
+        const DEFAULT_LANGUAGE_HINT = 'cs';
 
         async function loadAgents() {
             // if cache already populated, return a shallow map
@@ -1213,7 +1254,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 for (const n of defaults) {
                     await fetch('/agents/save', {
                         method: 'POST', headers: {'Content-Type':'application/json'},
-                        body: JSON.stringify({ name: n, prompt: `Agent ${n} - test prompt`, temperature: 0.2, top_p: 1.0 })
+                        body: JSON.stringify({ name: n, prompt: DEFAULT_AGENT_PROMPT, temperature: 0.2, top_p: 1.0 })
                     });
                 }
                 if (spinnerWrapper) spinnerWrapper.style.display = 'none';
@@ -1288,7 +1329,10 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             const topRange = document.getElementById('agent-top-p');
             const topNum = document.getElementById('agent-top-p-number');
             if (nameEl) nameEl.value = agent.name || '';
-            if (promptEl) promptEl.value = agent.prompt || '';
+            if (promptEl) {
+                const promptValue = (agent.prompt && typeof agent.prompt === 'string' && agent.prompt.trim()) ? agent.prompt : DEFAULT_AGENT_PROMPT;
+                promptEl.value = promptValue;
+            }
             if (tempRange) tempRange.value = (agent.temperature !== undefined ? agent.temperature : 0.2);
             if (tempNum) tempNum.value = (agent.temperature !== undefined ? agent.temperature : 0.2);
             if (topRange) topRange.value = (agent.top_p !== undefined ? agent.top_p : 1.0);
@@ -1405,6 +1449,157 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
 
         // newAgent removed — creation/editing handled via saveCurrentAgent and changing name
 
+        function parseAgentResultDocument(text) {
+            if (!text || typeof text !== 'string') {
+                return null;
+            }
+            const trimmed = text.trim();
+            if (!trimmed) {
+                return null;
+            }
+            try {
+                return JSON.parse(trimmed);
+            } catch (err) {
+                return null;
+            }
+        }
+
+        function documentBlocksToHtml(documentPayload) {
+            if (!documentPayload || typeof documentPayload !== 'object' || !Array.isArray(documentPayload.blocks)) {
+                return null;
+            }
+            const parts = [];
+            for (const block of documentPayload.blocks) {
+                if (!block || typeof block.text !== 'string') {
+                    continue;
+                }
+                const text = block.text.trim();
+                if (!text) {
+                    continue;
+                }
+                const type = (block.type || '').toLowerCase();
+                let tag = 'p';
+                let attrs = '';
+                switch (type) {
+                    case 'h1':
+                    case 'h2':
+                    case 'h3':
+                        tag = type;
+                        break;
+                    case 'small':
+                        tag = 'small';
+                        break;
+                    case 'note':
+                        tag = 'note';
+                        attrs = NOTE_STYLE_ATTR;
+                        break;
+                    case 'centered':
+                        tag = 'div';
+                        attrs = ' class="centered"';
+                        break;
+                    case 'blockquote':
+                        tag = 'blockquote';
+                        break;
+                    case 'li':
+                        tag = 'p';
+                        attrs = ' data-block-type="li"';
+                        break;
+                    default:
+                        tag = 'p';
+                        if (type && type !== 'p') {
+                            attrs = ` data-block-type="${escapeHtml(type)}"`;
+                        }
+                        break;
+                }
+                parts.push(`<${tag}${attrs}>${escapeHtml(text)}</${tag}>`);
+            }
+            return parts.length ? parts.join("") : null;
+        }
+
+
+
+        function clearAgentOutput() {
+            const container = document.getElementById('agent-output');
+            const statusEl = document.getElementById('agent-output-status');
+            const textEl = document.getElementById('agent-output-text');
+            if (container) container.style.display = 'none';
+            if (statusEl) {
+                statusEl.textContent = '';
+                statusEl.style.color = '';
+                statusEl.style.fontWeight = '';
+            }
+            if (textEl) textEl.textContent = '';
+            setAgentResultPanels(null, null, false);
+        }
+
+        function setAgentOutput(statusText, bodyText, state) {
+            const container = document.getElementById('agent-output');
+            const statusEl = document.getElementById('agent-output-status');
+            const textEl = document.getElementById('agent-output-text');
+            if (!container || !statusEl || !textEl) {
+                return;
+            }
+            container.style.display = 'block';
+            statusEl.textContent = statusText || '';
+            if (state === 'error') {
+                statusEl.style.color = '#b91c1c';
+                statusEl.style.fontWeight = '';
+            } else if (state === 'pending') {
+                statusEl.style.color = '';
+                statusEl.style.fontWeight = '600';
+            } else {
+                statusEl.style.color = '';
+                statusEl.style.fontWeight = '';
+            }
+            textEl.textContent = bodyText || '';
+        }
+
+        function formatHtmlForPre(html) {
+            if (!html) {
+                return '';
+            }
+            return escapeHtml(html || '');
+        }
+
+        function setAgentResultPanels(originalHtml, correctedContent, correctedIsHtml) {
+            const container = document.getElementById('agent-results');
+            const originalEl = document.getElementById('agent-result-original');
+            const correctedEl = document.getElementById('agent-result-corrected');
+            if (!container || !originalEl || !correctedEl) {
+                return;
+            }
+
+            console.group('[AgentDebug] Agent result panels');
+            console.debug('[AgentDebug] Original Python HTML length:', originalHtml ? originalHtml.length : 0);
+            console.debug('[AgentDebug] Original Python HTML preview:', originalHtml);
+            console.debug('[AgentDebug] Corrected content length:', correctedContent ? correctedContent.length : 0, 'isHtml:', correctedIsHtml);
+            console.debug('[AgentDebug] Corrected content preview:', correctedContent);
+            console.groupEnd();
+
+            if (!originalHtml && !correctedContent) {
+                container.style.display = 'none';
+                originalEl.innerHTML = '';
+                correctedEl.innerHTML = '';
+                return;
+            }
+
+            container.style.display = 'grid';
+
+            if (originalHtml) {
+                originalEl.innerHTML = `<pre>${originalHtml}</pre>`;
+            } else {
+                originalEl.innerHTML = '<div class="muted">Žádná data.</div>';
+            }
+
+            if (correctedContent) {
+                correctedEl.innerHTML = correctedIsHtml
+                    ? `<pre>${correctedContent}</pre>`
+                    : `<pre>${escapeHtml(correctedContent)}</pre>`;
+            } else {
+                correctedEl.innerHTML = '<div class="muted">Agent nevrátil HTML náhled.</div>';
+            }
+        }
+
         async function runSelectedAgent() {
             const select = document.getElementById('agent-select');
             if (!select) return;
@@ -1413,21 +1608,118 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 alert('Žádný agent není vybrán');
                 return;
             }
+            const pythonHtml = currentResults && currentResults.python ? String(currentResults.python) : '';
+            if (!pythonHtml.trim()) {
+                alert('Python výstup je prázdný – nejprve načtěte stránku.');
+                return;
+            }
             const auto = document.getElementById('agent-auto-correct');
             const willAuto = auto && auto.checked;
             persistAutoCorrect(Boolean(willAuto));
-            // For now simulate as before; in future call a /agents/run endpoint
-            const res = await fetch(`/agents/get?name=${encodeURIComponent(name)}`, { cache: 'no-store' });
-            let agent = null;
-            if (res.ok) {
-                agent = await res.json();
+            const originalPythonHtml = pythonHtml;
+
+            const pageMeta = {};
+            if (currentPage) {
+                if (currentPage.pageNumber) pageMeta.page = currentPage.pageNumber;
+                else if (typeof currentPage.index === 'number' && !Number.isNaN(currentPage.index)) pageMeta.page = currentPage.index + 1;
+                if (typeof currentPage.index === 'number' && !Number.isNaN(currentPage.index)) pageMeta.page_index = currentPage.index;
+                if (currentPage.uuid) pageMeta.page_uuid = currentPage.uuid;
+                if (currentPage.pageType) pageMeta.page_type = currentPage.pageType;
+                if (currentPage.pageSide) pageMeta.page_side = currentPage.pageSide;
             }
-            const pythonRendered = document.getElementById('python-result');
-            if (pythonRendered) {
-                const note = `<!-- Applied by agent: ${name} (auto=${willAuto}) -->\n`;
-                pythonRendered.innerHTML = note + `<pre>${currentResults.python || ''}</pre>`;
+            if (currentBook) {
+                if (currentBook.title) pageMeta.work = currentBook.title;
+                if (currentBook.uuid) pageMeta.book_uuid = currentBook.uuid;
+            }
+
+            const payload = {
+                name,
+                auto_correct: Boolean(willAuto),
+                python_html: pythonHtml,
+                language_hint: DEFAULT_LANGUAGE_HINT,
+                page_meta: pageMeta,
+                page_uuid: currentPage && currentPage.uuid ? currentPage.uuid : '',
+                book_uuid: currentBook && currentBook.uuid ? currentBook.uuid : '',
+                book_title: currentBook && currentBook.title ? currentBook.title : '',
+                page_number: currentPage && currentPage.pageNumber ? currentPage.pageNumber : '',
+                page_index: currentPage && typeof currentPage.index === 'number' ? currentPage.index : null,
+            };
+
+            const runBtn = document.getElementById('agent-run');
+            const originalLabel = runBtn ? runBtn.textContent : '';
+
+            try {
+                if (runBtn) {
+                    runBtn.disabled = true;
+                    runBtn.textContent = 'Spouštím...';
+                }
+                setAgentOutput(`Spouštím agenta ${name}...`, '', 'pending');
+                const response = await fetch('/agents/run', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || !data || data.ok === false) {
+                    const message = data && data.error ? data.error : response.statusText || 'Neznámá chyba';
+                    throw new Error(message);
+                }
+                const result = data.result || {};
+                const text = typeof result.text === 'string' ? result.text.trim() : '';
+                const usage = result.usage || {};
+                const statusParts = [`Agent ${name}`];
+                if (result.model) {
+                    statusParts.push(`Model: ${result.model}`);
+                }
+                if (result.stop_reason) {
+                    statusParts.push(`Stop reason: ${result.stop_reason}`);
+                }
+                if (usage.input_tokens !== undefined && usage.output_tokens !== undefined) {
+                    statusParts.push(`Tokeny in/out: ${usage.input_tokens}/${usage.output_tokens}`);
+                } else if (usage.total_tokens !== undefined) {
+                    statusParts.push(`Tokeny celkem: ${usage.total_tokens}`);
+                }
+
+                const parsedDoc = parseAgentResultDocument(text);
+                const htmlFromDoc = parsedDoc ? documentBlocksToHtml(parsedDoc) : null;
+                if (parsedDoc && Array.isArray(parsedDoc.blocks)) {
+                    statusParts.push(`Bloků: ${parsedDoc.blocks.length}`);
+                }
+
+                const autoRequested = Boolean(data.auto_correct);
+                if (autoRequested) {
+                    if (htmlFromDoc) {
+                        currentResults.python = htmlFromDoc;
+                        currentResults.baseKey = buildResultCacheKey(
+                            htmlFromDoc,
+                            currentResults.typescript || '',
+                            currentPage && currentPage.uuid ? currentPage.uuid : ''
+                        );
+                        renderComparisonResults();
+                        statusParts.push('Výsledek aplikován');
+                    } else {
+                        statusParts.push('Výsledek nelze aplikovat (očekáván JSON se strukturou blocks)');
+                    }
+                }
+
+                const correctedContent = htmlFromDoc || (text || '');
+                const correctedIsHtml = Boolean(htmlFromDoc);
+                setAgentResultPanels(originalPythonHtml, correctedContent, correctedIsHtml);
+
+                const statusText = statusParts.join(' · ');
+                const displayText = parsedDoc ? JSON.stringify(parsedDoc, null, 2) : (text || '(Agent nevrátil text)');
+                setAgentOutput(statusText, displayText, 'success');
+            } catch (err) {
+                const message = err && err.message ? err.message : String(err);
+                setAgentOutput(`Chyba agenta: ${message}`, '', 'error');
+            } finally {
+                if (runBtn) {
+                    runBtn.disabled = false;
+                    runBtn.textContent = originalLabel || 'Oprav';
+                }
             }
         }
+
 
         async function initializeAgentUI() {
             // Attach listeners immediately so UI is responsive while agent list loads
@@ -2976,6 +3268,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 typescript: data.typescript || "",
                 baseKey: buildResultCacheKey(data.python || "", data.typescript || "", currentPage && currentPage.uuid ? currentPage.uuid : uuid),
             };
+            clearAgentOutput();
             renderComparisonResults();
 
             const results = document.getElementById("results");
@@ -3674,6 +3967,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
     </div>
 </body>
 </html>'''
+            html = html.replace('__DEFAULT_AGENT_PROMPT__', json.dumps(DEFAULT_AGENT_PROMPT_TEXT))
             self.wfile.write(html.encode('utf-8'))
 
         elif self.path.startswith('/process'):
@@ -3905,7 +4199,43 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(json.dumps({'ok': False, 'error': 'not_found'}).encode('utf-8'))
                 return
-            self.wfile.write(b'404 - Nenalezeno')
+            return
+
+        if path == '/agents/run':
+            request_payload = payload if isinstance(payload, dict) else {}
+            agent_name = request_payload.get('name')
+            agent = read_agent_file(agent_name or '')
+            if not agent:
+                self.send_response(404)
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.end_headers()
+                self.wfile.write(json.dumps({'ok': False, 'error': 'agent_not_found'}).encode('utf-8'))
+                return
+            try:
+                result = run_agent_via_responses(agent, request_payload)
+            except AgentRunnerError as err:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.end_headers()
+                self.wfile.write(json.dumps({'ok': False, 'error': str(err)}).encode('utf-8'))
+                return
+            except Exception as err:
+                self.send_response(500)
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.end_headers()
+                self.wfile.write(json.dumps({'ok': False, 'error': str(err)}).encode('utf-8'))
+                return
+
+            response_body = {
+                'ok': True,
+                'result': result,
+                'auto_correct': bool(request_payload.get('auto_correct')),
+            }
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(json.dumps(response_body, ensure_ascii=False).encode('utf-8'))
+            return
 
 def ensure_typescript_build() -> bool:
     if TS_DIST_PATH.exists():

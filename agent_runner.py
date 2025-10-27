@@ -11,9 +11,10 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 try:
-    from openai import OpenAI
+    from openai import OpenAI, BadRequestError
 except ImportError as exc:  # pragma: no cover
     OpenAI = None  # type: ignore
+    BadRequestError = None  # type: ignore
     _import_error = exc  # type: ignore
 else:
     _import_error = None  # type: ignore
@@ -32,6 +33,27 @@ DEFAULT_MODEL = (
     or "gpt-4.1-mini"
 )
 DEFAULT_LANGUAGE_HINT = os.getenv("OPENAI_LANGUAGE_HINT") or "cs"
+
+REASONING_EFFORT_VALUES = {"low", "medium", "high"}
+REASONING_PREFIXES = ("gpt-5", "o1", "o3", "o4")
+
+
+def _get_model_capabilities(model: str) -> Dict[str, bool]:
+    normalized = (model or "").strip().lower()
+    for prefix in REASONING_PREFIXES:
+        if not prefix:
+            continue
+        lowered = prefix.lower()
+        if normalized == lowered or normalized.startswith(f"{lowered}-"):
+            return {"temperature": False, "top_p": False, "reasoning": True}
+    return {"temperature": True, "top_p": True, "reasoning": False}
+
+
+def _normalize_reasoning_effort(value: Optional[Any]) -> str:
+    if value is None:
+        return "medium"
+    normalized = str(value).strip().lower()
+    return normalized if normalized in REASONING_EFFORT_VALUES else "medium"
 
 BLOCK_TAGS = ("h1", "h2", "h3", "p", "div", "small", "note", "blockquote", "li")
 
@@ -255,8 +277,14 @@ def run_agent(agent: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
 
     client = _get_client()
 
+    capabilities = _get_model_capabilities(model)
     temperature = agent.get("temperature")
     top_p = agent.get("top_p")
+    reasoning_effort_value = payload.get("reasoning_effort") or agent.get("reasoning_effort")
+    normalized_reasoning_effort = _normalize_reasoning_effort(reasoning_effort_value)
+    supports_temperature = capabilities.get("temperature", True)
+    supports_top_p = capabilities.get("top_p", True)
+    supports_reasoning = capabilities.get("reasoning", False)
 
     request_kwargs: Dict[str, Any] = {
         "model": model,
@@ -271,17 +299,87 @@ def run_agent(agent: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
             },
         ],
     }
-    if temperature is not None:
-        request_kwargs["temperature"] = float(temperature)
-    if top_p is not None:
-        request_kwargs["top_p"] = float(top_p)
+    if supports_temperature and temperature is not None:
+        try:
+            request_kwargs["temperature"] = float(temperature)
+        except (TypeError, ValueError):
+            pass
+    elif not supports_temperature and temperature is not None:
+        print(f"[AgentDebug] Model {model} ignoruje parametr temperature – nebude odeslán.")
+    if supports_top_p and top_p is not None:
+        try:
+            request_kwargs["top_p"] = float(top_p)
+        except (TypeError, ValueError):
+            pass
+    elif not supports_top_p and top_p is not None:
+        print(f"[AgentDebug] Model {model} ignoruje parametr top_p – nebude odeslán.")
+    if supports_reasoning:
+        request_kwargs["reasoning"] = {"effort": normalized_reasoning_effort}
+        agent["reasoning_effort"] = normalized_reasoning_effort
 
-    response = client.responses.create(**request_kwargs)
+    debug_agent = agent.get("name") or agent.get("display_name") or "unknown"
+    print("\n=== [AgentDebug] OpenAI Request ===")
+    print(f"Agent: {debug_agent}")
+    print(f"Model: {request_kwargs.get('model')}")
+    if "temperature" in request_kwargs:
+        print(f"Temperature: {request_kwargs.get('temperature')}")
+    if "top_p" in request_kwargs:
+        print(f"Top P: {request_kwargs.get('top_p')}")
+    if "reasoning" in request_kwargs:
+        print(f"Reasoning effort: {request_kwargs['reasoning'].get('effort')}")
+    print("--- Prompt ---")
+    for part in request_kwargs.get("input", []):
+        role = part.get("role")
+        contents = part.get("content") or []
+        for block in contents:
+            if block.get("type") == "input_text":
+                print(f"[{role}] {block.get('text')}")
+    print("=== [AgentDebug] End Request ===\n")
+
+    def _retry_without_unsupported(error: Exception) -> Optional[Response]:
+        if BadRequestError is None or not isinstance(error, BadRequestError):
+            return None
+        message = " ".join(str(part) for part in error.args if part)
+        message_lower = message.lower()
+        removed_any = False
+        if "temperature" in request_kwargs and "temperature" in message_lower:
+            print("[AgentDebug] Model nepodporuje parametr temperature – opakuji bez něj.")
+            request_kwargs.pop("temperature", None)
+            removed_any = True
+        if "top_p" in request_kwargs and "top_p" in message_lower:
+            print("[AgentDebug] Model nepodporuje parametr top_p – opakuji bez něj.")
+            request_kwargs.pop("top_p", None)
+            removed_any = True
+        if "reasoning" in request_kwargs and "reasoning" in message_lower:
+            print("[AgentDebug] Model nepodporuje pole reasoning – opakuji bez něj.")
+            request_kwargs.pop("reasoning", None)
+            removed_any = True
+        if not removed_any:
+            return None
+        return client.responses.create(**request_kwargs)
+
+    try:
+        response = client.responses.create(**request_kwargs)
+    except Exception as exc:
+        retry = _retry_without_unsupported(exc)
+        if retry is None:
+            raise
+        response = retry
 
     try:
         response_dict = response.model_dump()
     except AttributeError:
         response_dict = getattr(response, "__dict__", {})
+
+    print("=== [AgentDebug] OpenAI Response ===")
+    try:
+        print(response.output_text)
+    except Exception:
+        try:
+            print(json.dumps(response_dict, ensure_ascii=False, indent=2))
+        except Exception:
+            print("[AgentDebug] Nelze zobrazit odpověď.")
+    print("=== [AgentDebug] End Response ===\n")
 
     text = _extract_output_text(response)
     stop_reason = _extract_stop_reason(response_dict)
@@ -294,4 +392,5 @@ def run_agent(agent: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
         "stop_reason": stop_reason,
         "usage": usage,
         "input_document": document_payload,
+        "reasoning_effort": agent.get("reasoning_effort"),
     }

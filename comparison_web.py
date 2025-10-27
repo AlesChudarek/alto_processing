@@ -25,7 +25,7 @@ from typing import Dict, Optional, List, Tuple
 
 # Import původního procesoru
 from main_processor import AltoProcessor, DEFAULT_API_BASES
-from agent_runner import AgentRunnerError, run_agent as run_agent_via_responses
+from agent_runner import AgentRunnerError, run_agent as run_agent_via_responses, DEFAULT_MODEL
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -40,6 +40,9 @@ DEFAULT_AGENT_PROMPT_TEXT = (
     "pořadí. Zachovej diakritiku, pokud lze. Odpovídej pouze validním "
     "JSON se stejnou strukturou a klíči jako vstup."
 )
+
+# Style value reused for <note> blocks in agent diff rendering.
+NOTE_STYLE_ATTR = 'display:block;font-size:0.82em;color:#1e5aa8;font-weight:bold;'
 
 KNOWN_LIBRARY_OVERRIDES: Dict[str, Dict[str, str]] = {
     "https://kramerius.mzk.cz/search/api/v5.0": {
@@ -208,12 +211,12 @@ def diff_block_content(left_block: str, right_block: str, mode: str) -> Tuple[st
             left_parts.append(render_tokens(left_slice))
             right_parts.append(render_tokens(right_slice))
         elif tag == 'delete':
-            left_parts.append(render_tokens(left_slice, 'added'))
+            left_parts.append(render_tokens(left_slice, 'removed'))
         elif tag == 'insert':
-            right_parts.append(render_tokens(right_slice, 'removed'))
+            right_parts.append(render_tokens(right_slice, 'added'))
         elif tag == 'replace':
-            left_parts.append(render_tokens(left_slice, 'added'))
-            right_parts.append(render_tokens(right_slice, 'removed'))
+            left_parts.append(render_tokens(left_slice, 'removed'))
+            right_parts.append(render_tokens(right_slice, 'added'))
 
     return ''.join(left_parts), ''.join(right_parts)
 
@@ -237,6 +240,47 @@ def wrap_diff_content(blocks: List[str], mode: str) -> str:
     if not inner:
         inner = '<div class="diff-placeholder">Bez obsahu</div>'
     return f'<div class="diff-content diff-html"{mode_attr}>{inner}</div>'
+
+
+def _annotate_block_classes(block_html: str, change: str) -> str:
+    if not block_html or not change or change == 'equal':
+        return block_html
+    class_map = {
+        'added': 'diff-block diff-block--added',
+        'removed': 'diff-block diff-block--removed',
+        'changed': 'diff-block diff-block--changed',
+    }
+    class_name = class_map.get(change)
+    if not class_name:
+        return block_html
+    stripped = block_html.lstrip()
+    prefix_len = len(block_html) - len(stripped)
+    prefix = block_html[:prefix_len]
+    target = stripped
+    leading_inline = ''
+    while target.lower().startswith('<br'):
+        end_idx = target.find('>')
+        if end_idx == -1:
+            break
+        leading_inline += target[:end_idx + 1]
+        target = target[end_idx + 1:]
+    if not target:
+        return prefix + leading_inline
+    match = re.match(r'<([a-zA-Z0-9:-]+)([^>]*)>', target)
+    if match:
+        tag_name = match.group(1)
+        attrs = match.group(2) or ''
+        if 'class=' in attrs:
+            updated = re.sub(r'class="([^"]*)"', lambda m: f'class="{m.group(1)} {class_name}"', target, count=1)
+            return prefix + leading_inline + updated
+        else:
+            separator = ''
+            if not attrs or not attrs.endswith(' '):
+                separator = ' '
+            insertion = f'<{tag_name}{attrs}{separator}class="{class_name}">'
+            updated = target.replace(match.group(0), insertion, 1)
+            return prefix + leading_inline + updated
+    remaining = block_html[prefix_len + len(leading_inline):]
 
 
 def build_html_diff(python_html: str, ts_html: str, mode: str) -> Dict[str, str]:
@@ -285,6 +329,141 @@ def build_html_diff(python_html: str, ts_html: str, mode: str) -> Dict[str, str]
     return {
         'python': wrap_diff_content(python_render, mode_normalized),
         'typescript': wrap_diff_content(ts_render, mode_normalized),
+        'has_changes': changes_detected,
+        'mode': mode_normalized,
+    }
+
+
+def block_to_html_from_dict(block: dict) -> Optional[str]:
+    if not isinstance(block, dict):
+        return None
+    text = block.get('text')
+    if text is None:
+        return None
+    text_str = str(text).strip()
+    if not text_str:
+        return None
+
+    block_type = str(block.get('type') or '').lower()
+    escaped_text = html.escape(text_str, quote=False)
+
+    tag = 'p'
+    attrs = {}
+    classes: List[str] = []
+    style_attr = None
+    wrap_with_small = False
+    prefix = ''
+
+    block_id = block.get('id')
+    if block_id not in (None, ''):
+        attrs['data-block-id'] = str(block_id)
+
+    if block_type in {'h1', 'h2', 'h3'}:
+        tag = block_type
+    elif block_type == 'small':
+        wrap_with_small = True
+    elif block_type == 'note':
+        tag = 'note'
+        style_attr = NOTE_STYLE_ATTR
+        prefix = '<br>'
+    elif block_type == 'centered':
+        tag = 'div'
+        classes.append('centered')
+    elif block_type == 'blockquote':
+        tag = 'blockquote'
+    elif block_type == 'li':
+        tag = 'p'
+        attrs['data-block-type'] = 'li'
+    else:
+        tag = 'p'
+        if block_type and block_type != 'p':
+            attrs['data-block-type'] = block_type
+
+    if classes:
+        attrs['class'] = ' '.join(classes)
+    if style_attr:
+        attrs['style'] = style_attr
+
+    attr_parts = []
+    for key, value in attrs.items():
+        attr_parts.append(f'{key}="{html.escape(str(value), quote=False)}"')
+    attr_str = f" {' '.join(attr_parts)}" if attr_parts else ''
+
+    if wrap_with_small:
+        markup = f'<p{attr_str}><small>{escaped_text}</small></p>'
+    else:
+        markup = f'<{tag}{attr_str}>{escaped_text}</{tag}>'
+        if tag == 'note':
+            markup = prefix + markup
+    return markup
+
+
+def build_agent_diff(original_html: str, corrected_html: str, mode: str) -> Dict[str, str]:
+    mode_normalized = _normalize_diff_mode(mode)
+
+    def parse_blocks(html_text: str) -> List[str]:
+        try:
+            data = json.loads(html_text)
+            if isinstance(data, dict) and isinstance(data.get('blocks'), list):
+                output = []
+                for block in data['blocks']:
+                    markup = block_to_html_from_dict(block)
+                    if markup:
+                        output.append((block.get('id'), markup))
+                if output:
+                    return output
+        except Exception:
+            pass
+        tokens = split_html_blocks(html_text or '')
+        fallback: List[Tuple[Optional[str], str]] = []
+        for token in tokens:
+            if not token:
+                continue
+            block_id = None
+            match = re.search(r'data-block-id="([^"]+)"', token)
+            if match:
+                block_id = match.group(1)
+            fallback.append((block_id, token))
+        return fallback
+
+    original_pairs = parse_blocks(original_html or '')
+    corrected_pairs = parse_blocks(corrected_html or '')
+
+    original_map = {bid: markup for bid, markup in original_pairs if bid}
+    corrected_map = {bid: markup for bid, markup in corrected_pairs if bid}
+
+    processed_ids = set()
+    original_render: List[str] = []
+    corrected_render: List[str] = []
+    changes_detected = False
+
+    for bid, markup in original_pairs:
+        if bid and bid in corrected_map:
+            corrected_markup = corrected_map[bid]
+            if markup == corrected_markup:
+                original_render.append(markup)
+                corrected_render.append(corrected_markup)
+            else:
+                changes_detected = True
+                left_markup, right_markup = diff_block_content(markup, corrected_markup, mode_normalized)
+                original_render.append(_annotate_block_classes(left_markup, 'changed'))
+                corrected_render.append(_annotate_block_classes(right_markup, 'changed'))
+            processed_ids.add(bid)
+        else:
+            changes_detected = True
+            original_render.append(_annotate_block_classes(markup, 'removed'))
+
+    for bid, markup in corrected_pairs:
+        if bid and bid in processed_ids:
+            continue
+        if bid and bid in original_map:
+            continue
+        changes_detected = True
+        corrected_render.append(_annotate_block_classes(markup, 'added'))
+
+    return {
+        'original': ''.join(original_render),
+        'corrected': ''.join(corrected_render),
         'has_changes': changes_detected,
         'mode': mode_normalized,
     }
@@ -403,6 +582,16 @@ def write_agent_file(data: dict) -> bool:
     # clamp to valid range
     temperature = max(0.0, min(1.0, temperature))
     top_p = max(0.0, min(1.0, top_p))
+    try:
+        raw_model = str(data.get('model') or '').strip()
+    except Exception:
+        raw_model = ''
+    model_value = raw_model or DEFAULT_MODEL
+    try:
+        raw_reasoning = str(data.get('reasoning_effort') or '').strip().lower()
+    except Exception:
+        raw_reasoning = ''
+    reasoning_value = raw_reasoning if raw_reasoning in {'low', 'medium', 'high'} else ''
 
     safe = {
         'name': nm,
@@ -410,6 +599,8 @@ def write_agent_file(data: dict) -> bool:
         'prompt': str(data.get('prompt') or '')[:200000],
         'temperature': temperature,
         'top_p': top_p,
+        'model': model_value,
+        'reasoning_effort': reasoning_value,
         'updated_at': time.time(),
     }
     if not p.parent.exists():
@@ -799,8 +990,19 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             border: 1px solid #ddd;
             border-radius: 4px;
             font-size: 14px;
+            box-sizing: border-box;
         }
-        button:not(.page-thumbnail):not(.thumbnail-toggle):not(.diff-toggle) {
+        textarea {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+            font-family: inherit;
+            box-sizing: border-box;
+            resize: none;
+        }
+        button:not(.page-thumbnail):not(.thumbnail-toggle):not(.diff-toggle):not(.agent-diff-toggle) {
             background-color: #007bff;
             color: white;
             padding: 10px 20px;
@@ -809,10 +1011,10 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             cursor: pointer;
             font-size: 14px;
         }
-        button:not(.page-thumbnail):not(.thumbnail-toggle):not(.diff-toggle):hover {
+        button:not(.page-thumbnail):not(.thumbnail-toggle):not(.diff-toggle):not(.agent-diff-toggle):hover {
             background-color: #0056b3;
         }
-        button:not(.page-thumbnail):not(.thumbnail-toggle):not(.diff-toggle):disabled {
+        button:not(.page-thumbnail):not(.thumbnail-toggle):not(.diff-toggle):not(.agent-diff-toggle):disabled {
             background-color: #9aa0a6;
             cursor: not-allowed;
         }
@@ -823,6 +1025,11 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             display: flex;
             align-items: stretch;
             gap: 8px;
+        }
+        .inline-tooltip-anchor {
+            position: relative;
+            display: inline-flex;
+            align-items: center;
         }
         .uuid-input-group input {
             flex: 1;
@@ -857,6 +1064,66 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             color: #9aa0a6;
             background: #f5f6f8;
             cursor: not-allowed;
+        }
+        .inline-tooltip {
+            position: absolute;
+            left: 50%;
+            top: calc(100% + 6px);
+            transform: translate(-50%, 0);
+            background: rgba(229, 241, 255, 0.96);
+            color: #0b3d8a;
+            font-size: 12px;
+            padding: 4px 8px;
+            border-radius: 4px;
+            border: 1px solid rgba(183, 212, 255, 0.9);
+            box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12);
+            opacity: 0;
+            pointer-events: none;
+            white-space: nowrap;
+            transition: opacity 0.15s ease, transform 0.15s ease;
+            z-index: 30;
+        }
+        .inline-tooltip.is-visible {
+            opacity: 1;
+            transform: translate(-50%, -4px);
+        }
+        .agent-diff-section {
+            margin-top: 16px;
+            display: none;
+            flex-direction: column;
+            gap: 16px;
+        }
+        .agent-diff-section.is-visible {
+            display: flex;
+        }
+        .agent-diff-controls {
+            display: inline-flex;
+            align-items: stretch;
+            border: 1px solid #cdd5e0;
+            border-radius: 999px;
+            overflow: hidden;
+            background: #f8f9fc;
+        }
+        .agent-diff-toggle {
+            border: none;
+            background: transparent;
+            padding: 6px 18px;
+            font-size: 13px;
+            font-weight: 600;
+            color: #6b7280;
+            cursor: pointer;
+            transition: background 0.2s ease, color 0.2s ease;
+        }
+        .agent-diff-toggle + .agent-diff-toggle {
+            border-left: 1px solid #cdd5e0;
+        }
+        .agent-diff-toggle.is-active {
+            background: #1f78ff;
+            color: #ffffff;
+        }
+        .agent-diff-toggle:focus-visible {
+            outline: none;
+            box-shadow: inset 0 0 0 2px rgba(31, 120, 255, 0.4);
         }
         .results {
             display: grid;
@@ -1318,8 +1585,14 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     <label for="uuid">UUID stránky nebo dokumentu:</label>
                     <div class="uuid-input-group">
                         <input type="text" id="uuid" placeholder="Zadejte UUID (např. 673320dd-0071-4a03-bf82-243ee206bc0b)" value="673320dd-0071-4a03-bf82-243ee206bc0b" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false">
-                        <button type="button" id="uuid-copy" title="Zkopírovat UUID" aria-label="Zkopírovat UUID">📋</button>
-                        <button type="button" id="uuid-paste" title="Vložit UUID ze schránky" aria-label="Vložit UUID ze schránky">📥</button>
+                        <span class="inline-tooltip-anchor">
+                            <button type="button" id="uuid-copy" title="Zkopírovat UUID" aria-label="Zkopírovat UUID">📋</button>
+                            <div id="uuid-copy-tooltip" class="inline-tooltip" role="status" aria-live="polite"></div>
+                        </span>
+                        <span class="inline-tooltip-anchor">
+                            <button type="button" id="uuid-paste" title="Vložit UUID ze schránky" aria-label="Vložit UUID ze schránky">📥</button>
+                            <div id="uuid-paste-tooltip" class="inline-tooltip" role="status" aria-live="polite"></div>
+                        </span>
                         <button type="button" id="uuid-clear" title="Vymazat UUID" aria-label="Vymazat UUID">✕</button>
                     </div>
                 </div>
@@ -1404,6 +1677,30 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                         <div id="agent-select-spinner" title="Načítám agenty" style="margin-left:8px;display:none;">
                             <span class="inline-spinner" aria-hidden="true"></span>
                         </div>
+                        <div style="display:inline-flex;align-items:center;gap:6px;margin-left:16px;">
+                            <label for="agent-model" style="margin:0;font-weight:600;">Model:</label>
+                            <select id="agent-model" aria-label="Vyberte model" style="min-width:170px;">
+                                <option value="gpt-4.1-mini" selected>gpt-4.1-mini</option>
+                                <option value="gpt-4.1">gpt-4.1</option>
+                                <option value="gpt-4o-mini">gpt-4o-mini</option>
+                                <option value="gpt-4o">gpt-4o</option>
+                                <option value="gpt-4-0613">gpt-4-0613</option>
+                                <option value="gpt-3.5-turbo">gpt-3.5-turbo</option>
+                                <option value="gpt-5">gpt-5</option>
+                                <option value="o1">o1</option>
+                                <option value="o1-mini">o1-mini</option>
+                                <option value="o3">o3</option>
+                                <option value="o3-mini">o3-mini</option>
+                            </select>
+                        </div>
+                        <div id="agent-reasoning-wrapper" style="display:none;align-items:center;gap:6px;margin-left:12px;">
+                            <label for="agent-reasoning-effort" style="margin:0;font-weight:600;">Reasoning:</label>
+                            <select id="agent-reasoning-effort" aria-label="Zvolte úroveň usuzování" style="min-width:130px;">
+                                <option value="low">Low</option>
+                                <option value="medium" selected>Medium</option>
+                                <option value="high">High</option>
+                            </select>
+                        </div>
                         <div style="margin-left:auto;display:flex;align-items:center;gap:8px;">
                             <label style="display:inline-flex;align-items:center;gap:6px;">
                                 <input id="agent-auto-correct" type="checkbox">
@@ -1427,8 +1724,8 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                             <div style="flex:1;">
                                 <label for="agent-temperature">Temperature</label>
                                 <div style="display:flex;gap:8px;align-items:center;">
-                                    <input id="agent-temperature" type="range" min="0" max="1" step="0.01" value="0.2" style="flex:1;">
-                                    <input id="agent-temperature-number" type="number" min="0" max="1" step="0.01" value="0.2" style="width:80px;">
+                                    <input id="agent-temperature" type="range" min="0" max="2" step="0.05" value="0.2" style="flex:1;">
+                                    <input id="agent-temperature-number" type="number" min="0" max="2" step="0.05" value="0.2" style="width:80px;">
                                 </div>
                             </div>
                             <div style="flex:1;">
@@ -1440,7 +1737,10 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                             </div>
                         </div>
                         <div style="display:flex;gap:8px;margin-top:12px;">
-                            <button id="agent-save" type="button">Uložit agenta</button>
+                            <span class="inline-tooltip-anchor">
+                                <button id="agent-save" type="button">Uložit agenta</button>
+                                <div id="agent-save-tooltip" class="inline-tooltip" role="status" aria-live="polite"></div>
+                            </span>
                             <button id="agent-delete" type="button" style="background:#e53e3e;">Smazat</button>
                         </div>
                     </div>
@@ -1458,6 +1758,12 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                             <div id="agent-result-corrected" class="result-rendered"></div>
                         </div>
                     </div>
+                    <div style="margin-top:8px;display:flex;justify-content:flex-end;">
+                        <div id="agent-diff-mode-controls" class="agent-diff-controls" role="group" aria-label="Režim zvýraznění agent diffu" style="display:none;">
+                            <button type="button" class="agent-diff-toggle" data-diff-mode="word">Slova</button>
+                            <button type="button" class="agent-diff-toggle" data-diff-mode="char">Znaky</button>
+                        </div>
+                    </div>
                 </div>
             </div>
             <div id="loading" class="loading" aria-live="polite" aria-hidden="true">
@@ -1469,6 +1775,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         </div>
     </div>
 
+    <script type="application/json" id="default-agent-model">__DEFAULT_AGENT_MODEL__</script>
     <script type="application/json" id="default-agent-prompt-data">__DEFAULT_AGENT_PROMPT__</script>
     <script>
         let previewObjectUrl = null;
@@ -1501,13 +1808,30 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         let diffMode = DIFF_MODES.NONE;
         const diffCache = new Map();
         const agentResultCache = new Map();
+        const agentFingerprintCache = new Map();
+        const AGENT_DIFF_MODES = {
+            WORD: 'word',
+            CHAR: 'char',
+        };
+        const AGENT_DIFF_MODE_STORAGE_KEY = 'altoAgentDiffMode';
+        let agentDiffMode = AGENT_DIFF_MODES.WORD;
+        let lastAgentOriginalHtml = '';
+        let lastAgentCorrectedHtml = '';
+        let lastAgentCorrectedIsHtml = false;
+        let lastAgentOriginalDocumentJson = '';
+        let lastAgentCorrectedDocumentJson = '';
+        let lastAgentCacheBaseKey = null;
+        let agentDiffRequestToken = 0;
+        let thumbnailHeightSyncPending = false;
         let currentResults = {
             python: "",
             typescript: "",
             baseKey: "",
         };
         let autoRunScheduled = false;
-        const NOTE_STYLE_ATTR = ' style="display:block;font-size:0.82em;color:#1e5aa8;font-weight:bold;"';
+        const tooltipTimers = new Map();
+
+const NOTE_STYLE_ATTR = ' style="display:block;font-size:0.82em;color:#1e5aa8;font-weight:bold;"';
         // --- LLM agent management ---
         const AGENTS_STORAGE_KEY = 'altoAgents_v1';
         const AGENT_SELECTED_KEY = 'altoAgentSelected_v1';
@@ -1515,6 +1839,44 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
 
         // client-side in-memory cache of agents (name -> agent object)
         const agentsCache = {};
+        const DEFAULT_AGENT_MODEL = (() => {
+            const fallback = 'gpt-4.1-mini';
+            const element = document.getElementById('default-agent-model');
+            if (!element) {
+                return fallback;
+            }
+            const raw = element.textContent || '';
+            try {
+                const parsed = JSON.parse(raw);
+                return typeof parsed === 'string' && parsed.trim().length ? parsed : fallback;
+            } catch (err) {
+                console.warn('Nelze načíst výchozí model agenta:', err);
+                return raw.trim().length ? raw : fallback;
+            }
+        })();
+        const AVAILABLE_AGENT_MODELS = [
+            'gpt-4.1-mini',
+            'gpt-4.1',
+            'gpt-4o-mini',
+            'gpt-4o',
+            'gpt-4-0613',
+            'gpt-3.5-turbo',
+            'gpt-5',
+            'o1',
+            'o1-mini',
+            'o3',
+            'o3-mini',
+        ];
+        const DEFAULT_REASONING_EFFORT = 'medium';
+        const REASONING_MODELS = new Set([
+            'gpt-5',
+            'o1',
+            'o1-mini',
+            'o3',
+            'o3-mini',
+            'o4',
+            'o4-mini',
+        ]);
         const DEFAULT_AGENT_PROMPT = (() => {
             const fallback = 'Jsi pečlivý korektor češtiny. Dostaneš JSON s klíči "language_hint", "page_meta" a "blocks". Blocks je pole objektů {id, type, text}. Oprav překlepy a zjevné OCR chyby pouze v hodnotách "text". Nesjednocuj styl, neměň typy bloků ani jejich pořadí. Zachovej diakritiku, pokud lze. Odpovídej pouze validním JSON se stejnou strukturou a klíči jako vstup.';
             const element = document.getElementById('default-agent-prompt-data');
@@ -1550,8 +1912,17 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     // prefer full agent object if present
                     if (a.agent && typeof a.agent === 'object') {
                         agentsCache[a.name] = a.agent;
+                        if (!agentsCache[a.name].model) {
+                            agentsCache[a.name].model = DEFAULT_AGENT_MODEL;
+                        }
+                        const effort = (agentsCache[a.name].reasoning_effort && typeof agentsCache[a.name].reasoning_effort === 'string') ? agentsCache[a.name].reasoning_effort.trim().toLowerCase() : '';
+                        agentsCache[a.name].reasoning_effort = ['low','medium','high'].includes(effort) ? effort : DEFAULT_REASONING_EFFORT;
+                        cacheAgentFingerprint(a.name, a.agent);
                     } else {
-                        agentsCache[a.name] = agentsCache[a.name] || { name: a.name, display_name: a.display_name || a.name, prompt: '', temperature: 0.2, top_p: 1.0 };
+                        agentsCache[a.name] = agentsCache[a.name] || { name: a.name, display_name: a.display_name || a.name, prompt: '', temperature: 0.2, top_p: 1.0, model: DEFAULT_AGENT_MODEL, reasoning_effort: DEFAULT_REASONING_EFFORT };
+                        const effort = (agentsCache[a.name].reasoning_effort && typeof agentsCache[a.name].reasoning_effort === 'string') ? agentsCache[a.name].reasoning_effort.trim().toLowerCase() : '';
+                        agentsCache[a.name].reasoning_effort = ['low','medium','high'].includes(effort) ? effort : DEFAULT_REASONING_EFFORT;
+                        cacheAgentFingerprint(a.name, agentsCache[a.name]);
                     }
                     out[a.name] = { name: a.name, display_name: agentsCache[a.name].display_name || a.name };
                 });
@@ -1580,6 +1951,52 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             try { return localStorage.getItem(AGENT_AUTO_CORRECT_KEY) === '1'; } catch (e) { return false; }
         }
 
+        function extractAgentFingerprintPayload(agent) {
+            if (!agent || typeof agent !== 'object') {
+                return null;
+            }
+            const tempValue = Number(agent.temperature);
+            const topPValue = Number(agent.top_p);
+            return {
+                prompt: String(agent.prompt || ''),
+                model: String(agent.model || ''),
+                temperature: Number.isFinite(tempValue) ? tempValue : null,
+                top_p: Number.isFinite(topPValue) ? topPValue : null,
+                reasoning_effort: String(agent.reasoning_effort || ''),
+            };
+        }
+
+        function cacheAgentFingerprint(name, agent) {
+            if (!name) {
+                return null;
+            }
+            if (agent && typeof agent === 'object') {
+                const payload = extractAgentFingerprintPayload(agent);
+                const serialized = JSON.stringify(payload);
+                const hash = computeSimpleHash(serialized);
+                const record = { hash, serialized };
+                agentFingerprintCache.set(name, record);
+                return record;
+            }
+            return agentFingerprintCache.get(name) || null;
+        }
+
+        function computeAgentFingerprint(name) {
+            if (!name) {
+                return '';
+            }
+            const agent = agentsCache[name];
+            const record = cacheAgentFingerprint(name, agent);
+            if (record && typeof record.hash === 'number') {
+                return `${name}:${record.hash}`;
+            }
+            const cached = agentFingerprintCache.get(name);
+            if (cached && typeof cached.hash === 'number') {
+                return `${name}:${cached.hash}`;
+            }
+            return name;
+        }
+
         async function renderAgentSelector() {
             const select = document.getElementById('agent-select');
             const spinnerWrapper = document.getElementById('agent-select-spinner');
@@ -1598,7 +2015,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 for (const n of defaults) {
                     await fetch('/agents/save', {
                         method: 'POST', headers: {'Content-Type':'application/json'},
-                        body: JSON.stringify({ name: n, prompt: DEFAULT_AGENT_PROMPT, temperature: 0.2, top_p: 1.0 })
+                        body: JSON.stringify({ name: n, prompt: DEFAULT_AGENT_PROMPT, temperature: 0.2, top_p: 1.0, model: DEFAULT_AGENT_MODEL, reasoning_effort: DEFAULT_REASONING_EFFORT })
                     });
                 }
                 if (spinnerWrapper) spinnerWrapper.style.display = 'none';
@@ -1650,19 +2067,93 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     }
                     const res = await fetch(`/agents/get?name=${encodeURIComponent(name)}`, { cache: 'no-store' });
                     if (!res.ok) {
-                        setAgentFields({name:'', prompt:'', temperature:0.2, top_p:1.0});
+                        setAgentFields({name:'', prompt:'', temperature:0.2, top_p:1.0, model: DEFAULT_AGENT_MODEL, reasoning_effort: DEFAULT_REASONING_EFFORT});
                         persistSelectedAgent('');
                         return;
                     }
                     const agent = await res.json();
                     // populate cache and use it
                     agentsCache[name] = agent || {};
+                    if (!agentsCache[name].model) {
+                        agentsCache[name].model = DEFAULT_AGENT_MODEL;
+                    }
+                    const effort = (agentsCache[name].reasoning_effort && typeof agentsCache[name].reasoning_effort === 'string') ? agentsCache[name].reasoning_effort.trim().toLowerCase() : '';
+                    agentsCache[name].reasoning_effort = ['low','medium','high'].includes(effort) ? effort : DEFAULT_REASONING_EFFORT;
                     setAgentFields(agentsCache[name]);
                     persistSelectedAgent(name);
             } catch (err) {
                 console.warn('Nelze načíst agenta:', err);
-                setAgentFields({name:'', prompt:'', temperature:0.2, top_p:1.0});
+                setAgentFields({name:'', prompt:'', temperature:0.2, top_p:1.0, model: DEFAULT_AGENT_MODEL, reasoning_effort: DEFAULT_REASONING_EFFORT});
             }
+        }
+
+        function ensureModelOption(selectEl, value) {
+            if (!selectEl || !value) {
+                return;
+            }
+            const exists = Array.from(selectEl.options || []).some(option => option.value === value);
+            if (!exists) {
+                const option = document.createElement('option');
+                option.value = value;
+                option.textContent = value;
+                selectEl.appendChild(option);
+            }
+        }
+
+        function normalizeModelId(model) {
+            return String(model || '').trim().toLowerCase();
+        }
+
+        function isReasoningModel(model) {
+            const normalized = normalizeModelId(model);
+            if (!normalized) {
+                return false;
+            }
+            for (const prefix of REASONING_MODELS) {
+                const lower = prefix.toLowerCase();
+                if (normalized === lower || normalized.startsWith(`${lower}-`)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        function updateReasoningUI(model) {
+            const wrapper = document.getElementById('agent-reasoning-wrapper');
+            const select = document.getElementById('agent-reasoning-effort');
+            const shouldShow = isReasoningModel(model);
+            if (wrapper) {
+                wrapper.style.display = shouldShow ? 'inline-flex' : 'none';
+            }
+            if (!shouldShow && select) {
+                select.value = DEFAULT_REASONING_EFFORT;
+            }
+            scheduleThumbnailDrawerHeightSync();
+        }
+
+        function autoResizeTextarea(textarea) {
+            if (!textarea) return;
+            if (!textarea.dataset.minHeight) {
+                const computed = window.getComputedStyle(textarea);
+                const lineHeight = parseFloat(computed.lineHeight) || 0;
+                const rows = parseInt(textarea.getAttribute('rows') || '0', 10);
+                const paddingTop = parseFloat(computed.paddingTop) || 0;
+                const paddingBottom = parseFloat(computed.paddingBottom) || 0;
+                const borderTop = parseFloat(computed.borderTopWidth) || 0;
+                const borderBottom = parseFloat(computed.borderBottomWidth) || 0;
+                const estimated = rows && lineHeight ? (rows * lineHeight) + paddingTop + paddingBottom + borderTop + borderBottom : textarea.clientHeight;
+                textarea.dataset.minHeight = String(estimated || 0);
+            }
+            const minHeight = parseFloat(textarea.dataset.minHeight || '0') || 0;
+            textarea.style.height = 'auto';
+            const newHeight = textarea.scrollHeight;
+            if (newHeight && newHeight > 0) {
+                textarea.style.height = `${Math.max(newHeight, minHeight)}px`;
+            } else if (minHeight) {
+                textarea.style.height = `${minHeight}px`;
+            }
+            delete textarea.dataset.needsResize;
+            scheduleThumbnailDrawerHeightSync();
         }
 
         function setAgentFields(agent) {
@@ -1672,10 +2163,43 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             const tempNum = document.getElementById('agent-temperature-number');
             const topRange = document.getElementById('agent-top-p');
             const topNum = document.getElementById('agent-top-p-number');
+            const modelEl = document.getElementById('agent-model');
+            const reasoningEl = document.getElementById('agent-reasoning-effort');
             if (nameEl) nameEl.value = agent.name || '';
             if (promptEl) {
                 const promptValue = (agent.prompt && typeof agent.prompt === 'string' && agent.prompt.trim()) ? agent.prompt : DEFAULT_AGENT_PROMPT;
                 promptEl.value = promptValue;
+                if (!promptEl.dataset.autoresizeBound) {
+                    promptEl.dataset.autoresizeBound = 'true';
+                    promptEl.addEventListener('input', () => autoResizeTextarea(promptEl));
+                }
+                if (promptEl.offsetParent !== null) {
+                    requestAnimationFrame(() => autoResizeTextarea(promptEl));
+                }
+            }
+            if (modelEl) {
+                const candidate = (agent && typeof agent.model === 'string' && agent.model.trim()) ? agent.model.trim() : DEFAULT_AGENT_MODEL;
+                AVAILABLE_AGENT_MODELS.forEach(value => ensureModelOption(modelEl, value));
+                ensureModelOption(modelEl, candidate);
+                modelEl.value = candidate;
+                updateReasoningUI(candidate);
+                if (agent && typeof agent === 'object') {
+                    agent.model = candidate;
+                }
+                if (reasoningEl) {
+                    const currentReasoning = (agent && typeof agent.reasoning_effort === 'string' && agent.reasoning_effort.trim()) ? agent.reasoning_effort.trim().toLowerCase() : DEFAULT_REASONING_EFFORT;
+                    const normalizedReasoning = ['low', 'medium', 'high'].includes(currentReasoning) ? currentReasoning : DEFAULT_REASONING_EFFORT;
+                    reasoningEl.value = normalizedReasoning;
+                    if (agent && typeof agent === 'object') {
+                        agent.reasoning_effort = normalizedReasoning;
+                    }
+                }
+            }
+            if (!modelEl) {
+                updateReasoningUI(DEFAULT_AGENT_MODEL);
+            }
+            if (modelEl && !reasoningEl) {
+                updateReasoningUI(modelEl.value);
             }
             if (tempRange) tempRange.value = (agent.temperature !== undefined ? agent.temperature : 0.2);
             if (tempNum) tempNum.value = (agent.temperature !== undefined ? agent.temperature : 0.2);
@@ -1700,6 +2224,8 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             const promptEl = document.getElementById('agent-prompt');
             const tempNum = document.getElementById('agent-temperature-number');
             const topNum = document.getElementById('agent-top-p-number');
+            const modelEl = document.getElementById('agent-model');
+            const reasoningEl = document.getElementById('agent-reasoning-effort');
             if (!nameEl) return;
             const name = String(nameEl.value || '').trim();
             if (!name) {
@@ -1711,11 +2237,16 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             if (!Number.isFinite(tempVal)) tempVal = 0.0;
             let topVal = parseFloat(topNum ? topNum.value : '1.0');
             if (!Number.isFinite(topVal)) topVal = 1.0;
+            const modelValue = modelEl ? String(modelEl.value || '').trim() : '';
+            const reasoningValueRaw = reasoningEl ? String(reasoningEl.value || '').trim().toLowerCase() : DEFAULT_REASONING_EFFORT;
+            const reasoningValue = ['low','medium','high'].includes(reasoningValueRaw) ? reasoningValueRaw : DEFAULT_REASONING_EFFORT;
             const payload = {
                 name,
                 prompt: promptEl ? promptEl.value : '',
                 temperature: tempVal,
                 top_p: topVal,
+                model: modelValue || DEFAULT_AGENT_MODEL,
+                reasoning_effort: reasoningValue,
             };
             try {
                 const res = await fetch('/agents/save', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
@@ -1726,9 +2257,20 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 const data = await res.json().catch(() => null);
                 const stored = (data && data.stored_name) ? data.stored_name : name;
                 const agent = (data && data.agent) ? data.agent : payload;
+                if (!agent.model) {
+                    agent.model = payload.model || DEFAULT_AGENT_MODEL;
+                }
+                if (!agent.reasoning_effort) {
+                    agent.reasoning_effort = payload.reasoning_effort || DEFAULT_REASONING_EFFORT;
+                }
 
                 // update in-memory cache and DOM without re-fetching everything
                 agentsCache[stored] = agent;
+                cacheAgentFingerprint(stored, agent);
+                if (stored !== name) {
+                    delete agentsCache[name];
+                    agentFingerprintCache.delete(name);
+                }
                 if (!agent.display_name) agent.display_name = agent.name || stored;
 
                 const select = document.getElementById('agent-select');
@@ -1752,8 +2294,10 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
 
                 // update UI fields from saved agent
                 setAgentFields(agent || payload);
+                showTooltip('agent-save-tooltip', 'Agent uložen');
             } catch (err) {
                 alert('Nelze uložit agenta: ' + err);
+                showTooltip('agent-save-tooltip', 'Uložení selhalo', 2600);
             }
         }
 
@@ -1769,6 +2313,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 const currentSel = loadSelectedAgent();
                 // remove from in-memory cache and DOM
                 delete agentsCache[name];
+                agentFingerprintCache.delete(name);
                 const select = document.getElementById('agent-select');
                 if (select) {
                     const opt = select.querySelector(`option[value="${name}"]`);
@@ -1783,7 +2328,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                         persistSelectedAgent(newSel);
                         if (agentsCache[newSel]) setAgentFields(agentsCache[newSel]);
                     } else {
-                        setAgentFields({name:'', prompt:'', temperature:0.2, top_p:1.0});
+                setAgentFields({name:'', prompt:'', temperature:0.2, top_p:1.0, model: DEFAULT_AGENT_MODEL, reasoning_effort: DEFAULT_REASONING_EFFORT});
                     }
                 }
             } catch (err) {
@@ -1900,6 +2445,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 statusEl.style.color = '';
                 statusEl.style.fontWeight = '';
                 textEl.textContent = '';
+                scheduleThumbnailDrawerHeightSync();
                 return;
             }
 
@@ -1916,6 +2462,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 statusEl.style.fontWeight = '';
             }
             textEl.textContent = normalizedBody;
+            scheduleThumbnailDrawerHeightSync();
         }
 
         function formatHtmlForPre(html) {
@@ -1926,6 +2473,18 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         }
 
         function setAgentResultPanels(originalHtml, correctedContent, correctedIsHtml) {
+            lastAgentOriginalHtml = originalHtml || '';
+            lastAgentCorrectedHtml = correctedContent || '';
+            lastAgentCorrectedIsHtml = Boolean(correctedIsHtml);
+            if (!originalHtml || !correctedContent) {
+                lastAgentCacheBaseKey = null;
+            }
+            if (!originalHtml) {
+                lastAgentOriginalDocumentJson = '';
+            }
+            if (!correctedContent) {
+                lastAgentCorrectedDocumentJson = '';
+            }
             const container = document.getElementById('agent-results');
             const originalEl = document.getElementById('agent-result-original');
             const correctedEl = document.getElementById('agent-result-corrected');
@@ -1944,6 +2503,8 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 container.style.display = 'none';
                 originalEl.innerHTML = '';
                 correctedEl.innerHTML = '';
+                renderAgentDiff(null, agentDiffMode, { hidden: true });
+                scheduleThumbnailDrawerHeightSync();
                 return;
             }
 
@@ -1962,9 +2523,230 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             } else {
                 correctedEl.innerHTML = '<div class="muted">Agent nevrátil HTML náhled.</div>';
             }
+
+            const shouldHideDiff = !(originalHtml && correctedContent);
+            renderAgentDiff(null, agentDiffMode, { hidden: shouldHideDiff });
+            scheduleThumbnailDrawerHeightSync();
         }
 
-        async function runSelectedAgent() {
+        function loadStoredAgentDiffMode() {
+            try {
+                const stored = localStorage.getItem(AGENT_DIFF_MODE_STORAGE_KEY);
+                if (stored === AGENT_DIFF_MODES.WORD || stored === AGENT_DIFF_MODES.CHAR) {
+                    return stored;
+                }
+            } catch (error) {
+                console.warn('Nelze načíst uložený režim agent diffu:', error);
+            }
+            return AGENT_DIFF_MODES.WORD;
+        }
+
+        function persistAgentDiffMode(mode) {
+            try {
+                if (mode === AGENT_DIFF_MODES.WORD || mode === AGENT_DIFF_MODES.CHAR) {
+                    localStorage.setItem(AGENT_DIFF_MODE_STORAGE_KEY, mode);
+                }
+            } catch (error) {
+                console.warn('Nelze uložit režim agent diffu:', error);
+            }
+        }
+
+        function updateAgentDiffToggleState() {
+            const container = document.getElementById('agent-diff-mode-controls');
+            if (!container) {
+                return;
+            }
+            const buttons = container.querySelectorAll('.agent-diff-toggle');
+            buttons.forEach((button) => {
+                if (!(button instanceof HTMLElement)) {
+                    return;
+                }
+                const mode = button.getAttribute('data-diff-mode');
+                const isActive = mode === agentDiffMode;
+                button.classList.toggle('is-active', Boolean(isActive));
+                button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+            });
+        }
+
+        function renderAgentDiff(diff, mode, options) {
+            const originalEl = document.getElementById('agent-result-original');
+            const correctedEl = document.getElementById('agent-result-corrected');
+            const controls = document.getElementById('agent-diff-mode-controls');
+            updateAgentDiffToggleState();
+            if (!originalEl || !correctedEl) {
+                return;
+            }
+            const shouldHide = Boolean(options && options.hidden);
+            if (!diff || shouldHide) {
+                if (controls) {
+                    controls.style.display = 'none';
+                }
+                scheduleThumbnailDrawerHeightSync();
+                return;
+            }
+            const originalPre = originalEl.querySelector('pre');
+            const correctedPre = correctedEl.querySelector('pre');
+            if (diff.original && originalPre) {
+                originalPre.innerHTML = diff.original;
+            } else if (diff.original && !originalPre) {
+                originalEl.innerHTML = `<pre>${diff.original}</pre>`;
+            }
+            if (diff.corrected && correctedPre) {
+                correctedPre.innerHTML = diff.corrected;
+            } else if (diff.corrected && !correctedPre) {
+                correctedEl.innerHTML = `<pre>${diff.corrected}</pre>`;
+            }
+            if (controls) {
+                controls.style.display = 'inline-flex';
+            }
+            scheduleThumbnailDrawerHeightSync();
+        }
+
+        async function fetchAgentDiff(originalHtml, correctedHtml, mode) {
+            if (!originalHtml || !correctedHtml) {
+                return null;
+            }
+            try {
+                const response = await fetch('/agents/diff', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        original: originalHtml,
+                        corrected: correctedHtml,
+                        mode: mode || agentDiffMode || AGENT_DIFF_MODES.WORD,
+                    }),
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || !data || data.ok === false) {
+                    const message = data && data.error ? data.error : response.statusText || 'Neznámá chyba';
+                    throw new Error(message);
+                }
+                return data;
+            } catch (error) {
+                console.warn('Agent diff request selhal:', error);
+                return null;
+            }
+        }
+
+        function computeAgentCacheBaseKey() {
+            if (lastAgentCacheBaseKey) {
+                return lastAgentCacheBaseKey;
+            }
+            const select = document.getElementById('agent-select');
+            const name = select && select.value ? String(select.value) : '';
+            if (!name || !lastAgentOriginalHtml) {
+                return null;
+            }
+            const fingerprint = computeAgentFingerprint(name);
+            if (!fingerprint) {
+                return null;
+            }
+            return `${fingerprint}:${computeSimpleHash(lastAgentOriginalHtml)}`;
+        }
+
+        async function requestAgentDiff(originalHtml, correctedHtml, correctedIsHtml, cacheBaseKey) {
+            const originalPayload = lastAgentOriginalDocumentJson || originalHtml;
+            const correctedPayload = lastAgentCorrectedDocumentJson || correctedHtml;
+            if (!originalPayload || !correctedPayload) {
+                renderAgentDiff(null, agentDiffMode, { hidden: true });
+                return null;
+            }
+            const baseKey = cacheBaseKey || computeAgentCacheBaseKey();
+            if (baseKey) {
+                lastAgentCacheBaseKey = baseKey;
+            }
+            agentDiffRequestToken += 1;
+            const requestId = agentDiffRequestToken;
+            const payload = await fetchAgentDiff(originalPayload, correctedPayload, agentDiffMode);
+            if (requestId !== agentDiffRequestToken) {
+                return payload;
+            }
+            const diffData = payload && payload.diff ? payload.diff : null;
+            if (diffData) {
+                renderAgentDiff(diffData, agentDiffMode);
+            } else {
+                renderAgentDiff(null, agentDiffMode, { hidden: true });
+            }
+            if (baseKey && diffData) {
+                const cacheKey = `${baseKey}:${agentDiffMode}`;
+                agentResultCache.set(cacheKey, {
+                    correctedContent: correctedHtml,
+                    correctedIsHtml,
+                    diff: diffData,
+                    mode: agentDiffMode,
+                    originalDocumentJson: lastAgentOriginalDocumentJson,
+                    correctedDocumentJson: lastAgentCorrectedDocumentJson,
+                });
+            }
+            return payload;
+        }
+
+        async function refreshAgentDiff() {
+            updateAgentDiffToggleState();
+            if (!lastAgentOriginalHtml || !lastAgentCorrectedHtml) {
+                renderAgentDiff(null, agentDiffMode, { hidden: true });
+                return;
+            }
+            const baseKey = computeAgentCacheBaseKey();
+            if (baseKey) {
+                const cacheKey = `${baseKey}:${agentDiffMode}`;
+                const cached = agentResultCache.get(cacheKey);
+                if (cached && Object.prototype.hasOwnProperty.call(cached, 'diff')) {
+                    if (cached.originalDocumentJson) {
+                        lastAgentOriginalDocumentJson = cached.originalDocumentJson;
+                    }
+                    if (cached.correctedDocumentJson) {
+                        lastAgentCorrectedDocumentJson = cached.correctedDocumentJson;
+                    }
+                    if (cached.diff) {
+                        renderAgentDiff(cached.diff, cached.mode || agentDiffMode);
+                        return;
+                    }
+                    renderAgentDiff(null, agentDiffMode, { hidden: true });
+                    return;
+                }
+            }
+            renderAgentDiff(null, agentDiffMode, { hidden: true });
+            await requestAgentDiff(lastAgentOriginalHtml, lastAgentCorrectedHtml, lastAgentCorrectedIsHtml, baseKey);
+        }
+
+        function setAgentDiffMode(newMode) {
+            const normalized = newMode === AGENT_DIFF_MODES.CHAR ? AGENT_DIFF_MODES.CHAR : AGENT_DIFF_MODES.WORD;
+            if (agentDiffMode === normalized) {
+                updateAgentDiffToggleState();
+                return;
+            }
+            agentDiffMode = normalized;
+            persistAgentDiffMode(agentDiffMode);
+            updateAgentDiffToggleState();
+            refreshAgentDiff().catch((error) => {
+                console.warn('Agent diff přepočet selhal:', error);
+            });
+        }
+
+        function initializeAgentDiffControls() {
+            agentDiffMode = loadStoredAgentDiffMode();
+            const container = document.getElementById('agent-diff-mode-controls');
+            if (container) {
+                container.addEventListener('click', (event) => {
+                    const target = event.target;
+                    if (!target || !(target instanceof HTMLElement)) {
+                        return;
+                    }
+                    if (!target.matches('.agent-diff-toggle')) {
+                        return;
+                    }
+                    const requestedMode = target.getAttribute('data-diff-mode');
+                    if (!requestedMode) {
+                        return;
+                    }
+                    setAgentDiffMode(requestedMode);
+                });
+            }
+            updateAgentDiffToggleState();
+        }
+
+        async function runSelectedAgent(options = {}) {
             autoRunScheduled = false;
             const select = document.getElementById('agent-select');
             if (!select) return;
@@ -1973,15 +2755,23 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 alert('Žádný agent není vybrán');
                 return;
             }
+            const isAutoInvocation = Boolean(options && options.autoTriggered);
             const pythonHtml = currentResults && currentResults.python ? String(currentResults.python) : '';
             if (!pythonHtml.trim()) {
                 alert('Python výstup je prázdný – nejprve načtěte stránku.');
                 return;
             }
             const auto = document.getElementById('agent-auto-correct');
+            const modelSelect = document.getElementById('agent-model');
+            const reasoningSelect = document.getElementById('agent-reasoning-effort');
             const willAuto = auto && auto.checked;
             persistAutoCorrect(Boolean(willAuto));
             const originalPythonHtml = pythonHtml;
+            const selectedModelRaw = modelSelect ? String(modelSelect.value || '').trim() : '';
+            const cachedAgent = agentsCache[name] || {};
+            const normalizedModel = selectedModelRaw || (cachedAgent.model && String(cachedAgent.model).trim()) || DEFAULT_AGENT_MODEL;
+            const reasoningValueRaw = reasoningSelect ? String(reasoningSelect.value || '').trim().toLowerCase() : (cachedAgent.reasoning_effort || DEFAULT_REASONING_EFFORT);
+            const normalizedReasoning = ['low','medium','high'].includes(reasoningValueRaw) ? reasoningValueRaw : DEFAULT_REASONING_EFFORT;
 
             const pageMeta = {};
             if (currentPage) {
@@ -2008,27 +2798,66 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 book_title: currentBook && currentBook.title ? currentBook.title : '',
                 page_number: currentPage && currentPage.pageNumber ? currentPage.pageNumber : '',
                 page_index: currentPage && typeof currentPage.index === 'number' ? currentPage.index : null,
+                model: normalizedModel,
+                model_override: normalizedModel,
+                reasoning_effort: normalizedReasoning,
             };
 
             const runBtn = document.getElementById('agent-run');
             const originalLabel = runBtn ? runBtn.textContent : '';
 
+            if (!agentsCache[name]) {
+                agentsCache[name] = { name };
+            }
+            agentsCache[name].model = normalizedModel;
+            agentsCache[name].reasoning_effort = normalizedReasoning;
+            cacheAgentFingerprint(name, agentsCache[name]);
+            const agentFingerprint = computeAgentFingerprint(name);
             const pythonHash = computeSimpleHash(pythonHtml);
-            const cacheKey = name ? `${name}:${pythonHash}` : null;
+            const cacheBaseKey = agentFingerprint ? `${agentFingerprint}:${pythonHash}` : null;
+            const cacheKey = cacheBaseKey ? `${cacheBaseKey}:${agentDiffMode}` : null;
+            lastAgentCacheBaseKey = cacheBaseKey;
+            lastAgentOriginalHtml = originalPythonHtml;
+            lastAgentCorrectedHtml = '';
+            lastAgentCorrectedIsHtml = false;
+            lastAgentOriginalDocumentJson = '';
+            lastAgentCorrectedDocumentJson = '';
             const cachedResult = cacheKey ? agentResultCache.get(cacheKey) : null;
 
-            if (cachedResult) {
+            if (cachedResult && isAutoInvocation) {
+                if (cachedResult.originalDocumentJson) {
+                    lastAgentOriginalDocumentJson = cachedResult.originalDocumentJson;
+                }
+                if (cachedResult.correctedDocumentJson) {
+                    lastAgentCorrectedDocumentJson = cachedResult.correctedDocumentJson;
+                }
                 setAgentResultPanels(originalPythonHtml, cachedResult.correctedContent, cachedResult.correctedIsHtml);
+                lastAgentCacheBaseKey = cacheBaseKey;
+                if (cachedResult.diff) {
+                    renderAgentDiff(cachedResult.diff, cachedResult.mode || agentDiffMode);
+                } else if (lastAgentOriginalHtml && lastAgentCorrectedHtml) {
+                    await refreshAgentDiff();
+                } else {
+                    renderAgentDiff(null, agentDiffMode, { hidden: true });
+                }
+                console.info(`[AgentDebug] Použit cache výsledek pro agenta ${name}`);
                 setAgentOutput('', '', 'success');
                 return;
             }
 
+            let startTime = null;
             try {
                 if (runBtn) {
                     runBtn.disabled = true;
                     runBtn.textContent = 'Spouštím...';
                 }
+                startTime = performance.now();
                 setAgentOutput(`Spouštím agenta ${name}...`, '', 'pending');
+                const agentConfig = agentsCache[name] || {};
+                console.groupCollapsed(`[AgentDebug] Request → ${name}`);
+                console.log('Agent config:', agentConfig);
+                console.log('Payload:', payload);
+                console.groupEnd();
                 const response = await fetch('/agents/run', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -2042,8 +2871,30 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 const result = data.result || {};
                 const text = typeof result.text === 'string' ? result.text.trim() : '';
                 const statusParts = [];
+                console.groupCollapsed(`[AgentDebug] Response → ${name}`);
+                console.log('Výsledek:', result);
+                console.groupEnd();
 
                 const parsedDoc = parseAgentResultDocument(text);
+                const originalDocument = result && typeof result.input_document === 'object' ? result.input_document : null;
+                if (originalDocument) {
+                    try {
+                        lastAgentOriginalDocumentJson = JSON.stringify(originalDocument);
+                    } catch (jsonError) {
+                        lastAgentOriginalDocumentJson = '';
+                    }
+                } else {
+                    lastAgentOriginalDocumentJson = '';
+                }
+                if (parsedDoc) {
+                    try {
+                        lastAgentCorrectedDocumentJson = JSON.stringify(parsedDoc);
+                    } catch (jsonError) {
+                        lastAgentCorrectedDocumentJson = '';
+                    }
+                } else {
+                    lastAgentCorrectedDocumentJson = '';
+                }
                 const htmlFromDoc = parsedDoc ? documentBlocksToHtml(parsedDoc) : null;
                 const autoRequested = Boolean(data.auto_correct);
                 if (autoRequested && !htmlFromDoc) {
@@ -2058,22 +2909,42 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     agentResultCache.set(cacheKey, {
                         correctedContent,
                         correctedIsHtml,
+                        mode: agentDiffMode,
+                        originalDocumentJson: lastAgentOriginalDocumentJson,
+                        correctedDocumentJson: lastAgentCorrectedDocumentJson,
                     });
                 }
+
+                if (correctedContent && originalPythonHtml) {
+                    await requestAgentDiff(originalPythonHtml, correctedContent, correctedIsHtml, cacheBaseKey);
+                } else {
+                    renderAgentDiff(null, agentDiffMode, { hidden: true });
+                }
+
+                const elapsedMs = performance.now() - startTime;
+                const elapsedLabel = `${(elapsedMs / 1000).toFixed(2)} s`;
 
                 if (statusParts.length) {
                     const statusText = statusParts.join(' · ');
                     if (statusText.toLowerCase().includes('nelze')) {
-                        setAgentOutput(statusText, '', 'error');
+                        setAgentOutput(statusText, `Hotovo za ${elapsedLabel}`, 'error');
                     } else {
-                        setAgentOutput('', '', 'success');
+                        setAgentOutput(`Hotovo za ${elapsedLabel}`, statusText, 'success');
                     }
                 } else {
-                    setAgentOutput('', '', 'success');
+                    setAgentOutput(`Hotovo za ${elapsedLabel}`, '', 'success');
                 }
             } catch (err) {
+                const elapsedMs = startTime !== null && typeof performance !== 'undefined'
+                    ? performance.now() - startTime
+                    : 0;
+                const elapsedLabel = elapsedMs ? ` · ${(elapsedMs / 1000).toFixed(2)} s` : '';
                 const message = err && err.message ? err.message : String(err);
-                setAgentOutput(`Chyba agenta: ${message}`, '', 'error');
+                setAgentOutput(`Chyba agenta: ${message}${elapsedLabel}`, '', 'error');
+                renderAgentDiff(null, agentDiffMode, { hidden: true });
+                console.groupCollapsed(`[AgentDebug] Chyba → ${name}`);
+                console.error(err);
+                console.groupEnd();
             } finally {
                 if (runBtn) {
                     runBtn.disabled = false;
@@ -2092,9 +2963,10 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             const settings = document.getElementById('agent-settings');
             const saveBtn = document.getElementById('agent-save');
             const deleteBtn = document.getElementById('agent-delete');
+            const modelSelect = document.getElementById('agent-model');
 
             if (select) select.addEventListener('change', updateAgentUIFromSelection);
-            if (runBtn) runBtn.addEventListener('click', runSelectedAgent);
+            if (runBtn) runBtn.addEventListener('click', () => runSelectedAgent({ autoTriggered: false }));
             if (auto) {
                 auto.checked = loadAutoCorrect();
                 auto.addEventListener('change', () => {
@@ -2106,7 +2978,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                         const hasAgent = Boolean(selectEl && selectEl.value);
                         const hasPython = currentResults && typeof currentResults.python === 'string' && currentResults.python.trim().length > 0;
                         if (hasAgent && hasPython && !(runButton && runButton.disabled)) {
-                            runSelectedAgent().catch((error) => {
+                            runSelectedAgent({ autoTriggered: true }).catch((error) => {
                                 console.warn('Automatické spuštění agenta po změně zaškrtávacího políčka selhalo:', error);
                             });
                         }
@@ -2124,15 +2996,57 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     // when opening, refresh fields for the currently selected agent
                     if (nowVisible) {
                         try { await updateAgentUIFromSelection(); } catch (e) { /* ignore */ }
+                        const promptField = document.getElementById('agent-prompt');
+                        if (promptField) {
+                            requestAnimationFrame(() => autoResizeTextarea(promptField));
+                        }
                     }
                     // after layout changes, sync thumbnail drawer sizing to account for new page height
-                    setTimeout(() => {
-                        try { syncThumbnailDrawerHeight(); } catch (e) {}
-                    }, 60);
+                    scheduleThumbnailDrawerHeightSync();
+                    setTimeout(() => scheduleThumbnailDrawerHeightSync(), 80);
                 });
             }
-            if (saveBtn) saveBtn.addEventListener('click', async () => { await saveCurrentAgent(); syncThumbnailDrawerHeight(); });
-            if (deleteBtn) deleteBtn.addEventListener('click', async () => { await deleteCurrentAgent(); syncThumbnailDrawerHeight(); });
+            if (saveBtn) saveBtn.addEventListener('click', async () => { await saveCurrentAgent(); scheduleThumbnailDrawerHeightSync(); });
+            if (deleteBtn) deleteBtn.addEventListener('click', async () => { await deleteCurrentAgent(); scheduleThumbnailDrawerHeightSync(); });
+            const reasoningSelect = document.getElementById('agent-reasoning-effort');
+            if (modelSelect) {
+                AVAILABLE_AGENT_MODELS.forEach(value => ensureModelOption(modelSelect, value));
+                modelSelect.addEventListener('change', () => {
+                    const selectedModel = String(modelSelect.value || '').trim();
+                    updateReasoningUI(selectedModel);
+                    const selectedReasoning = reasoningSelect ? String(reasoningSelect.value || '').trim().toLowerCase() : DEFAULT_REASONING_EFFORT;
+                    const normalizedReasoning = ['low','medium','high'].includes(selectedReasoning) ? selectedReasoning : DEFAULT_REASONING_EFFORT;
+                    const selectEl = document.getElementById('agent-select');
+                    const agentName = selectEl && selectEl.value ? selectEl.value : '';
+                    if (agentName) {
+                        if (!agentsCache[agentName]) {
+                            agentsCache[agentName] = { name: agentName };
+                        }
+                        agentsCache[agentName].model = selectedModel || DEFAULT_AGENT_MODEL;
+                        agentsCache[agentName].reasoning_effort = normalizedReasoning;
+                        cacheAgentFingerprint(agentName, agentsCache[agentName]);
+                    }
+                    scheduleThumbnailDrawerHeightSync();
+                });
+                updateReasoningUI(modelSelect.value);
+            }
+            if (reasoningSelect) {
+                reasoningSelect.addEventListener('change', () => {
+                    const value = String(reasoningSelect.value || '').trim().toLowerCase();
+                    const normalized = ['low','medium','high'].includes(value) ? value : DEFAULT_REASONING_EFFORT;
+                    reasoningSelect.value = normalized;
+                    const selectEl = document.getElementById('agent-select');
+                    const agentName = selectEl && selectEl.value ? selectEl.value : '';
+                    if (agentName) {
+                        if (!agentsCache[agentName]) {
+                            agentsCache[agentName] = { name: agentName, model: DEFAULT_AGENT_MODEL };
+                        }
+                        agentsCache[agentName].reasoning_effort = normalized;
+                        cacheAgentFingerprint(agentName, agentsCache[agentName]);
+                    }
+                    scheduleThumbnailDrawerHeightSync();
+                });
+            }
 
             // wire up syncs
             syncRangeAndNumber(document.getElementById('agent-temperature'), document.getElementById('agent-temperature-number'));
@@ -2463,7 +3377,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 ensureThumbnailObserver();
             }
             if (!thumbnailDrawerCollapsed) {
-                syncThumbnailDrawerHeight();
+                scheduleThumbnailDrawerHeightSync(true);
             }
         }
 
@@ -2574,6 +3488,30 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             }
 
             lastActiveThumbnailUuid = uuid || null;
+        }
+
+        function scheduleThumbnailDrawerHeightSync(immediate = false) {
+            if (immediate) {
+                thumbnailHeightSyncPending = false;
+                try {
+                    syncThumbnailDrawerHeight();
+                } catch (error) {
+                    console.warn('Thumbnail height sync failed:', error);
+                }
+                return;
+            }
+            if (thumbnailHeightSyncPending) {
+                return;
+            }
+            thumbnailHeightSyncPending = true;
+            requestAnimationFrame(() => {
+                thumbnailHeightSyncPending = false;
+                try {
+                    syncThumbnailDrawerHeight();
+                } catch (error) {
+                    console.warn('Thumbnail height sync failed:', error);
+                }
+            });
         }
 
         function syncThumbnailDrawerHeight() {
@@ -2814,7 +3752,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
 
             highlightActiveThumbnail(currentPage ? currentPage.uuid : null);
             updatePageNumberInput();
-            syncThumbnailDrawerHeight();
+            scheduleThumbnailDrawerHeightSync();
         }
 
         function handlePageNumberJump(rawValue) {
@@ -2905,7 +3843,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 loading.setAttribute('aria-hidden', isActive ? 'false' : 'true');
             }
             if (!isActive) {
-                syncThumbnailDrawerHeight();
+                scheduleThumbnailDrawerHeightSync();
             }
         }
 
@@ -3630,6 +4568,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             }
             const value = uuidField.value.trim();
             if (!value) {
+                showTooltip('uuid-copy-tooltip', 'UUID je prázdné');
                 return;
             }
             const fallbackCopy = () => {
@@ -3644,13 +4583,21 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     } else {
                         uuidField.setSelectionRange(value.length, value.length);
                     }
+                    showTooltip('uuid-copy-tooltip', 'UUID zkopírováno');
+                    return true;
                 } catch (error) {
                     console.warn("Nelze zkopírovat UUID do schránky:", error);
+                    showTooltip('uuid-copy-tooltip', 'Kopírování selhalo', 2600);
+                    return false;
                 }
             };
 
             if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
-                navigator.clipboard.writeText(value).catch(() => fallbackCopy());
+                navigator.clipboard.writeText(value)
+                    .then(() => {
+                        showTooltip('uuid-copy-tooltip', 'UUID zkopírováno');
+                    })
+                    .catch(() => fallbackCopy());
             } else {
                 fallbackCopy();
             }
@@ -3675,6 +4622,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             const fallback = () => {
                 uuidField.focus();
                 console.warn('Schránku nelze přečíst - použijte klávesovou zkratku pro vložení.');
+                showTooltip('uuid-paste-tooltip', 'Schránku nelze přečíst', 2600);
             };
 
             if (navigator.clipboard && typeof navigator.clipboard.readText === "function") {
@@ -3684,8 +4632,10 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     uuidField.value = trimmed;
                     setUuidButtonsState();
                     if (trimmed) {
+                        showTooltip('uuid-paste-tooltip', 'UUID vloženo');
                         handleLoadClick();
                     } else {
+                        showTooltip('uuid-paste-tooltip', 'Schránka je prázdná', 2000);
                         uuidField.focus();
                     }
                     return;
@@ -3824,7 +4774,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                         }
                         return;
                     }
-                    runSelectedAgent().catch((error) => {
+                    runSelectedAgent({ autoTriggered: true }).catch((error) => {
                         autoRunScheduled = false;
                         console.warn('Automatické spuštění agenta se nezdařilo:', error);
                     });
@@ -3925,15 +4875,42 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         }
 
         function computeSimpleHash(text) {
+        if (!text) {
+            return 0;
+        }
+        let hash = 0;
+        for (let index = 0; index < text.length; index += 1) {
+            hash = ((hash << 5) - hash) + text.charCodeAt(index);
+            hash |= 0;
+        }
+        return hash >>> 0;
+    }
+
+        function showTooltip(elementId, message, duration = 2200) {
+            if (!elementId) {
+                return;
+            }
+            const el = document.getElementById(elementId);
+            if (!el) {
+                return;
+            }
+            if (tooltipTimers.has(elementId)) {
+                clearTimeout(tooltipTimers.get(elementId));
+                tooltipTimers.delete(elementId);
+            }
+            const text = message ? String(message) : '';
             if (!text) {
-                return 0;
+                el.classList.remove('is-visible');
+                el.textContent = '';
+                return;
             }
-            let hash = 0;
-            for (let index = 0; index < text.length; index += 1) {
-                hash = ((hash << 5) - hash) + text.charCodeAt(index);
-                hash |= 0;
-            }
-            return hash >>> 0;
+            el.textContent = text;
+            el.classList.add('is-visible');
+            const timerId = window.setTimeout(() => {
+                el.classList.remove('is-visible');
+                tooltipTimers.delete(elementId);
+            }, Math.max(1000, duration || 0));
+            tooltipTimers.set(elementId, timerId);
         }
 
         function buildResultCacheKey(pythonHtml, tsHtml, pageUuid) {
@@ -4173,6 +5150,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             initializeThumbnailDrawer();
             initializeDiffControls();
             initializeAgentUI();
+            initializeAgentDiffControls();
 
             const previewContainer = document.getElementById("page-preview");
             const largeBox = document.getElementById("preview-large");
@@ -4267,7 +5245,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         window.addEventListener("resize", () => {
             refreshLargePreviewSizing();
             setLargePreviewActive();
-            syncThumbnailDrawerHeight();
+            scheduleThumbnailDrawerHeightSync(true);
         });
     </script>
     <div id="alto-modal" class="modal" tabindex="-1">
@@ -4281,6 +5259,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
     </div>
 </body>
 </html>'''
+            html = html.replace('__DEFAULT_AGENT_MODEL__', json.dumps(DEFAULT_MODEL))
             html = html.replace('__DEFAULT_AGENT_PROMPT__', json.dumps(DEFAULT_AGENT_PROMPT_TEXT))
             self.wfile.write(html.encode('utf-8'))
 
@@ -4507,6 +5486,33 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(json.dumps({'ok': False, 'error': str(err)}).encode('utf-8'))
             return
 
+        if path == '/agents/diff':
+            original_html = ''
+            corrected_html = ''
+            mode = DIFF_MODE_WORD
+            if isinstance(payload, dict):
+                original_html = str(payload.get('original') or payload.get('original_html') or '')
+                corrected_html = str(payload.get('corrected') or payload.get('corrected_html') or '')
+                requested_mode = payload.get('mode')
+                if isinstance(requested_mode, str):
+                    mode = requested_mode
+            try:
+                diff_result = build_agent_diff(original_html, corrected_html, mode)
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.end_headers()
+                response = {
+                    'ok': True,
+                    'diff': diff_result,
+                }
+                self.wfile.write(json.dumps(response, ensure_ascii=False).encode('utf-8'))
+            except Exception as err:
+                self.send_response(500)
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.end_headers()
+                self.wfile.write(json.dumps({'ok': False, 'error': str(err)}).encode('utf-8'))
+            return
+
         if path == '/agents/save':
             stored = write_agent_file(payload if isinstance(payload, dict) else {})
             # write_agent_file now returns canonical name on success, or None on failure
@@ -4552,8 +5558,17 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(json.dumps({'ok': False, 'error': 'agent_not_found'}).encode('utf-8'))
                 return
+            model_override = str(request_payload.get('model_override') or '').strip()
+            if not model_override:
+                model_override = str(request_payload.get('model') or '').strip()
+            reasoning_override = str(request_payload.get('reasoning_effort') or '').strip().lower()
+            agent_for_run = dict(agent)
+            if model_override:
+                agent_for_run['model'] = model_override
+            if reasoning_override in {'low', 'medium', 'high'}:
+                agent_for_run['reasoning_effort'] = reasoning_override
             try:
-                result = run_agent_via_responses(agent, request_payload)
+                result = run_agent_via_responses(agent_for_run, request_payload)
             except AgentRunnerError as err:
                 self.send_response(400)
                 self.send_header('Content-Type', 'application/json; charset=utf-8')

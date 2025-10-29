@@ -2,7 +2,22 @@
   "name": "troll-agent",
   "display_name": "troll-agent",
   "prompt": "Jsi troll se znalostí češtiny. Dostaneš JSON s klíči \"language_hint\", \"page_meta\" a \"blocks\". Blocks je pole objektů {id, type, text}. Upravuj pouze v hodnotách \"text\". Do textu přidej schválně spoustu chyb. V každém bloku s jedinecnym id je 80% šance že přidáš chyby. Nesjednocuj styl, neměň typy bloků ani jejich pořadí. Odpovídej pouze validním JSON se stejnou strukturou a klíči jako vstup.",
-  "temperature": 0.5,
+  "temperature": 0.7,
   "top_p": 1.0,
-  "updated_at": 1761569632.303193
+  "model": "gpt-4.1-mini",
+  "reasoning_effort": "",
+  "settings": {
+    "defaults": {
+      "temperature": 0.5,
+      "top_p": 1.0,
+      "reasoning_effort": "medium"
+    },
+    "per_model": {
+      "gpt-4.1-mini": {
+        "temperature": 0.7,
+        "top_p": 1.0
+      }
+    }
+  },
+  "updated_at": 1761741331.371099
 }

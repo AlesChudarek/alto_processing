@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -54,6 +54,63 @@ def _normalize_reasoning_effort(value: Optional[Any]) -> str:
         return "medium"
     normalized = str(value).strip().lower()
     return normalized if normalized in REASONING_EFFORT_VALUES else "medium"
+
+
+def _clamp_float(value: Any, minimum: float, maximum: float, default: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if number < minimum:
+        return minimum
+    if number > maximum:
+        return maximum
+    return number
+
+
+def _extract_settings(agent: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
+    settings = agent.get("settings")
+    defaults: Dict[str, Any] = {}
+    per_model: Dict[str, Dict[str, Any]] = {}
+    if isinstance(settings, dict):
+        raw_defaults = settings.get("defaults")
+        if isinstance(raw_defaults, dict):
+            defaults = raw_defaults
+        raw_per_model = settings.get("per_model")
+        if isinstance(raw_per_model, dict):
+            per_model = raw_per_model  # type: ignore[assignment]
+    return defaults, per_model
+
+
+def _get_effective_settings(agent: Dict[str, Any], model: str) -> Dict[str, Any]:
+    defaults, per_model = _extract_settings(agent)
+    model_settings = per_model.get(model) if isinstance(per_model.get(model), dict) else {}
+    capabilities = _get_model_capabilities(model)
+    result: Dict[str, Any] = {}
+    if capabilities.get("temperature"):
+        if isinstance(model_settings, dict) and "temperature" in model_settings:
+            result["temperature"] = _clamp_float(model_settings["temperature"], 0.0, 2.0, 0.0)
+        elif "temperature" in defaults:
+            result["temperature"] = _clamp_float(defaults["temperature"], 0.0, 2.0, 0.0)
+        elif "temperature" in agent:
+            result["temperature"] = _clamp_float(agent["temperature"], 0.0, 2.0, 0.0)
+    if capabilities.get("top_p"):
+        if isinstance(model_settings, dict) and "top_p" in model_settings:
+            result["top_p"] = _clamp_float(model_settings["top_p"], 0.0, 1.0, 1.0)
+        elif "top_p" in defaults:
+            result["top_p"] = _clamp_float(defaults["top_p"], 0.0, 1.0, 1.0)
+        elif "top_p" in agent:
+            result["top_p"] = _clamp_float(agent["top_p"], 0.0, 1.0, 1.0)
+    if capabilities.get("reasoning"):
+        reasoning_source = None
+        if isinstance(model_settings, dict) and "reasoning_effort" in model_settings:
+            reasoning_source = model_settings["reasoning_effort"]
+        elif "reasoning_effort" in defaults:
+            reasoning_source = defaults["reasoning_effort"]
+        elif "reasoning_effort" in agent:
+            reasoning_source = agent["reasoning_effort"]
+        result["reasoning_effort"] = _normalize_reasoning_effort(reasoning_source)
+    return result
 
 BLOCK_TAGS = ("h1", "h2", "h3", "p", "div", "small", "note", "blockquote", "li")
 
@@ -278,10 +335,27 @@ def run_agent(agent: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
     client = _get_client()
 
     capabilities = _get_model_capabilities(model)
-    temperature = agent.get("temperature")
-    top_p = agent.get("top_p")
-    reasoning_effort_value = payload.get("reasoning_effort") or agent.get("reasoning_effort")
-    normalized_reasoning_effort = _normalize_reasoning_effort(reasoning_effort_value)
+    effective_settings = _get_effective_settings(agent, model)
+    payload_temperature = payload.get("temperature") if isinstance(payload, dict) else None
+    payload_top_p = payload.get("top_p") if isinstance(payload, dict) else None
+    payload_reasoning = payload.get("reasoning_effort") if isinstance(payload, dict) else None
+
+    temperature = None
+    if capabilities.get("temperature"):
+        if payload_temperature is not None:
+            temperature = _clamp_float(payload_temperature, 0.0, 2.0, effective_settings.get("temperature", 0.0))
+        else:
+            temperature = effective_settings.get("temperature")
+
+    top_p = None
+    if capabilities.get("top_p"):
+        if payload_top_p is not None:
+            top_p = _clamp_float(payload_top_p, 0.0, 1.0, effective_settings.get("top_p", 1.0))
+        else:
+            top_p = effective_settings.get("top_p")
+
+    reasoning_source = payload_reasoning or effective_settings.get("reasoning_effort")
+    normalized_reasoning_effort = _normalize_reasoning_effort(reasoning_source)
     supports_temperature = capabilities.get("temperature", True)
     supports_top_p = capabilities.get("top_p", True)
     supports_reasoning = capabilities.get("reasoning", False)
@@ -300,18 +374,22 @@ def run_agent(agent: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
         ],
     }
     if supports_temperature and temperature is not None:
-        try:
-            request_kwargs["temperature"] = float(temperature)
-        except (TypeError, ValueError):
-            pass
-    elif not supports_temperature and temperature is not None:
+        request_kwargs["temperature"] = _clamp_float(
+            temperature,
+            0.0,
+            2.0,
+            effective_settings.get("temperature", 0.0),
+        )
+    elif not supports_temperature and payload_temperature is not None:
         print(f"[AgentDebug] Model {model} ignoruje parametr temperature – nebude odeslán.")
     if supports_top_p and top_p is not None:
-        try:
-            request_kwargs["top_p"] = float(top_p)
-        except (TypeError, ValueError):
-            pass
-    elif not supports_top_p and top_p is not None:
+        request_kwargs["top_p"] = _clamp_float(
+            top_p,
+            0.0,
+            1.0,
+            effective_settings.get("top_p", 1.0),
+        )
+    elif not supports_top_p and payload_top_p is not None:
         print(f"[AgentDebug] Model {model} ignoruje parametr top_p – nebude odeslán.")
     if supports_reasoning:
         request_kwargs["reasoning"] = {"effort": normalized_reasoning_effort}

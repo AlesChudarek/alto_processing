@@ -25,7 +25,12 @@ from typing import Dict, Optional, List, Tuple
 
 # Import původního procesoru
 from main_processor import AltoProcessor, DEFAULT_API_BASES
-from agent_runner import AgentRunnerError, run_agent as run_agent_via_responses, DEFAULT_MODEL
+from agent_runner import (
+    AgentRunnerError,
+    run_agent as run_agent_via_responses,
+    DEFAULT_MODEL,
+    REASONING_PREFIXES,
+)
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -509,6 +514,43 @@ def sanitize_agent_name(name: str) -> Optional[str]:
         return s
     return None
 
+def _is_reasoning_model_id(model: str) -> bool:
+    normalized = (model or "").strip().lower()
+    if not normalized:
+        return False
+    for prefix in REASONING_PREFIXES:
+        lowered = prefix.lower()
+        if normalized == lowered or normalized.startswith(f"{lowered}-"):
+            return True
+    return False
+
+def _clamp_float(value, minimum: float, maximum: float, default: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if number < minimum:
+        return minimum
+    if number > maximum:
+        return maximum
+    return number
+
+def _normalize_reasoning_effort_value(value, default: str = "medium") -> str:
+    if value is None:
+        return default
+    normalized = str(value).strip().lower()
+    return normalized if normalized in {"low", "medium", "high"} else default
+
+def _supports_temperature(model: str) -> bool:
+    return not _is_reasoning_model_id(model)
+
+def _supports_top_p(model: str) -> bool:
+    return not _is_reasoning_model_id(model)
+
+def _supports_reasoning(model: str) -> bool:
+    return _is_reasoning_model_id(model)
+
+
 def agent_filepath(name: str) -> Path:
     return AGENTS_DIR / f"{name}.json"
 
@@ -562,45 +604,116 @@ def write_agent_file(data: dict) -> bool:
     ensure_agents_dir()
     p = agent_filepath(nm)
     # sanitize and limit
-    # parse and clamp numeric fields carefully so that 0 values are preserved
-    try:
-        temp_val = data.get('temperature') if isinstance(data, dict) else None
-        if temp_val is None:
-            temperature = 0.0
-        else:
-            temperature = float(temp_val)
-    except Exception:
-        temperature = 0.0
-    try:
-        top_val = data.get('top_p') if isinstance(data, dict) else None
-        if top_val is None:
-            top_p = 1.0
-        else:
-            top_p = float(top_val)
-    except Exception:
-        top_p = 1.0
-    # clamp to valid range
-    temperature = max(0.0, min(1.0, temperature))
-    top_p = max(0.0, min(1.0, top_p))
+    raw_temperature = data.get('temperature') if isinstance(data, dict) else None
+    raw_top_p = data.get('top_p') if isinstance(data, dict) else None
+    temperature = _clamp_float(raw_temperature, 0.0, 2.0, 0.0)
+    top_p = _clamp_float(raw_top_p, 0.0, 1.0, 1.0)
     try:
         raw_model = str(data.get('model') or '').strip()
     except Exception:
         raw_model = ''
     model_value = raw_model or DEFAULT_MODEL
-    try:
-        raw_reasoning = str(data.get('reasoning_effort') or '').strip().lower()
-    except Exception:
-        raw_reasoning = ''
-    reasoning_value = raw_reasoning if raw_reasoning in {'low', 'medium', 'high'} else ''
+    base_reasoning = _normalize_reasoning_effort_value(
+        data.get('reasoning_effort') if isinstance(data, dict) else None,
+        ''
+    )
+    reasoning_value = base_reasoning if _supports_reasoning(model_value) else ''
+
+    settings_payload = data.get('settings') if isinstance(data, dict) else {}
+    defaults_input = settings_payload.get('defaults') if isinstance(settings_payload, dict) else {}
+    per_model_input = settings_payload.get('per_model') if isinstance(settings_payload, dict) else {}
+
+    defaults_temperature = _clamp_float(
+        defaults_input.get('temperature') if isinstance(defaults_input, dict) else None,
+        0.0,
+        2.0,
+        temperature,
+    )
+    defaults_top_p = _clamp_float(
+        defaults_input.get('top_p') if isinstance(defaults_input, dict) else None,
+        0.0,
+        1.0,
+        top_p,
+    )
+    defaults_reasoning = _normalize_reasoning_effort_value(
+        defaults_input.get('reasoning_effort') if isinstance(defaults_input, dict) else None,
+        reasoning_value or 'medium',
+    )
+    defaults_settings = {
+        'temperature': defaults_temperature,
+        'top_p': defaults_top_p,
+        'reasoning_effort': defaults_reasoning,
+    }
+
+    per_model_settings: Dict[str, Dict[str, object]] = {}
+    if isinstance(per_model_input, dict):
+        for model_key_raw, settings in per_model_input.items():
+            model_key = str(model_key_raw or '').strip()
+            if not model_key:
+                continue
+            if not isinstance(settings, dict):
+                settings = {}
+            sanitized_entry: Dict[str, object] = {}
+            if _supports_temperature(model_key) and 'temperature' in settings:
+                sanitized_entry['temperature'] = _clamp_float(
+                    settings.get('temperature'),
+                    0.0,
+                    2.0,
+                    defaults_temperature,
+                )
+            if _supports_top_p(model_key) and 'top_p' in settings:
+                sanitized_entry['top_p'] = _clamp_float(
+                    settings.get('top_p'),
+                    0.0,
+                    1.0,
+                    defaults_top_p,
+                )
+            if _supports_reasoning(model_key) and 'reasoning_effort' in settings:
+                sanitized_entry['reasoning_effort'] = _normalize_reasoning_effort_value(
+                    settings.get('reasoning_effort'),
+                    defaults_reasoning,
+                )
+            per_model_settings[model_key] = sanitized_entry
+
+    default_entry = per_model_settings.setdefault(model_value, {})
+    if _supports_temperature(model_value):
+        default_entry['temperature'] = _clamp_float(
+            default_entry.get('temperature', temperature),
+            0.0,
+            2.0,
+            temperature,
+        )
+    else:
+        default_entry.pop('temperature', None)
+    if _supports_top_p(model_value):
+        default_entry['top_p'] = _clamp_float(
+            default_entry.get('top_p', top_p),
+            0.0,
+            1.0,
+            top_p,
+        )
+    else:
+        default_entry.pop('top_p', None)
+    if _supports_reasoning(model_value):
+        default_entry['reasoning_effort'] = _normalize_reasoning_effort_value(
+            default_entry.get('reasoning_effort') or reasoning_value or defaults_reasoning,
+            defaults_reasoning,
+        )
+    else:
+        default_entry.pop('reasoning_effort', None)
 
     safe = {
         'name': nm,
         'display_name': display_name,
         'prompt': str(data.get('prompt') or '')[:200000],
-        'temperature': temperature,
-        'top_p': top_p,
+        'temperature': default_entry.get('temperature', temperature),
+        'top_p': default_entry.get('top_p', top_p),
         'model': model_value,
-        'reasoning_effort': reasoning_value,
+        'reasoning_effort': default_entry.get('reasoning_effort', '') if _supports_reasoning(model_value) else '',
+        'settings': {
+            'defaults': defaults_settings,
+            'per_model': per_model_settings,
+        },
         'updated_at': time.time(),
     }
     if not p.parent.exists():
@@ -1584,7 +1697,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 <div class="form-group uuid-group">
                     <label for="uuid">UUID stránky nebo dokumentu:</label>
                     <div class="uuid-input-group">
-                        <input type="text" id="uuid" placeholder="Zadejte UUID (např. 673320dd-0071-4a03-bf82-243ee206bc0b)" value="673320dd-0071-4a03-bf82-243ee206bc0b" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false">
+                        <input type="text" id="uuid" placeholder="Zadejte UUID (např. dcbff727-d3cd-4e8b-9309-9a8647ddaba5)" value="dcbff727-d3cd-4e8b-9309-9a8647ddaba5" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false">
                         <span class="inline-tooltip-anchor">
                             <button type="button" id="uuid-copy" title="Zkopírovat UUID" aria-label="Zkopírovat UUID">📋</button>
                             <div id="uuid-copy-tooltip" class="inline-tooltip" role="status" aria-live="polite"></div>
@@ -1677,30 +1790,6 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                         <div id="agent-select-spinner" title="Načítám agenty" style="margin-left:8px;display:none;">
                             <span class="inline-spinner" aria-hidden="true"></span>
                         </div>
-                        <div style="display:inline-flex;align-items:center;gap:6px;margin-left:16px;">
-                            <label for="agent-model" style="margin:0;font-weight:600;">Model:</label>
-                            <select id="agent-model" aria-label="Vyberte model" style="min-width:170px;">
-                                <option value="gpt-4.1-mini" selected>gpt-4.1-mini</option>
-                                <option value="gpt-4.1">gpt-4.1</option>
-                                <option value="gpt-4o-mini">gpt-4o-mini</option>
-                                <option value="gpt-4o">gpt-4o</option>
-                                <option value="gpt-4-0613">gpt-4-0613</option>
-                                <option value="gpt-3.5-turbo">gpt-3.5-turbo</option>
-                                <option value="gpt-5">gpt-5</option>
-                                <option value="o1">o1</option>
-                                <option value="o1-mini">o1-mini</option>
-                                <option value="o3">o3</option>
-                                <option value="o3-mini">o3-mini</option>
-                            </select>
-                        </div>
-                        <div id="agent-reasoning-wrapper" style="display:none;align-items:center;gap:6px;margin-left:12px;">
-                            <label for="agent-reasoning-effort" style="margin:0;font-weight:600;">Reasoning:</label>
-                            <select id="agent-reasoning-effort" aria-label="Zvolte úroveň usuzování" style="min-width:130px;">
-                                <option value="low">Low</option>
-                                <option value="medium" selected>Medium</option>
-                                <option value="high">High</option>
-                            </select>
-                        </div>
                         <div style="margin-left:auto;display:flex;align-items:center;gap:8px;">
                             <label style="display:inline-flex;align-items:center;gap:6px;">
                                 <input id="agent-auto-correct" type="checkbox">
@@ -1720,22 +1809,11 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                             <label for="agent-prompt">Prompt</label>
                             <textarea id="agent-prompt" rows="6" style="width:100%;font-family:monospace;">Zadejte prompt...</textarea>
                         </div>
-                        <div style="display:flex;gap:12px;align-items:center;">
-                            <div style="flex:1;">
-                                <label for="agent-temperature">Temperature</label>
-                                <div style="display:flex;gap:8px;align-items:center;">
-                                    <input id="agent-temperature" type="range" min="0" max="2" step="0.05" value="0.2" style="flex:1;">
-                                    <input id="agent-temperature-number" type="number" min="0" max="2" step="0.05" value="0.2" style="width:80px;">
-                                </div>
-                            </div>
-                            <div style="flex:1;">
-                                <label for="agent-top-p">Top P</label>
-                                <div style="display:flex;gap:8px;align-items:center;">
-                                    <input id="agent-top-p" type="range" min="0" max="1" step="0.01" value="1.0" style="flex:1;">
-                                    <input id="agent-top-p-number" type="number" min="0" max="1" step="0.01" value="1.0" style="width:80px;">
-                                </div>
-                            </div>
+                        <div class="form-group">
+                            <label for="agent-default-model">Model</label>
+                            <select id="agent-default-model" aria-label="Vyberte model pro agenta" style="min-width:170px;"></select>
                         </div>
+                        <div id="agent-parameter-fields" class="form-group" style="margin-top:8px;"></div>
                         <div style="display:flex;gap:8px;margin-top:12px;">
                             <span class="inline-tooltip-anchor">
                                 <button id="agent-save" type="button">Uložit agenta</button>
@@ -1830,6 +1908,9 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         };
         let autoRunScheduled = false;
         const tooltipTimers = new Map();
+        let currentAgentName = '';
+        let currentAgentDraft = null;
+        let agentDraftDirty = false;
 
 const NOTE_STYLE_ATTR = ' style="display:block;font-size:0.82em;color:#1e5aa8;font-weight:bold;"';
         // --- LLM agent management ---
@@ -1868,15 +1949,10 @@ const NOTE_STYLE_ATTR = ' style="display:block;font-size:0.82em;color:#1e5aa8;fo
             'o3-mini',
         ];
         const DEFAULT_REASONING_EFFORT = 'medium';
-        const REASONING_MODELS = new Set([
-            'gpt-5',
-            'o1',
-            'o1-mini',
-            'o3',
-            'o3-mini',
-            'o4',
-            'o4-mini',
-        ]);
+        const DEFAULT_TEMPERATURE = 0.2;
+        const DEFAULT_TOP_P = 1.0;
+        const REASONING_MODEL_PREFIXES = ['gpt-5', 'o1', 'o3', 'o4'];
+        const MODEL_CAPABILITIES_CACHE = new Map();
         const DEFAULT_AGENT_PROMPT = (() => {
             const fallback = 'Jsi pečlivý korektor češtiny. Dostaneš JSON s klíči "language_hint", "page_meta" a "blocks". Blocks je pole objektů {id, type, text}. Oprav překlepy a zjevné OCR chyby pouze v hodnotách "text". Nesjednocuj styl, neměň typy bloků ani jejich pořadí. Zachovej diakritiku, pokud lze. Odpovídej pouze validním JSON se stejnou strukturou a klíči jako vstup.';
             const element = document.getElementById('default-agent-prompt-data');
@@ -1894,10 +1970,386 @@ const NOTE_STYLE_ATTR = ' style="display:block;font-size:0.82em;color:#1e5aa8;fo
         })();
         const DEFAULT_LANGUAGE_HINT = 'cs';
 
-        async function loadAgents() {
-            // if cache already populated, return a shallow map
+        function normalizeModelId(model) {
+            return String(model || '').trim().toLowerCase();
+        }
+
+        function isReasoningModel(model) {
+            const normalized = normalizeModelId(model);
+            if (!normalized) return false;
+            for (const prefix of REASONING_MODEL_PREFIXES) {
+                const lowered = prefix.toLowerCase();
+                if (normalized === lowered || normalized.startsWith(`${lowered}-`)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        function getModelCapabilities(model) {
+            const normalized = normalizeModelId(model);
+            if (!normalized) {
+                return { temperature: true, top_p: true, reasoning: false };
+            }
+            if (MODEL_CAPABILITIES_CACHE.has(normalized)) {
+                return MODEL_CAPABILITIES_CACHE.get(normalized);
+            }
+            const capabilities = isReasoningModel(normalized)
+                ? { temperature: false, top_p: false, reasoning: true }
+                : { temperature: true, top_p: true, reasoning: false };
+            MODEL_CAPABILITIES_CACHE.set(normalized, capabilities);
+            return capabilities;
+        }
+
+        function clamp(value, min, max) {
+            if (!Number.isFinite(value)) return min;
+            return Math.min(max, Math.max(min, value));
+        }
+
+        function clampTemperature(value) {
+            return clamp(value, 0, 2);
+        }
+
+        function clampTopP(value) {
+            return clamp(value, 0, 1);
+        }
+
+        function createDefaultModelSettings() {
+            return {
+                temperature: DEFAULT_TEMPERATURE,
+                top_p: DEFAULT_TOP_P,
+                reasoning_effort: DEFAULT_REASONING_EFFORT,
+            };
+        }
+
+        function sanitizeSettingsObject(source) {
+            const result = {};
+            if (!source || typeof source !== 'object') {
+                return result;
+            }
+            if (Object.prototype.hasOwnProperty.call(source, 'temperature')) {
+                const value = Number(source.temperature);
+                if (Number.isFinite(value)) {
+                    result.temperature = clampTemperature(value);
+                }
+            }
+            if (Object.prototype.hasOwnProperty.call(source, 'top_p')) {
+                const value = Number(source.top_p);
+                if (Number.isFinite(value)) {
+                    result.top_p = clampTopP(value);
+                }
+            }
+            if (Object.prototype.hasOwnProperty.call(source, 'reasoning_effort')) {
+                const raw = String(source.reasoning_effort || '').trim().toLowerCase();
+                if (['low', 'medium', 'high'].includes(raw)) {
+                    result.reasoning_effort = raw;
+                }
+            }
+            return result;
+        }
+
+        function normalizeModelSettings(modelId, source, defaults) {
+            const capabilities = getModelCapabilities(modelId);
+            const sanitizedSource = sanitizeSettingsObject(source || {});
+            const sanitizedDefaults = sanitizeSettingsObject(defaults || {});
+            const baseDefaults = createDefaultModelSettings();
+            const result = {};
+            if (capabilities.temperature) {
+                if (Object.prototype.hasOwnProperty.call(sanitizedSource, 'temperature')) {
+                    result.temperature = clampTemperature(sanitizedSource.temperature);
+                } else if (Object.prototype.hasOwnProperty.call(sanitizedDefaults, 'temperature')) {
+                    result.temperature = clampTemperature(sanitizedDefaults.temperature);
+                } else {
+                    result.temperature = baseDefaults.temperature;
+                }
+            }
+            if (capabilities.top_p) {
+                if (Object.prototype.hasOwnProperty.call(sanitizedSource, 'top_p')) {
+                    result.top_p = clampTopP(sanitizedSource.top_p);
+                } else if (Object.prototype.hasOwnProperty.call(sanitizedDefaults, 'top_p')) {
+                    result.top_p = clampTopP(sanitizedDefaults.top_p);
+                } else {
+                    result.top_p = baseDefaults.top_p;
+                }
+            }
+            if (capabilities.reasoning) {
+                const sourceValue = sanitizedSource.reasoning_effort || sanitizedDefaults.reasoning_effort || baseDefaults.reasoning_effort;
+                result.reasoning_effort = ['low', 'medium', 'high'].includes(sourceValue) ? sourceValue : baseDefaults.reasoning_effort;
+            }
+            return result;
+        }
+
+        function deepCloneAgent(agent) {
+            try {
+                return JSON.parse(JSON.stringify(agent || {}));
+            } catch (err) {
+                return agent ? { ...agent } : {};
+            }
+        }
+
+        function normalizeAgentData(raw) {
+            const base = deepCloneAgent(raw || {});
+            const name = typeof base.name === 'string' ? base.name.trim() : '';
+            const displayName = typeof base.display_name === 'string' && base.display_name.trim().length
+                ? base.display_name
+                : name;
+            const promptValue = typeof base.prompt === 'string' && base.prompt.trim().length
+                ? base.prompt
+                : DEFAULT_AGENT_PROMPT;
+            const modelCandidate = typeof base.model === 'string' && base.model.trim().length
+                ? base.model.trim()
+                : DEFAULT_AGENT_MODEL;
+            const defaults = {
+                ...createDefaultModelSettings(),
+                ...sanitizeSettingsObject(base.settings && base.settings.defaults),
+            };
+            const perModel = {};
+            if (base.settings && typeof base.settings === 'object' && base.settings.per_model && typeof base.settings.per_model === 'object') {
+                for (const [modelIdRaw, settings] of Object.entries(base.settings.per_model)) {
+                    const modelId = String(modelIdRaw || '').trim();
+                    if (!modelId) continue;
+                    perModel[modelId] = normalizeModelSettings(modelId, settings, defaults);
+                }
+            }
+            const legacySettings = sanitizeSettingsObject(base);
+            if (Object.keys(legacySettings).length) {
+                const current = perModel[modelCandidate] || {};
+                perModel[modelCandidate] = normalizeModelSettings(modelCandidate, { ...current, ...legacySettings }, defaults);
+            }
+            if (!perModel[modelCandidate]) {
+                perModel[modelCandidate] = normalizeModelSettings(modelCandidate, {}, defaults);
+            }
+            return {
+                name,
+                display_name: displayName || name,
+                prompt: promptValue,
+                model: modelCandidate,
+                settings: {
+                    defaults,
+                    per_model: perModel,
+                },
+                updated_at: typeof base.updated_at === 'number' ? base.updated_at : undefined,
+            };
+        }
+
+        function ensureAgentDraftStructure(draft) {
+            if (!draft || typeof draft !== 'object') {
+                return null;
+            }
+            if (!draft.settings || typeof draft.settings !== 'object') {
+                draft.settings = { defaults: createDefaultModelSettings(), per_model: {} };
+            }
+            if (!draft.settings.defaults || typeof draft.settings.defaults !== 'object') {
+                draft.settings.defaults = createDefaultModelSettings();
+            }
+            if (!draft.settings.per_model || typeof draft.settings.per_model !== 'object') {
+                draft.settings.per_model = {};
+            }
+            return draft;
+        }
+
+        function ensureAgentDraftModelSettings(draft, modelId) {
+            ensureAgentDraftStructure(draft);
+            const modelKey = modelId || (draft && draft.model) || DEFAULT_AGENT_MODEL;
+            if (!draft.settings.per_model[modelKey]) {
+                draft.settings.per_model[modelKey] = normalizeModelSettings(modelKey, {}, draft.settings.defaults);
+            }
+            return draft.settings.per_model[modelKey];
+        }
+
+        function getEffectiveModelSettings(agent, modelId) {
+            if (!agent) {
+                return normalizeModelSettings(modelId, {}, createDefaultModelSettings());
+            }
+            const draft = ensureAgentDraftStructure(deepCloneAgent(agent));
+            const defaults = draft.settings.defaults || createDefaultModelSettings();
+            const perModel = draft.settings.per_model && draft.settings.per_model[modelId]
+                ? draft.settings.per_model[modelId]
+                : {};
+            return normalizeModelSettings(modelId, perModel, defaults);
+        }
+
+        function markAgentDirty() {
+            agentDraftDirty = true;
+        }
+
+        function resetAgentDirty() {
+            agentDraftDirty = false;
+        }
+
+        function buildAgentSavePayload(draftInput) {
+            const normalized = normalizeAgentData(draftInput || currentAgentDraft || {});
+            ensureAgentDraftStructure(normalized);
+            const modelId = normalized.model || DEFAULT_AGENT_MODEL;
+            ensureAgentDraftModelSettings(normalized, modelId);
+            const defaultsPayload = {
+                ...createDefaultModelSettings(),
+                ...sanitizeSettingsObject(normalized.settings.defaults),
+            };
+            const perModelPayload = {};
+            for (const [modelKey, settings] of Object.entries(normalized.settings.per_model || {})) {
+                perModelPayload[modelKey] = normalizeModelSettings(modelKey, settings, defaultsPayload);
+            }
+            const effective = getEffectiveModelSettings(normalized, modelId);
+            const capabilities = getModelCapabilities(modelId);
+            const payload = {
+                name: normalized.name,
+                display_name: normalized.display_name || normalized.name,
+                prompt: normalized.prompt || '',
+                model: modelId,
+                settings: {
+                    defaults: defaultsPayload,
+                    per_model: perModelPayload,
+                },
+            };
+            if (capabilities.temperature && Object.prototype.hasOwnProperty.call(effective, 'temperature')) {
+                payload.temperature = effective.temperature;
+            }
+            if (capabilities.top_p && Object.prototype.hasOwnProperty.call(effective, 'top_p')) {
+                payload.top_p = effective.top_p;
+            }
+            if (capabilities.reasoning && Object.prototype.hasOwnProperty.call(effective, 'reasoning_effort')) {
+                payload.reasoning_effort = effective.reasoning_effort;
+            }
+            return payload;
+        }
+
+        function renderAgentModelOptions(selectedModel) {
+            const selectEl = document.getElementById('agent-default-model');
+            if (!selectEl) {
+                return;
+            }
+            const modelOptions = [...AVAILABLE_AGENT_MODELS];
+            if (currentAgentDraft && currentAgentDraft.settings && currentAgentDraft.settings.per_model) {
+                Object.keys(currentAgentDraft.settings.per_model).forEach((modelId) => {
+                    if (modelId && !modelOptions.includes(modelId)) {
+                        modelOptions.push(modelId);
+                    }
+                });
+            }
+            if (selectedModel && !modelOptions.includes(selectedModel)) {
+                modelOptions.push(selectedModel);
+            }
+            selectEl.innerHTML = '';
+            modelOptions.forEach((modelId) => {
+                const option = document.createElement('option');
+                option.value = modelId;
+                option.textContent = modelId;
+                selectEl.appendChild(option);
+            });
+            const normalized = selectedModel && selectedModel.trim().length ? selectedModel : DEFAULT_AGENT_MODEL;
+            selectEl.value = normalized;
+        }
+
+        function renderAgentParameterControls(modelId) {
+            const container = document.getElementById('agent-parameter-fields');
+            if (!container) {
+                return;
+            }
+            if (!currentAgentDraft) {
+                container.innerHTML = '<div class="muted">Nejprve vyberte agenta.</div>';
+                return;
+            }
+            const capabilities = getModelCapabilities(modelId);
+            const modelSettings = ensureAgentDraftModelSettings(currentAgentDraft, modelId);
+            const controls = [];
+            if (capabilities.temperature) {
+                controls.push(`
+                    <div class="agent-param" data-param="temperature" style="flex:1;min-width:220px;">
+                        <label for="agent-param-temperature" style="display:block;margin-bottom:4px;font-weight:600;">Temperature</label>
+                        <div style="display:flex;gap:8px;align-items:center;">
+                            <input id="agent-param-temperature" type="range" min="0" max="2" step="0.05" style="flex:1;">
+                            <input id="agent-param-temperature-number" type="number" min="0" max="2" step="0.05" style="width:80px;">
+                        </div>
+                    </div>
+                `);
+            }
+            if (capabilities.top_p) {
+                controls.push(`
+                    <div class="agent-param" data-param="top_p" style="flex:1;min-width:220px;">
+                        <label for="agent-param-top-p" style="display:block;margin-bottom:4px;font-weight:600;">Top P</label>
+                        <div style="display:flex;gap:8px;align-items:center;">
+                            <input id="agent-param-top-p" type="range" min="0" max="1" step="0.01" style="flex:1;">
+                            <input id="agent-param-top-p-number" type="number" min="0" max="1" step="0.01" style="width:80px;">
+                        </div>
+                    </div>
+                `);
+            }
+            if (capabilities.reasoning) {
+                controls.push(`
+                    <div class="agent-param" data-param="reasoning_effort" style="flex:1;min-width:220px;">
+                        <label for="agent-param-reasoning" style="display:block;margin-bottom:4px;font-weight:600;">Reasoning</label>
+                        <select id="agent-param-reasoning" style="min-width:140px;">
+                            <option value="low">Low</option>
+                            <option value="medium">Medium</option>
+                            <option value="high">High</option>
+                        </select>
+                    </div>
+                `);
+            }
+            if (!controls.length) {
+                container.innerHTML = '<div class="muted">Tento model nemá nastavitelné parametry.</div>';
+                return;
+            }
+            container.innerHTML = `<div style="display:flex;gap:12px;flex-wrap:wrap;">${controls.join('')}</div>`;
+            const tempRange = document.getElementById('agent-param-temperature');
+            const tempNumber = document.getElementById('agent-param-temperature-number');
+            const topRange = document.getElementById('agent-param-top-p');
+            const topNumber = document.getElementById('agent-param-top-p-number');
+            const reasoningSelect = document.getElementById('agent-param-reasoning');
+
+            if (tempRange && tempNumber) {
+                const value = Object.prototype.hasOwnProperty.call(modelSettings, 'temperature')
+                    ? modelSettings.temperature
+                    : DEFAULT_TEMPERATURE;
+                tempRange.value = value;
+                tempNumber.value = value;
+                const updateTemperature = (nextValue) => {
+                    const parsed = clampTemperature(Number(nextValue));
+                    tempRange.value = parsed;
+                    tempNumber.value = parsed;
+                    modelSettings.temperature = parsed;
+                    markAgentDirty();
+                };
+                tempRange.addEventListener('input', () => updateTemperature(tempRange.value));
+                tempNumber.addEventListener('change', () => updateTemperature(tempNumber.value));
+            }
+
+            if (topRange && topNumber) {
+                const value = Object.prototype.hasOwnProperty.call(modelSettings, 'top_p')
+                    ? modelSettings.top_p
+                    : DEFAULT_TOP_P;
+                topRange.value = value;
+                topNumber.value = value;
+                const updateTopP = (nextValue) => {
+                    const parsed = clampTopP(Number(nextValue));
+                    topRange.value = parsed;
+                    topNumber.value = parsed;
+                    modelSettings.top_p = parsed;
+                    markAgentDirty();
+                };
+                topRange.addEventListener('input', () => updateTopP(topRange.value));
+                topNumber.addEventListener('change', () => updateTopP(topNumber.value));
+            }
+
+            if (reasoningSelect) {
+                const raw = String(modelSettings.reasoning_effort || '').trim().toLowerCase();
+                const normalized = ['low', 'medium', 'high'].includes(raw) ? raw : DEFAULT_REASONING_EFFORT;
+                reasoningSelect.value = normalized;
+                reasoningSelect.addEventListener('change', () => {
+                    const candidate = String(reasoningSelect.value || '').trim().toLowerCase();
+                    const next = ['low', 'medium', 'high'].includes(candidate) ? candidate : DEFAULT_REASONING_EFFORT;
+                    reasoningSelect.value = next;
+                    modelSettings.reasoning_effort = next;
+                    markAgentDirty();
+                });
+            }
+        }
+
+        async function loadAgents(options = {}) {
+            const force = options && typeof options === 'object' && options.force === true;
             const keys = Object.keys(agentsCache);
-            if (keys.length) {
+            if (keys.length && !force) {
                 const out = {};
                 keys.sort().forEach(k => { out[k] = { name: k, display_name: agentsCache[k].display_name || k }; });
                 return out;
@@ -1908,24 +2360,26 @@ const NOTE_STYLE_ATTR = ' style="display:block;font-size:0.82em;color:#1e5aa8;fo
                 const data = await res.json();
                 const out = {};
                 // server returns list items which may include parsed agent object
+                const fetchedAgents = [];
                 (data.agents || []).forEach(a => {
-                    // prefer full agent object if present
-                    if (a.agent && typeof a.agent === 'object') {
-                        agentsCache[a.name] = a.agent;
-                        if (!agentsCache[a.name].model) {
-                            agentsCache[a.name].model = DEFAULT_AGENT_MODEL;
-                        }
-                        const effort = (agentsCache[a.name].reasoning_effort && typeof agentsCache[a.name].reasoning_effort === 'string') ? agentsCache[a.name].reasoning_effort.trim().toLowerCase() : '';
-                        agentsCache[a.name].reasoning_effort = ['low','medium','high'].includes(effort) ? effort : DEFAULT_REASONING_EFFORT;
-                        cacheAgentFingerprint(a.name, a.agent);
-                    } else {
-                        agentsCache[a.name] = agentsCache[a.name] || { name: a.name, display_name: a.display_name || a.name, prompt: '', temperature: 0.2, top_p: 1.0, model: DEFAULT_AGENT_MODEL, reasoning_effort: DEFAULT_REASONING_EFFORT };
-                        const effort = (agentsCache[a.name].reasoning_effort && typeof agentsCache[a.name].reasoning_effort === 'string') ? agentsCache[a.name].reasoning_effort.trim().toLowerCase() : '';
-                        agentsCache[a.name].reasoning_effort = ['low','medium','high'].includes(effort) ? effort : DEFAULT_REASONING_EFFORT;
-                        cacheAgentFingerprint(a.name, agentsCache[a.name]);
-                    }
-                    out[a.name] = { name: a.name, display_name: agentsCache[a.name].display_name || a.name };
+                    const baseAgent = a && a.agent && typeof a.agent === 'object'
+                        ? { ...deepCloneAgent(a.agent), name: a.name, display_name: a.display_name || a.name }
+                        : { name: a.name, display_name: a.display_name || a.name, prompt: DEFAULT_AGENT_PROMPT, model: DEFAULT_AGENT_MODEL };
+                    const normalized = normalizeAgentData(baseAgent);
+                    agentsCache[a.name] = normalized;
+                    cacheAgentFingerprint(a.name, normalized);
+                    out[a.name] = { name: a.name, display_name: normalized.display_name || a.name };
+                    fetchedAgents.push(a.name);
                 });
+                console.info('[AgentDebug] loadAgents ->', fetchedAgents);
+                if (force) {
+                    Object.keys(agentsCache).forEach((name) => {
+                        if (!fetchedAgents.includes(name)) {
+                            delete agentsCache[name];
+                            agentFingerprintCache.delete(name);
+                        }
+                    });
+                }
                 return out;
             } catch (err) {
                 console.warn('Nelze načíst agenty ze serveru, fallback na empty:', err);
@@ -1951,21 +2405,6 @@ const NOTE_STYLE_ATTR = ' style="display:block;font-size:0.82em;color:#1e5aa8;fo
             try { return localStorage.getItem(AGENT_AUTO_CORRECT_KEY) === '1'; } catch (e) { return false; }
         }
 
-        function extractAgentFingerprintPayload(agent) {
-            if (!agent || typeof agent !== 'object') {
-                return null;
-            }
-            const tempValue = Number(agent.temperature);
-            const topPValue = Number(agent.top_p);
-            return {
-                prompt: String(agent.prompt || ''),
-                model: String(agent.model || ''),
-                temperature: Number.isFinite(tempValue) ? tempValue : null,
-                top_p: Number.isFinite(topPValue) ? topPValue : null,
-                reasoning_effort: String(agent.reasoning_effort || ''),
-            };
-        }
-
         function cacheAgentFingerprint(name, agent) {
             if (!name) {
                 return null;
@@ -1981,11 +2420,37 @@ const NOTE_STYLE_ATTR = ' style="display:block;font-size:0.82em;color:#1e5aa8;fo
             return agentFingerprintCache.get(name) || null;
         }
 
+        function extractAgentFingerprintPayload(agent) {
+            if (!agent || typeof agent !== 'object') {
+                return null;
+            }
+            const normalized = normalizeAgentData(agent);
+            ensureAgentDraftStructure(normalized);
+            const modelId = normalized.model || DEFAULT_AGENT_MODEL;
+            const defaults = {
+                ...createDefaultModelSettings(),
+                ...sanitizeSettingsObject(normalized.settings.defaults),
+            };
+            const perModelEntries = Object.entries(normalized.settings.per_model || {})
+                .map(([modelKey, settings]) => [modelKey, normalizeModelSettings(modelKey, settings, defaults)])
+                .sort((a, b) => a[0].localeCompare(b[0]));
+            const effective = getEffectiveModelSettings(normalized, modelId);
+            return {
+                prompt: String(normalized.prompt || ''),
+                model: modelId,
+                defaults,
+                per_model: perModelEntries,
+                effective,
+            };
+        }
+
         function computeAgentFingerprint(name) {
             if (!name) {
                 return '';
             }
-            const agent = agentsCache[name];
+            const agent = (currentAgentName === name && currentAgentDraft)
+                ? currentAgentDraft
+                : agentsCache[name];
             const record = cacheAgentFingerprint(name, agent);
             if (record && typeof record.hash === 'number') {
                 return `${name}:${record.hash}`;
@@ -1997,7 +2462,7 @@ const NOTE_STYLE_ATTR = ' style="display:block;font-size:0.82em;color:#1e5aa8;fo
             return name;
         }
 
-        async function renderAgentSelector() {
+        async function renderAgentSelector(force = false) {
             const select = document.getElementById('agent-select');
             const spinnerWrapper = document.getElementById('agent-select-spinner');
             if (spinnerWrapper) spinnerWrapper.style.display = 'inline-block';
@@ -2006,20 +2471,36 @@ const NOTE_STYLE_ATTR = ' style="display:block;font-size:0.82em;color:#1e5aa8;fo
                 return;
             }
             select.innerHTML = '';
-            const agents = await loadAgents();
+            const agents = await loadAgents({ force });
             const selected = loadSelectedAgent();
             const names = Object.keys(agents).sort();
             // If no agents on server, create some defaults client-side and save
             if (!names.length) {
                 const defaults = ['editor-default','cleanup-a','semantic-fix'];
                 for (const n of defaults) {
+                    const draftAgent = {
+                        name: n,
+                        display_name: n,
+                        prompt: DEFAULT_AGENT_PROMPT,
+                        model: DEFAULT_AGENT_MODEL,
+                        settings: {
+                            defaults: createDefaultModelSettings(),
+                            per_model: {
+                                [DEFAULT_AGENT_MODEL]: {
+                                    temperature: DEFAULT_TEMPERATURE,
+                                    top_p: DEFAULT_TOP_P,
+                                },
+                            },
+                        },
+                    };
+                    const payload = buildAgentSavePayload(draftAgent);
                     await fetch('/agents/save', {
                         method: 'POST', headers: {'Content-Type':'application/json'},
-                        body: JSON.stringify({ name: n, prompt: DEFAULT_AGENT_PROMPT, temperature: 0.2, top_p: 1.0, model: DEFAULT_AGENT_MODEL, reasoning_effort: DEFAULT_REASONING_EFFORT })
+                        body: JSON.stringify(payload),
                     });
                 }
                 if (spinnerWrapper) spinnerWrapper.style.display = 'none';
-                return renderAgentSelector();
+                return renderAgentSelector(force);
             }
 
             // show nicer labels when display_name exists
@@ -2058,77 +2539,34 @@ const NOTE_STYLE_ATTR = ' style="display:block;font-size:0.82em;color:#1e5aa8;fo
             const name = select.value;
             const auto = document.getElementById('agent-auto-correct');
             if (auto) auto.checked = loadAutoCorrect();
+            const fallbackAgent = normalizeAgentData({
+                name,
+                display_name: name,
+                prompt: DEFAULT_AGENT_PROMPT,
+                model: DEFAULT_AGENT_MODEL,
+            });
             try {
-                    // prefer in-memory cache where possible
-                    if (agentsCache[name]) {
-                        setAgentFields(agentsCache[name]);
-                        persistSelectedAgent(name);
-                        return;
-                    }
-                    const res = await fetch(`/agents/get?name=${encodeURIComponent(name)}`, { cache: 'no-store' });
-                    if (!res.ok) {
-                        setAgentFields({name:'', prompt:'', temperature:0.2, top_p:1.0, model: DEFAULT_AGENT_MODEL, reasoning_effort: DEFAULT_REASONING_EFFORT});
-                        persistSelectedAgent('');
-                        return;
-                    }
-                    const agent = await res.json();
-                    // populate cache and use it
-                    agentsCache[name] = agent || {};
-                    if (!agentsCache[name].model) {
-                        agentsCache[name].model = DEFAULT_AGENT_MODEL;
-                    }
-                    const effort = (agentsCache[name].reasoning_effort && typeof agentsCache[name].reasoning_effort === 'string') ? agentsCache[name].reasoning_effort.trim().toLowerCase() : '';
-                    agentsCache[name].reasoning_effort = ['low','medium','high'].includes(effort) ? effort : DEFAULT_REASONING_EFFORT;
-                    setAgentFields(agentsCache[name]);
+                // prefer in-memory cache where possible
+                if (agentsCache[name]) {
+                    setAgentFields(deepCloneAgent(agentsCache[name]));
                     persistSelectedAgent(name);
+                    return;
+                }
+                const res = await fetch(`/agents/get?name=${encodeURIComponent(name)}`, { cache: 'no-store' });
+                if (!res.ok) {
+                    setAgentFields(fallbackAgent);
+                    persistSelectedAgent('');
+                    return;
+                }
+                const agent = await res.json();
+                const normalized = normalizeAgentData({ ...(agent || {}), name });
+                agentsCache[name] = normalized;
+                setAgentFields(normalized);
+                persistSelectedAgent(name);
             } catch (err) {
                 console.warn('Nelze načíst agenta:', err);
-                setAgentFields({name:'', prompt:'', temperature:0.2, top_p:1.0, model: DEFAULT_AGENT_MODEL, reasoning_effort: DEFAULT_REASONING_EFFORT});
+                setAgentFields(fallbackAgent);
             }
-        }
-
-        function ensureModelOption(selectEl, value) {
-            if (!selectEl || !value) {
-                return;
-            }
-            const exists = Array.from(selectEl.options || []).some(option => option.value === value);
-            if (!exists) {
-                const option = document.createElement('option');
-                option.value = value;
-                option.textContent = value;
-                selectEl.appendChild(option);
-            }
-        }
-
-        function normalizeModelId(model) {
-            return String(model || '').trim().toLowerCase();
-        }
-
-        function isReasoningModel(model) {
-            const normalized = normalizeModelId(model);
-            if (!normalized) {
-                return false;
-            }
-            for (const prefix of REASONING_MODELS) {
-                const lower = prefix.toLowerCase();
-                if (normalized === lower || normalized.startsWith(`${lower}-`)) {
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        function updateReasoningUI(model) {
-            const wrapper = document.getElementById('agent-reasoning-wrapper');
-            const select = document.getElementById('agent-reasoning-effort');
-            const shouldShow = isReasoningModel(model);
-            if (wrapper) {
-                wrapper.style.display = shouldShow ? 'inline-flex' : 'none';
-            }
-            if (!shouldShow && select) {
-                select.value = DEFAULT_REASONING_EFFORT;
-            }
-            scheduleThumbnailDrawerHeightSync();
         }
 
         function autoResizeTextarea(textarea) {
@@ -2157,97 +2595,61 @@ const NOTE_STYLE_ATTR = ' style="display:block;font-size:0.82em;color:#1e5aa8;fo
         }
 
         function setAgentFields(agent) {
+            const normalized = normalizeAgentData(agent || {});
+            currentAgentDraft = deepCloneAgent(normalized);
+            currentAgentName = normalized.name || '';
+            ensureAgentDraftStructure(currentAgentDraft);
             const nameEl = document.getElementById('agent-name');
             const promptEl = document.getElementById('agent-prompt');
-            const tempRange = document.getElementById('agent-temperature');
-            const tempNum = document.getElementById('agent-temperature-number');
-            const topRange = document.getElementById('agent-top-p');
-            const topNum = document.getElementById('agent-top-p-number');
-            const modelEl = document.getElementById('agent-model');
-            const reasoningEl = document.getElementById('agent-reasoning-effort');
-            if (nameEl) nameEl.value = agent.name || '';
+            const modelEl = document.getElementById('agent-default-model');
+            if (nameEl) {
+                nameEl.value = currentAgentDraft.name || '';
+            }
             if (promptEl) {
-                const promptValue = (agent.prompt && typeof agent.prompt === 'string' && agent.prompt.trim()) ? agent.prompt : DEFAULT_AGENT_PROMPT;
-                promptEl.value = promptValue;
+                promptEl.value = currentAgentDraft.prompt || DEFAULT_AGENT_PROMPT;
                 if (!promptEl.dataset.autoresizeBound) {
                     promptEl.dataset.autoresizeBound = 'true';
                     promptEl.addEventListener('input', () => autoResizeTextarea(promptEl));
                 }
                 if (promptEl.offsetParent !== null) {
                     requestAnimationFrame(() => autoResizeTextarea(promptEl));
+                } else {
+                    promptEl.dataset.needsResize = 'true';
                 }
             }
             if (modelEl) {
-                const candidate = (agent && typeof agent.model === 'string' && agent.model.trim()) ? agent.model.trim() : DEFAULT_AGENT_MODEL;
-                AVAILABLE_AGENT_MODELS.forEach(value => ensureModelOption(modelEl, value));
-                ensureModelOption(modelEl, candidate);
-                modelEl.value = candidate;
-                updateReasoningUI(candidate);
-                if (agent && typeof agent === 'object') {
-                    agent.model = candidate;
-                }
-                if (reasoningEl) {
-                    const currentReasoning = (agent && typeof agent.reasoning_effort === 'string' && agent.reasoning_effort.trim()) ? agent.reasoning_effort.trim().toLowerCase() : DEFAULT_REASONING_EFFORT;
-                    const normalizedReasoning = ['low', 'medium', 'high'].includes(currentReasoning) ? currentReasoning : DEFAULT_REASONING_EFFORT;
-                    reasoningEl.value = normalizedReasoning;
-                    if (agent && typeof agent === 'object') {
-                        agent.reasoning_effort = normalizedReasoning;
-                    }
-                }
+                renderAgentModelOptions(currentAgentDraft.model);
             }
-            if (!modelEl) {
-                updateReasoningUI(DEFAULT_AGENT_MODEL);
-            }
-            if (modelEl && !reasoningEl) {
-                updateReasoningUI(modelEl.value);
-            }
-            if (tempRange) tempRange.value = (agent.temperature !== undefined ? agent.temperature : 0.2);
-            if (tempNum) tempNum.value = (agent.temperature !== undefined ? agent.temperature : 0.2);
-            if (topRange) topRange.value = (agent.top_p !== undefined ? agent.top_p : 1.0);
-            if (topNum) topNum.value = (agent.top_p !== undefined ? agent.top_p : 1.0);
-        }
-
-        function syncRangeAndNumber(rangeEl, numberEl) {
-            if (!rangeEl || !numberEl) return;
-            rangeEl.addEventListener('input', () => { numberEl.value = rangeEl.value; });
-            numberEl.addEventListener('change', () => {
-                let v = parseFloat(numberEl.value);
-                if (!Number.isFinite(v)) v = parseFloat(rangeEl.value) || 0;
-                v = Math.max(0, Math.min(1, v));
-                rangeEl.value = v;
-                numberEl.value = v;
-            });
+            renderAgentParameterControls(currentAgentDraft.model || DEFAULT_AGENT_MODEL);
+            resetAgentDirty();
         }
 
         async function saveCurrentAgent() {
             const nameEl = document.getElementById('agent-name');
             const promptEl = document.getElementById('agent-prompt');
-            const tempNum = document.getElementById('agent-temperature-number');
-            const topNum = document.getElementById('agent-top-p-number');
-            const modelEl = document.getElementById('agent-model');
-            const reasoningEl = document.getElementById('agent-reasoning-effort');
+            const modelEl = document.getElementById('agent-default-model');
             if (!nameEl) return;
-            const name = String(nameEl.value || '').trim();
-            if (!name) {
-                alert('Agent must have a name');
+            if (!currentAgentDraft) {
+                currentAgentDraft = normalizeAgentData({
+                    name: '',
+                    prompt: promptEl ? promptEl.value : DEFAULT_AGENT_PROMPT,
+                    model: modelEl ? modelEl.value : DEFAULT_AGENT_MODEL,
+                });
+            }
+            const draft = ensureAgentDraftStructure(currentAgentDraft);
+            const previousName = currentAgentName || draft.name || '';
+            draft.name = String(nameEl.value || '').trim();
+            if (!draft.name) {
+                alert('Agent musí mít název');
                 return;
             }
-            // parse numeric fields carefully so that 0 is preserved
-            let tempVal = parseFloat(tempNum ? tempNum.value : '0.2');
-            if (!Number.isFinite(tempVal)) tempVal = 0.0;
-            let topVal = parseFloat(topNum ? topNum.value : '1.0');
-            if (!Number.isFinite(topVal)) topVal = 1.0;
-            const modelValue = modelEl ? String(modelEl.value || '').trim() : '';
-            const reasoningValueRaw = reasoningEl ? String(reasoningEl.value || '').trim().toLowerCase() : DEFAULT_REASONING_EFFORT;
-            const reasoningValue = ['low','medium','high'].includes(reasoningValueRaw) ? reasoningValueRaw : DEFAULT_REASONING_EFFORT;
-            const payload = {
-                name,
-                prompt: promptEl ? promptEl.value : '',
-                temperature: tempVal,
-                top_p: topVal,
-                model: modelValue || DEFAULT_AGENT_MODEL,
-                reasoning_effort: reasoningValue,
-            };
+            draft.display_name = draft.display_name || draft.name;
+            draft.prompt = promptEl ? promptEl.value : '';
+            const selectedModel = modelEl ? String(modelEl.value || '').trim() : DEFAULT_AGENT_MODEL;
+            draft.model = selectedModel || DEFAULT_AGENT_MODEL;
+            ensureAgentDraftModelSettings(draft, draft.model);
+
+            const payload = buildAgentSavePayload(draft);
             try {
                 const res = await fetch('/agents/save', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
                 if (!res.ok) {
@@ -2255,45 +2657,24 @@ const NOTE_STYLE_ATTR = ' style="display:block;font-size:0.82em;color:#1e5aa8;fo
                     throw new Error('save failed ' + txt);
                 }
                 const data = await res.json().catch(() => null);
-                const stored = (data && data.stored_name) ? data.stored_name : name;
-                const agent = (data && data.agent) ? data.agent : payload;
-                if (!agent.model) {
-                    agent.model = payload.model || DEFAULT_AGENT_MODEL;
-                }
-                if (!agent.reasoning_effort) {
-                    agent.reasoning_effort = payload.reasoning_effort || DEFAULT_REASONING_EFFORT;
+                const stored = (data && data.stored_name) ? data.stored_name : draft.name;
+                const agentResponse = (data && data.agent) ? data.agent : payload;
+                const normalized = normalizeAgentData({ ...(agentResponse || {}), name: stored });
+
+                // update caches
+                agentsCache[stored] = normalized;
+                cacheAgentFingerprint(stored, normalized);
+                if (previousName && stored !== previousName) {
+                    delete agentsCache[previousName];
+                    agentFingerprintCache.delete(previousName);
                 }
 
-                // update in-memory cache and DOM without re-fetching everything
-                agentsCache[stored] = agent;
-                cacheAgentFingerprint(stored, agent);
-                if (stored !== name) {
-                    delete agentsCache[name];
-                    agentFingerprintCache.delete(name);
-                }
-                if (!agent.display_name) agent.display_name = agent.name || stored;
-
-                const select = document.getElementById('agent-select');
-                if (select) {
-                    // find existing option with this value
-                    let opt = select.querySelector(`option[value="${stored}"]`);
-                    if (!opt) {
-                        // try to remove old option with previous name if user changed it
-                        const oldOpt = select.querySelector(`option[value="${name}"]`);
-                        if (oldOpt) oldOpt.remove();
-                        opt = document.createElement('option');
-                        opt.value = stored;
-                        opt.textContent = agent.display_name || stored;
-                        select.appendChild(opt);
-                    } else {
-                        opt.textContent = agent.display_name || stored;
-                    }
-                    select.value = stored;
-                    persistSelectedAgent(stored);
-                }
-
-                // update UI fields from saved agent
-                setAgentFields(agent || payload);
+                persistSelectedAgent(stored);
+                currentAgentName = stored;
+                currentAgentDraft = deepCloneAgent(normalized);
+                await renderAgentSelector(true);
+                setAgentFields(normalized);
+                resetAgentDirty();
                 showTooltip('agent-save-tooltip', 'Agent uložen');
             } catch (err) {
                 alert('Nelze uložit agenta: ' + err);
@@ -2310,27 +2691,10 @@ const NOTE_STYLE_ATTR = ' style="display:block;font-size:0.82em;color:#1e5aa8;fo
             try {
                 const res = await fetch('/agents/delete', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name }) });
                 if (!res.ok) throw new Error('delete failed');
-                const currentSel = loadSelectedAgent();
-                // remove from in-memory cache and DOM
                 delete agentsCache[name];
                 agentFingerprintCache.delete(name);
-                const select = document.getElementById('agent-select');
-                if (select) {
-                    const opt = select.querySelector(`option[value="${name}"]`);
-                    if (opt) opt.remove();
-                }
-                if (currentSel === name) {
-                    persistSelectedAgent('');
-                    // select first available if any
-                    if (select && select.options && select.options.length) {
-                        select.selectedIndex = 0;
-                        const newSel = select.value;
-                        persistSelectedAgent(newSel);
-                        if (agentsCache[newSel]) setAgentFields(agentsCache[newSel]);
-                    } else {
-                setAgentFields({name:'', prompt:'', temperature:0.2, top_p:1.0, model: DEFAULT_AGENT_MODEL, reasoning_effort: DEFAULT_REASONING_EFFORT});
-                    }
-                }
+                persistSelectedAgent('');
+                await renderAgentSelector(true);
             } catch (err) {
                 alert('Nelze smazat agenta: ' + err);
             }
@@ -2762,16 +3126,34 @@ const NOTE_STYLE_ATTR = ' style="display:block;font-size:0.82em;color:#1e5aa8;fo
                 return;
             }
             const auto = document.getElementById('agent-auto-correct');
-            const modelSelect = document.getElementById('agent-model');
-            const reasoningSelect = document.getElementById('agent-reasoning-effort');
             const willAuto = auto && auto.checked;
             persistAutoCorrect(Boolean(willAuto));
             const originalPythonHtml = pythonHtml;
-            const selectedModelRaw = modelSelect ? String(modelSelect.value || '').trim() : '';
-            const cachedAgent = agentsCache[name] || {};
-            const normalizedModel = selectedModelRaw || (cachedAgent.model && String(cachedAgent.model).trim()) || DEFAULT_AGENT_MODEL;
-            const reasoningValueRaw = reasoningSelect ? String(reasoningSelect.value || '').trim().toLowerCase() : (cachedAgent.reasoning_effort || DEFAULT_REASONING_EFFORT);
-            const normalizedReasoning = ['low','medium','high'].includes(reasoningValueRaw) ? reasoningValueRaw : DEFAULT_REASONING_EFFORT;
+
+            let workingDraft = null;
+            if (currentAgentDraft && currentAgentName === name) {
+                workingDraft = currentAgentDraft;
+            } else if (agentsCache[name]) {
+                workingDraft = deepCloneAgent(agentsCache[name]);
+                currentAgentDraft = deepCloneAgent(workingDraft);
+                currentAgentName = name;
+            } else {
+                workingDraft = normalizeAgentData({
+                    name,
+                    prompt: DEFAULT_AGENT_PROMPT,
+                    model: DEFAULT_AGENT_MODEL,
+                });
+                currentAgentDraft = deepCloneAgent(workingDraft);
+                currentAgentName = name;
+            }
+            ensureAgentDraftStructure(workingDraft);
+            const normalizedModel = (workingDraft.model && String(workingDraft.model).trim()) || DEFAULT_AGENT_MODEL;
+            ensureAgentDraftModelSettings(workingDraft, normalizedModel);
+            const capabilities = getModelCapabilities(normalizedModel);
+            const effectiveSettings = getEffectiveModelSettings(workingDraft, normalizedModel);
+            const normalizedReasoning = capabilities.reasoning && effectiveSettings.reasoning_effort
+                ? effectiveSettings.reasoning_effort
+                : DEFAULT_REASONING_EFFORT;
 
             const pageMeta = {};
             if (currentPage) {
@@ -2800,18 +3182,22 @@ const NOTE_STYLE_ATTR = ' style="display:block;font-size:0.82em;color:#1e5aa8;fo
                 page_index: currentPage && typeof currentPage.index === 'number' ? currentPage.index : null,
                 model: normalizedModel,
                 model_override: normalizedModel,
-                reasoning_effort: normalizedReasoning,
             };
+            if (capabilities.temperature && Object.prototype.hasOwnProperty.call(effectiveSettings, 'temperature')) {
+                payload.temperature = effectiveSettings.temperature;
+            }
+            if (capabilities.top_p && Object.prototype.hasOwnProperty.call(effectiveSettings, 'top_p')) {
+                payload.top_p = effectiveSettings.top_p;
+            }
+            if (capabilities.reasoning && Object.prototype.hasOwnProperty.call(effectiveSettings, 'reasoning_effort')) {
+                payload.reasoning_effort = effectiveSettings.reasoning_effort;
+            }
+            payload.agent_snapshot = buildAgentSavePayload(workingDraft);
 
             const runBtn = document.getElementById('agent-run');
             const originalLabel = runBtn ? runBtn.textContent : '';
 
-            if (!agentsCache[name]) {
-                agentsCache[name] = { name };
-            }
-            agentsCache[name].model = normalizedModel;
-            agentsCache[name].reasoning_effort = normalizedReasoning;
-            cacheAgentFingerprint(name, agentsCache[name]);
+            cacheAgentFingerprint(name, workingDraft);
             const agentFingerprint = computeAgentFingerprint(name);
             const pythonHash = computeSimpleHash(pythonHtml);
             const cacheBaseKey = agentFingerprint ? `${agentFingerprint}:${pythonHash}` : null;
@@ -2853,7 +3239,7 @@ const NOTE_STYLE_ATTR = ' style="display:block;font-size:0.82em;color:#1e5aa8;fo
                 }
                 startTime = performance.now();
                 setAgentOutput(`Spouštím agenta ${name}...`, '', 'pending');
-                const agentConfig = agentsCache[name] || {};
+                const agentConfig = workingDraft || {};
                 console.groupCollapsed(`[AgentDebug] Request → ${name}`);
                 console.log('Agent config:', agentConfig);
                 console.log('Payload:', payload);
@@ -2963,7 +3349,9 @@ const NOTE_STYLE_ATTR = ' style="display:block;font-size:0.82em;color:#1e5aa8;fo
             const settings = document.getElementById('agent-settings');
             const saveBtn = document.getElementById('agent-save');
             const deleteBtn = document.getElementById('agent-delete');
-            const modelSelect = document.getElementById('agent-model');
+            const modelSelect = document.getElementById('agent-default-model');
+            const nameInput = document.getElementById('agent-name');
+            const promptTextarea = document.getElementById('agent-prompt');
 
             if (select) select.addEventListener('change', updateAgentUIFromSelection);
             if (runBtn) runBtn.addEventListener('click', () => runSelectedAgent({ autoTriggered: false }));
@@ -2993,7 +3381,6 @@ const NOTE_STYLE_ATTR = ' style="display:block;font-size:0.82em;color:#1e5aa8;fo
                     const nowVisible = !visible;
                     settings.style.display = visible ? 'none' : 'block';
                     toggle.setAttribute('aria-expanded', (nowVisible).toString());
-                    // when opening, refresh fields for the currently selected agent
                     if (nowVisible) {
                         try { await updateAgentUIFromSelection(); } catch (e) { /* ignore */ }
                         const promptField = document.getElementById('agent-prompt');
@@ -3001,56 +3388,48 @@ const NOTE_STYLE_ATTR = ' style="display:block;font-size:0.82em;color:#1e5aa8;fo
                             requestAnimationFrame(() => autoResizeTextarea(promptField));
                         }
                     }
-                    // after layout changes, sync thumbnail drawer sizing to account for new page height
                     scheduleThumbnailDrawerHeightSync();
                     setTimeout(() => scheduleThumbnailDrawerHeightSync(), 80);
                 });
             }
             if (saveBtn) saveBtn.addEventListener('click', async () => { await saveCurrentAgent(); scheduleThumbnailDrawerHeightSync(); });
             if (deleteBtn) deleteBtn.addEventListener('click', async () => { await deleteCurrentAgent(); scheduleThumbnailDrawerHeightSync(); });
-            const reasoningSelect = document.getElementById('agent-reasoning-effort');
-            if (modelSelect) {
-                AVAILABLE_AGENT_MODELS.forEach(value => ensureModelOption(modelSelect, value));
-                modelSelect.addEventListener('change', () => {
-                    const selectedModel = String(modelSelect.value || '').trim();
-                    updateReasoningUI(selectedModel);
-                    const selectedReasoning = reasoningSelect ? String(reasoningSelect.value || '').trim().toLowerCase() : DEFAULT_REASONING_EFFORT;
-                    const normalizedReasoning = ['low','medium','high'].includes(selectedReasoning) ? selectedReasoning : DEFAULT_REASONING_EFFORT;
-                    const selectEl = document.getElementById('agent-select');
-                    const agentName = selectEl && selectEl.value ? selectEl.value : '';
-                    if (agentName) {
-                        if (!agentsCache[agentName]) {
-                            agentsCache[agentName] = { name: agentName };
-                        }
-                        agentsCache[agentName].model = selectedModel || DEFAULT_AGENT_MODEL;
-                        agentsCache[agentName].reasoning_effort = normalizedReasoning;
-                        cacheAgentFingerprint(agentName, agentsCache[agentName]);
+
+            if (nameInput) {
+                nameInput.addEventListener('input', () => {
+                    if (!currentAgentDraft) {
+                        return;
                     }
-                    scheduleThumbnailDrawerHeightSync();
-                });
-                updateReasoningUI(modelSelect.value);
-            }
-            if (reasoningSelect) {
-                reasoningSelect.addEventListener('change', () => {
-                    const value = String(reasoningSelect.value || '').trim().toLowerCase();
-                    const normalized = ['low','medium','high'].includes(value) ? value : DEFAULT_REASONING_EFFORT;
-                    reasoningSelect.value = normalized;
-                    const selectEl = document.getElementById('agent-select');
-                    const agentName = selectEl && selectEl.value ? selectEl.value : '';
-                    if (agentName) {
-                        if (!agentsCache[agentName]) {
-                            agentsCache[agentName] = { name: agentName, model: DEFAULT_AGENT_MODEL };
-                        }
-                        agentsCache[agentName].reasoning_effort = normalized;
-                        cacheAgentFingerprint(agentName, agentsCache[agentName]);
-                    }
-                    scheduleThumbnailDrawerHeightSync();
+                    currentAgentDraft.name = String(nameInput.value || '').trim();
+                    markAgentDirty();
                 });
             }
 
-            // wire up syncs
-            syncRangeAndNumber(document.getElementById('agent-temperature'), document.getElementById('agent-temperature-number'));
-            syncRangeAndNumber(document.getElementById('agent-top-p'), document.getElementById('agent-top-p-number'));
+            if (promptTextarea) {
+                promptTextarea.addEventListener('input', () => {
+                    if (!currentAgentDraft) {
+                        return;
+                    }
+                    currentAgentDraft.prompt = promptTextarea.value;
+                    markAgentDirty();
+                    promptTextarea.dataset.needsResize = 'true';
+                    autoResizeTextarea(promptTextarea);
+                });
+            }
+
+            if (modelSelect) {
+                modelSelect.addEventListener('change', () => {
+                    if (!currentAgentDraft) {
+                        return;
+                    }
+                    const selectedModel = String(modelSelect.value || '').trim() || DEFAULT_AGENT_MODEL;
+                    currentAgentDraft.model = selectedModel;
+                    ensureAgentDraftModelSettings(currentAgentDraft, selectedModel);
+                    renderAgentParameterControls(selectedModel);
+                    markAgentDirty();
+                    scheduleThumbnailDrawerHeightSync();
+                });
+            }
 
             // Load selector asynchronously; don't block UI interactivity
             renderAgentSelector().catch(() => {});
@@ -5562,7 +5941,13 @@ const NOTE_STYLE_ATTR = ' style="display:block;font-size:0.82em;color:#1e5aa8;fo
             if not model_override:
                 model_override = str(request_payload.get('model') or '').strip()
             reasoning_override = str(request_payload.get('reasoning_effort') or '').strip().lower()
-            agent_for_run = dict(agent)
+            snapshot = request_payload.get('agent_snapshot')
+            if isinstance(snapshot, dict):
+                agent_for_run = dict(agent)
+                agent_for_run.update(snapshot)
+            else:
+                agent_for_run = dict(agent)
+            agent_for_run.setdefault('name', agent_name or '')
             if model_override:
                 agent_for_run['model'] = model_override
             if reasoning_override in {'low', 'medium', 'high'}:

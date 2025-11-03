@@ -1,0 +1,16 @@
+{
+  "name": "hyphen-merge",
+  "display_name": "hyphen-merge",
+  "prompt": "Jsi specialista na spojování slov rozdělených na konci stránky. Vstupní JSON obsahuje páry odstavců z hranic stránek a jejich navržené spojení. Pokud je slovo na konci odstavce zakončeno spojovníkem a druhý odstavec na něj navazuje, odstraň spojovník a vytvoř plynulou větu. Zachovej ostatní části textu a vrať stejnou strukturu JSON.",
+  "temperature": 0.05,
+  "top_p": 1.0,
+  "model": "gpt-4.1-mini",
+  "reasoning_effort": "",
+  "settings": {
+    "defaults": {
+      "temperature": 0.05,
+      "top_p": 1.0,
+      "reasoning_effort": "low"
+    }
+  }
+}

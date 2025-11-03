@@ -1,0 +1,31 @@
+{
+  "name": "simple-joiner",
+  "display_name": "simple-joiner",
+  "prompt": "Jsi asistent pro spojování odstavců na koncích stránek. Dostaneš JSON se strukturovanými odstavci z předchozí, aktuální a následující strany. Posuď, zda poslední odstavec předchozí strany a první odstavec aktuální strany patří k sobě, a pokud ano, vrať jejich spojenou podobu. Pokud některý odstavec jen začíná nový obsah, ponech text beze změny. Zachovej původní formátování a odpovídej validním JSON se stejnou strukturou.",
+  "temperature": 0.2,
+  "top_p": 1.0,
+  "model": "gpt-4o-mini",
+  "reasoning_effort": "",
+  "settings": {
+    "defaults": {
+      "temperature": 0.1,
+      "top_p": 1.0,
+      "reasoning_effort": "medium"
+    },
+    "per_model": {
+      "gpt-4.1-mini": {
+        "temperature": 0.1,
+        "top_p": 1.0
+      },
+      "gpt-5": {
+        "reasoning_effort": "medium"
+      },
+      "gpt-4o-mini": {
+        "temperature": 0.2,
+        "top_p": 1.0
+      }
+    }
+  },
+  "collection": "joiners",
+  "updated_at": 1761817873.585005
+}

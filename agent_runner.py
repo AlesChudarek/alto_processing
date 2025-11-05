@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
@@ -119,6 +120,10 @@ class AgentRunnerError(RuntimeError):
     """Raised when an agent cannot be executed due to configuration issues."""
 
 
+class AgentDiffApplicationError(RuntimeError):
+    """Raised when diff-based agent output cannot be applied."""
+
+
 _client: Optional[OpenAI] = None
 
 
@@ -197,6 +202,127 @@ def _extract_usage(response_dict: Dict[str, Any]) -> Dict[str, Any]:
     return {key: usage[key] for key in allowed if key in usage}
 
 
+def _strip_code_fences(text: str) -> str:
+    """Remove common Markdown code fences to simplify JSON parsing."""
+    if not isinstance(text, str):
+        return text
+    stripped = text.strip()
+    if stripped.startswith("```") and stripped.endswith("```"):
+        inner = stripped.split("\n", 1)
+        if len(inner) == 2:
+            payload = inner[1]
+            closing_index = payload.rfind("\n```")
+            if closing_index != -1:
+                return payload[:closing_index].strip()
+        return stripped.strip("`").strip()
+    return stripped
+
+
+def _safe_json_loads(candidate: str) -> Optional[Dict[str, Any]]:
+    """Parse JSON if possible, returning None on failure."""
+    if not candidate or not isinstance(candidate, str):
+        return None
+    text = _strip_code_fences(candidate)
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _log_diff_warning(payload: Dict[str, Any], message: str) -> None:
+    """Print a warning about diff processing failure including page context."""
+    if not isinstance(payload, dict):
+        payload = {}
+    page_meta = {}
+    if isinstance(payload.get("page_meta"), dict):
+        page_meta = payload["page_meta"]
+    details = []
+    page_uuid = (
+        payload.get("page_uuid")
+        or payload.get("page_id")
+        or page_meta.get("page_uuid")
+        or page_meta.get("uuid")
+    )
+    if page_uuid:
+        details.append(f"page_uuid={page_uuid}")
+    page_label = (
+        payload.get("page_number")
+        or payload.get("page_index")
+        or page_meta.get("page")
+        or page_meta.get("page_number")
+    )
+    if page_label not in (None, "", []):
+        details.append(f"page_ref={page_label}")
+    context = ", ".join(details) if details else "page_context=unknown"
+    print(f"[AgentDiff] {message} ({context})")
+
+
+def _apply_diff_to_document(
+    document: Dict[str, Any],
+    diff_payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Apply a diff `{changes: [...]}` to the original document payload."""
+    if not isinstance(document, dict):
+        raise AgentDiffApplicationError("Vstupní dokument má neočekávaný formát.")
+    original_blocks = document.get("blocks")
+    if not isinstance(original_blocks, list):
+        raise AgentDiffApplicationError("Vstupní dokument neobsahuje pole 'blocks'.")
+    changes = diff_payload.get("changes")
+    if not isinstance(changes, list):
+        raise AgentDiffApplicationError("Diff výstup postrádá pole 'changes'.")
+
+    # Deep copy input blocks so we don't mutate cached originals.
+    cloned_blocks = []
+    block_index_map: Dict[str, Dict[str, Any]] = {}
+    for block in original_blocks:
+        cloned = copy.deepcopy(block)
+        cloned_blocks.append(cloned)
+        block_id = cloned.get("id")
+        if isinstance(block_id, str):
+            block_index_map[block_id] = cloned
+
+    removed_ids: set[str] = set()
+
+    for change in changes:
+        if not isinstance(change, dict):
+            raise AgentDiffApplicationError("Položka v 'changes' není objekt.")
+        block_id = change.get("id")
+        if not isinstance(block_id, str) or not block_id.strip():
+            raise AgentDiffApplicationError("Položka diffu postrádá platné 'id'.")
+        target = block_index_map.get(block_id)
+        if target is None:
+            raise AgentDiffApplicationError(f"Diff odkazuje na neznámý blok '{block_id}'.")
+        block_type = str(target.get("type") or "").lower()
+        if block_type == "note":
+            # Notes slouží jen jako kontext – ignorujeme změny i smazání.
+            continue
+        if "text" not in change:
+            # Bez textu není co aplikovat; přeskočíme tichou úpravou.
+            continue
+        raw_text = change.get("text")
+        text_value = "" if raw_text is None else str(raw_text)
+        if not text_value.strip():
+            removed_ids.add(block_id)
+            continue
+        target["text"] = text_value
+
+    if not removed_ids and all(block.get("text") == original.get("text") for block, original in zip(cloned_blocks, original_blocks)):
+        # No effective changes – return original clone to keep structure uniform.
+        result_document = copy.deepcopy(document)
+        result_document["blocks"] = cloned_blocks
+        return result_document
+
+    result_blocks = [
+        block for block in cloned_blocks
+        if not isinstance(block.get("id"), str) or block.get("id") not in removed_ids
+    ]
+
+    result_document = copy.deepcopy(document)
+    result_document["blocks"] = result_blocks
+    return result_document
+
+
 def _infer_block_type(element) -> str:
     name = (element.name or "").lower()
     if name in {"h1", "h2", "h3"}:
@@ -273,6 +399,19 @@ def _html_to_blocks(html_text: str) -> list[Dict[str, str]]:
 
 
 def _build_document_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    collection = str(payload.get("collection") or "").strip().lower()
+    if collection == "joiners":
+        context = payload.get("stitch_context")
+        if not context:
+            raise AgentRunnerError("Chybí data pro napojení stran.")
+        try:
+            serialized = json.loads(json.dumps(context, ensure_ascii=False))
+        except (TypeError, ValueError) as exc:
+            raise AgentRunnerError(f"Kontext pro napojení stran není validní JSON: {exc}") from exc
+        if isinstance(serialized, dict) and "language_hint" not in serialized:
+            serialized["language_hint"] = payload.get("language_hint") or DEFAULT_LANGUAGE_HINT
+        return serialized
+
     python_html = payload.get("python_html")
     if not python_html or not str(python_html).strip():
         raise AgentRunnerError("Python výstup pro agenta je prázdný.")
@@ -462,6 +601,35 @@ def run_agent(agent: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
     text = _extract_output_text(response)
     stop_reason = _extract_stop_reason(response_dict)
     usage = _extract_usage(response_dict)
+    diff_applied = False
+    diff_changes = None
+    output_document: Optional[Dict[str, Any]] = None
+
+    parsed_output = _safe_json_loads(text)
+    blocks_present = isinstance(document_payload.get("blocks"), list)
+    if blocks_present and parsed_output:
+        if isinstance(parsed_output.get("changes"), list):
+            try:
+                applied_document = _apply_diff_to_document(document_payload, parsed_output)
+            except AgentDiffApplicationError as exc:
+                _log_diff_warning(document_payload, f"Diff aplikace selhala: {exc}")
+                text = json.dumps(document_payload, ensure_ascii=False, indent=2)
+            else:
+                text = json.dumps(applied_document, ensure_ascii=False, indent=2)
+                diff_applied = True
+                diff_changes = copy.deepcopy(parsed_output.get("changes"))
+                output_document = applied_document
+        elif isinstance(parsed_output.get("blocks"), list):
+            # Agent vrátil plný dokument – znormalizujeme formátování.
+            text = json.dumps(parsed_output, ensure_ascii=False, indent=2)
+            output_document = parsed_output
+        else:
+            text = text.strip()
+    elif parsed_output and isinstance(parsed_output.get("blocks"), list):
+        # I když nemáme 'blocks' v document_payload (např. joiner snapshot),
+        # uchováme výsledek pro případné další zpracování na klientovi.
+        output_document = parsed_output
+        text = json.dumps(parsed_output, ensure_ascii=False, indent=2)
 
     return {
         "text": text,
@@ -471,4 +639,7 @@ def run_agent(agent: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
         "usage": usage,
         "input_document": document_payload,
         "reasoning_effort": agent.get("reasoning_effort"),
+        "diff_applied": diff_applied,
+        "diff_changes": diff_changes if diff_applied else None,
+        "output_document": output_document,
     }

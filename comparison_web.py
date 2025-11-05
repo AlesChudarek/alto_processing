@@ -1146,6 +1146,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             font-family: inherit;
             box-sizing: border-box;
             resize: none;
+            overflow: hidden;
         }
         button:not(.page-thumbnail):not(.thumbnail-toggle):not(.diff-toggle):not(.agent-diff-toggle) {
             background-color: #007bff;
@@ -2479,6 +2480,52 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             return '';
         }
 
+        function buildSplitSnippetPreview(section, sectionName) {
+            if (!section) {
+                return null;
+            }
+            const firstKey = sectionName === 'start' ? 'previous' : 'current';
+            const secondKey = sectionName === 'start' ? 'current' : 'next';
+            const first = section[firstKey];
+            const second = section[secondKey];
+            if (!first && !second) {
+                return null;
+            }
+            const htmlParts = [];
+            const textParts = [];
+            const pushSnippet = (snippet) => {
+                if (!snippet) {
+                    return;
+                }
+                const rawText = typeof snippet.text === 'string' ? snippet.text : '';
+                const normalizedText = rawText.replace(/\s+/g, ' ').trim();
+                if (normalizedText) {
+            textParts.push(normalizedText);
+        }
+        if (typeof snippet.html === 'string' && snippet.html.trim()) {
+            htmlParts.push(snippet.html);
+        } else if (normalizedText) {
+            htmlParts.push(`<p>${escapeHtml(normalizedText)}</p>`);
+                }
+            };
+            pushSnippet(first);
+            pushSnippet(second);
+    if (!htmlParts.length && !textParts.length) {
+        return null;
+    }
+    const base = first || second || {};
+    return {
+        html: htmlParts.join(''),
+        text: textParts.join('\\n\\n'),
+                tag: '',
+                page_uuid: base.page_uuid || '',
+                page_number: base.page_number || '',
+                page_index: base.page_index,
+                page_title: base.page_title || '',
+                split: true,
+            };
+        }
+
         function computeJoinedSnippetFromContext(stitchContext, sectionName) {
             if (!stitchContext || !stitchContext.sections || !stitchContext.sections[sectionName]) {
                 return null;
@@ -2566,11 +2613,17 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 return true;
             }
             if (action === 'split') {
-                section.merged = null;
-                const placeholderMessage = (options && typeof options.placeholder === 'string' && options.placeholder.trim())
-                    ? options.placeholder.trim()
-                    : 'Bez výsledku.';
-                renderStitchSnippet(elementId, null, { allowHtml: false, placeholder: `<div class="muted">${escapeHtml(placeholderMessage)}</div>` });
+                const preview = buildSplitSnippetPreview(section, sectionName);
+                if (preview) {
+                    section.merged = preview;
+                    renderStitchSnippet(elementId, preview, { allowHtml: Boolean(preview.html), placeholder: '<div class="muted">Bez výsledku.</div>' });
+                } else {
+                    section.merged = null;
+                    const placeholderMessage = (options && typeof options.placeholder === 'string' && options.placeholder.trim())
+                        ? options.placeholder.trim()
+                        : 'Bez výsledku.';
+                    renderStitchSnippet(elementId, null, { allowHtml: false, placeholder: `<div class="muted">${escapeHtml(placeholderMessage)}</div>` });
+                }
                 return true;
             }
             return false;
@@ -2611,7 +2664,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             if (!textA || !textB) {
                 return '0';
             }
-            if (SENTENCE_END_REGEX.test(textA) && UPPERCASE_START_REGEX.test(textB)) {
+            if (SENTENCE_END_REGEX.test(textA) && SENTENCE_START_REGEX.test(textB)) {
                 return '0';
             }
             if (TRAILING_HYPHEN_SEQUENCE_REGEX.test(textA)) {
@@ -2659,43 +2712,57 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         }
 
         function buildJoinerAgentPayloadFromContext(context) {
-            if (!context) {
+            if (!context || !context.sections) {
                 return null;
             }
-            const cloneSnippet = (snippet) => {
-                if (!snippet) {
+
+            const serializeSnippet = (snippet, blockId, role) => {
+                if (!snippet || typeof snippet.text !== 'string') {
                     return null;
                 }
+                const text = snippet.text.replace(/\s+/g, ' ').trim();
+                if (!text) {
+                    return null;
+                }
+                const tag = (snippet.tag || '').trim().toLowerCase();
                 return {
-                    text: snippet.text || '',
-                    html: snippet.html || '',
-                    tag: snippet.tag || '',
-                    page_uuid: snippet.page_uuid || '',
-                    page_number: snippet.page_number || '',
-                    page_index: snippet.page_index,
-                    page_title: snippet.page_title || '',
+                    id: blockId,
+                    role,
+                    tag,
+                    text,
                 };
             };
+
+            const startSection = context.sections.start || {};
+            const endSection = context.sections.end || {};
+
+            const payloadPairs = {};
+
+            const startPrevious = serializeSnippet(startSection.previous, 'start-previous', 'previous');
+            const startCurrent = serializeSnippet(startSection.current, 'start-current', 'current');
+            if (startPrevious && startCurrent) {
+                payloadPairs.start = {
+                    previous: startPrevious,
+                    current: startCurrent,
+                };
+            }
+
+            const endCurrent = serializeSnippet(endSection.current, 'end-current', 'current');
+            const endNext = serializeSnippet(endSection.next, 'end-next', 'next');
+            if (endCurrent && endNext) {
+                payloadPairs.end = {
+                    current: endCurrent,
+                    next: endNext,
+                };
+            }
+
+            if (!Object.keys(payloadPairs).length) {
+                return null;
+            }
+
             return {
                 language_hint: DEFAULT_LANGUAGE_HINT,
-                meta: context.meta || {},
-                pages: {
-                    previous: context.pages.previous || null,
-                    current: context.pages.current || null,
-                    next: context.pages.next || null,
-                },
-                sections: {
-                    start: {
-                        previous: cloneSnippet(context.sections.start.previous),
-                        current: cloneSnippet(context.sections.start.current),
-                        merged: cloneSnippet(context.sections.start.merged),
-                    },
-                    end: {
-                        current: cloneSnippet(context.sections.end.current),
-                        next: cloneSnippet(context.sections.end.next),
-                        merged: cloneSnippet(context.sections.end.merged),
-                    },
-                },
+                pairs: payloadPairs,
             };
         }
 
@@ -3049,14 +3116,131 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 return true;
             }
 
-            let parsed;
-            let parseError = null;
-            try {
-                parsed = JSON.parse(rawText);
-            } catch (error) {
-                parseError = error;
-                parsed = null;
-            }
+            const stripJoinerCodeFences = (input) => {
+                if (typeof input !== 'string') {
+                    return input;
+                }
+                let text = input.trim();
+                if (!text.startsWith('```')) {
+                    return text;
+                }
+                const openingMatch = text.match(/^```[a-zA-Z0-9_-]*\s*/);
+                if (openingMatch) {
+                    text = text.slice(openingMatch[0].length);
+                } else {
+                    text = text.slice(3);
+                }
+                const closingIndex = text.lastIndexOf('```');
+                if (closingIndex !== -1) {
+                    text = text.slice(0, closingIndex);
+                }
+                return text.trim();
+            };
+
+            const safeParseJoinerJson = (input) => {
+                if (typeof input !== 'string') {
+                    return { parsed: null, error: null, usedRepair: false, repairedText: null };
+                }
+                const trimmed = stripJoinerCodeFences(input);
+                if (!trimmed) {
+                    return { parsed: null, error: null, usedRepair: false, repairedText: null };
+                }
+                try {
+                    return { parsed: JSON.parse(trimmed), error: null, usedRepair: false, repairedText: null };
+                } catch (error) {
+                    const repaired = repairJsonStringLineBreaks(trimmed);
+                    if (repaired && repaired !== trimmed) {
+                        try {
+                            console.warn('[JoinerDebug] Joiner JSON repaired before parse.');
+                            return { parsed: JSON.parse(repaired), error: null, usedRepair: true, repairedText: repaired };
+                        } catch (repairError) {
+                            return { parsed: null, error: repairError, usedRepair: true, repairedText: repaired };
+                        }
+                    }
+                    return { parsed: null, error, usedRepair: false, repairedText: null };
+                }
+            };
+
+            const { parsed, error: parseError, usedRepair, repairedText } = safeParseJoinerJson(rawText);
+
+            const applyPairsFormat = (pairsObject, sourceText) => {
+                if (!pairsObject || typeof pairsObject !== 'object' || Array.isArray(pairsObject)) {
+                    return false;
+                }
+                const decisions = { start: null, end: null };
+                let applied = false;
+                let hasValidAction = false;
+
+                const updateSnippet = (pairKey, snippet, pairResult) => {
+                    if (!snippet) {
+                        return;
+                    }
+                    const merged = pairResult && typeof pairResult === 'object' ? pairResult.merged : null;
+                    const providedText = merged && typeof merged.text === 'string'
+                        ? merged.text
+                        : (pairResult && typeof pairResult.text === 'string' ? pairResult.text : '');
+                    const preferredTag = merged && typeof merged.tag === 'string' ? merged.tag : '';
+                    const normalizedText = (providedText || '').trim();
+                    if (normalizedText) {
+                        snippet.text = normalizedText;
+                        const tag = (preferredTag || snippet.tag || '').trim();
+                        if (tag) {
+                            snippet.tag = tag;
+                            snippet.html = `<${tag}>${escapeHtml(normalizedText)}</${tag}>`;
+                        } else {
+                            snippet.html = escapeHtml(normalizedText);
+                        }
+                    }
+                    const elementId = pairKey === 'start' ? 'stitch-start-merged' : 'stitch-end-merged';
+                    renderStitchSnippet(
+                        elementId,
+                        snippet,
+                        { allowHtml: Boolean(snippet.html), placeholder: '<div class="muted">Bez výsledku.</div>' }
+                    );
+                };
+
+                const handlePair = (pairKey, pairResult) => {
+                    if (!pairResult || typeof pairResult !== 'object') {
+                        return;
+                    }
+                    const actionLabel = mapActionLabel(pairResult.action);
+                    if (!actionLabel) {
+                        return;
+                    }
+                    hasValidAction = true;
+                    if (actionLabel === 'split') {
+                        if (applyJoinerActionToSection(ctx, pairKey, 'split', {})) {
+                            decisions[pairKey] = '0';
+                            applied = true;
+                        }
+                        return;
+                    }
+                    const joinAction = actionLabel === 'merge' ? 'merge' : 'join';
+                    if (applyJoinerActionToSection(ctx, pairKey, joinAction, {})) {
+                        const section = ctx.stitchContext.sections ? ctx.stitchContext.sections[pairKey] : null;
+                        const snippet = section ? section.merged : null;
+                        if (snippet) {
+                            updateSnippet(pairKey, snippet, pairResult);
+                            decisions[pairKey] = '1';
+                            applied = true;
+                        }
+                    }
+                };
+
+                handlePair('start', pairsObject.start);
+                handlePair('end', pairsObject.end);
+
+                if (applied) {
+                    finalizeJoinerUiAfterActions(ctx, sourceText || rawText, {
+                        source: 'pairs-json',
+                        decision: decisions,
+                    });
+                }
+                if (applied) {
+                    return true;
+                }
+                return hasValidAction ? false : 'skip';
+            };
 
             if (parsed === null || parsed === undefined) {
                 if (initialAction && applyActionToAllSections(initialAction, rawText)) {
@@ -3064,11 +3248,26 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 }
                 if (parseError) {
                     console.warn('Joiner agent nevrátil validní JSON:', parseError);
+                    if (usedRepair && repairedText) {
+                        console.warn('[JoinerDebug] Repaired joiner JSON candidate:', repairedText);
+                    } else {
+                        console.warn('[JoinerDebug] Raw joiner result text:', rawText);
+                    }
                 }
                 const fallbackHtml = `<div class="muted">${escapeHtml(rawText)}</div>`;
                 renderStitchSnippet('stitch-start-merged', null, { allowHtml: false, placeholder: fallbackHtml });
                 renderStitchSnippet('stitch-end-merged', null, { allowHtml: false, placeholder: fallbackHtml });
                 return false;
+            }
+
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.pairs && typeof parsed.pairs === 'object') {
+                const pairsOutcome = applyPairsFormat(parsed.pairs, rawText);
+                if (pairsOutcome === true) {
+                    return true;
+                }
+                if (pairsOutcome === 'skip') {
+                    delete parsed.pairs;
+                }
             }
 
             if (typeof parsed === 'string' || typeof parsed === 'number' || typeof parsed === 'boolean') {
@@ -3124,8 +3323,27 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 }
                 const candidateHtml = section.merged_html || section.mergedHtml || section.html;
                 const textCandidate = section.merged_text || section.mergedText || section.merged || section.joined || section.result || section.text || '';
-                const normalizedText = typeof textCandidate === 'string' ? textCandidate : '';
-                const normalizedHtml = typeof candidateHtml === 'string' ? candidateHtml : '';
+                let normalizedText = typeof textCandidate === 'string' ? textCandidate : '';
+                let normalizedHtml = typeof candidateHtml === 'string' ? candidateHtml : '';
+                const blockCandidates = Array.isArray(section.merged_blocks)
+                    ? section.merged_blocks
+                    : (Array.isArray(section.mergedBlocks)
+                        ? section.mergedBlocks
+                        : (Array.isArray(section.blocks) ? section.blocks : null));
+                if (blockCandidates) {
+                    if (!normalizedHtml.trim()) {
+                        const html = documentBlocksToHtml({ blocks: blockCandidates });
+                        if (html) {
+                            normalizedHtml = html;
+                        }
+                    }
+                    if (!normalizedText.trim()) {
+                        const textFromBlocks = documentBlocksToText({ blocks: blockCandidates });
+                        if (textFromBlocks) {
+                            normalizedText = textFromBlocks;
+                        }
+                    }
+                }
                 if (!normalizedText.trim() && !normalizedHtml.trim()) {
                     return null;
                 }
@@ -3137,6 +3355,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     page_number: section.page_number || '',
                     page_index: section.page_index,
                     page_title: section.page_title || '',
+                    split: Boolean(section.split),
                 };
             };
 
@@ -3144,13 +3363,13 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             if (parsedSections.start) {
                 const mergedStart = normalizeMerged(parsedSections.start.merged || parsedSections.start);
                 ctx.stitchContext.sections.start.merged = mergedStart;
-                decisions.start = mergedStart ? '1' : '0';
+                decisions.start = mergedStart ? (mergedStart.split ? '0' : '1') : '0';
                 renderStitchSnippet('stitch-start-merged', mergedStart, { allowHtml: Boolean(mergedStart && mergedStart.html), placeholder: '<div class="muted">Bez výsledku.</div>' });
             }
             if (parsedSections.end) {
                 const mergedEnd = normalizeMerged(parsedSections.end.merged || parsedSections.end);
                 ctx.stitchContext.sections.end.merged = mergedEnd;
-                decisions.end = mergedEnd ? '1' : '0';
+                decisions.end = mergedEnd ? (mergedEnd.split ? '0' : '1') : '0';
                 renderStitchSnippet('stitch-end-merged', mergedEnd, { allowHtml: Boolean(mergedEnd && mergedEnd.html), placeholder: '<div class="muted">Bez výsledku.</div>' });
             }
             finalizeJoinerUiAfterActions(ctx, rawText, {
@@ -3210,9 +3429,9 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         const DEFAULT_LANGUAGE_HINT = 'cs';
         const MANUAL_JOINER_NAME = 'manual-joiner';
         const HYPHEN_LIKE_REGEX = /[\-\u2010\u2011\u2012\u2013\u2014\u2015\u2212\uFE63\uFF0D]/;
-        const TRAILING_HYPHEN_SEQUENCE_REGEX = /[\-\u2010\u2011\u2012\u2013\u2014\u2015\u2212\uFE63\uFF0D]["'”»›)\]]*$/;
-        const SENTENCE_END_REGEX = /[.!?…]+["'”»›)\]]*$/u;
-        const UPPERCASE_START_REGEX = /^[\s"'„“”«»‚‘’‹›(\[]*[A-Z\u00C0-\u0178]/;
+        const TRAILING_HYPHEN_SEQUENCE_REGEX = /[\-\u2010\u2011\u2012\u2013\u2014\u2015\u2212\uFE63\uFF0D]["'„“”«»‚‘’‹›)\]\}]*$/;
+        const SENTENCE_END_REGEX = /[.!?…]+["'„“”«»‚‘’‹›)\]\}]*$/u;
+        const SENTENCE_START_REGEX = /^[\s"'„“”«»‚‘’‹›(\[{\-—–]*[A-Z\u00C0-\u0178]/u;
 
         function normalizeModelId(model) {
             return String(model || '').trim().toLowerCase();
@@ -3900,6 +4119,42 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             scheduleThumbnailDrawerHeightSync();
         }
 
+        function preparePromptTextarea(textarea) {
+            if (!textarea) return;
+            textarea.style.overflow = 'hidden';
+            textarea.style.resize = 'none';
+            if (textarea.dataset.preventWheelScroll === 'true') {
+                return;
+            }
+            const wheelHandler = (event) => {
+                if (!event) {
+                    return;
+                }
+                if (event.ctrlKey || event.metaKey || event.altKey) {
+                    return;
+                }
+                if (Math.abs(event.deltaY) < 0.5 && Math.abs(event.deltaX) < 0.5) {
+                    return;
+                }
+                event.preventDefault();
+                const target = document.scrollingElement;
+                if (target && typeof target.scrollBy === 'function') {
+                    target.scrollBy({
+                        top: event.deltaY,
+                        left: event.deltaX,
+                        behavior: 'auto',
+                    });
+                } else {
+                    window.scrollTo(
+                        window.pageXOffset + (event.deltaX || 0),
+                        window.pageYOffset + (event.deltaY || 0)
+                    );
+                }
+            };
+            textarea.addEventListener('wheel', wheelHandler, { passive: false });
+            textarea.dataset.preventWheelScroll = 'true';
+        }
+
         function setAgentFields(ctx, agent) {
             const normalized = normalizeAgentData(agent || {});
             ctx.currentAgentDraft = deepCloneAgent(normalized);
@@ -3913,6 +4168,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             }
             if (promptEl) {
                 promptEl.value = ctx.currentAgentDraft.prompt || DEFAULT_AGENT_PROMPT;
+                preparePromptTextarea(promptEl);
                 if (!promptEl.dataset.autoresizeBound) {
                     promptEl.dataset.autoresizeBound = 'true';
                     promptEl.addEventListener('input', () => autoResizeTextarea(promptEl));
@@ -3965,6 +4221,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 }
                 promptEl.readOnly = isManual;
                 promptEl.disabled = isManual;
+                preparePromptTextarea(promptEl);
             }
             const modelEl = getContextElement(ctx, 'modelSelectId');
             if (modelEl) {
@@ -4071,7 +4328,53 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
 
         // newAgent removed — creation/editing handled via saveCurrentAgent and changing name
 
-        function parseAgentResultDocument(text) {
+        function repairJsonStringLineBreaks(raw) {
+            if (typeof raw !== 'string' || !raw) {
+                return raw;
+            }
+            let needsRepair = false;
+            for (let i = 0; i < raw.length; i += 1) {
+                const code = raw.charCodeAt(i);
+                if (code === 10 || code === 13 || code === 0x2028 || code === 0x2029) {
+                    needsRepair = true;
+                    break;
+                }
+            }
+            if (!needsRepair) {
+                return raw;
+            }
+            let fixed = '';
+            let inString = false;
+            let escaping = false;
+            for (let i = 0; i < raw.length; i += 1) {
+                const ch = raw[i];
+                const code = raw.charCodeAt(i);
+                if (escaping) {
+                    fixed += ch;
+                    escaping = false;
+                    continue;
+                }
+                if (code === 92) {
+                    fixed += ch;
+                    escaping = true;
+                    continue;
+                }
+                if (code === 34) {
+                    inString = !inString;
+                    fixed += ch;
+                    continue;
+                }
+                if (inString && (code === 10 || code === 13 || code === 0x2028 || code === 0x2029)) {
+                    fixed += '\\n';
+                    continue;
+                }
+                fixed += ch;
+            }
+            return fixed;
+        }
+
+
+        function parseAgentResultDocument(text, options = {}) {
             if (!text || typeof text !== 'string') {
                 return null;
             }
@@ -4082,6 +4385,22 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             try {
                 return JSON.parse(trimmed);
             } catch (err) {
+                const repaired = repairJsonStringLineBreaks(trimmed);
+                if (repaired && repaired !== trimmed) {
+                    try {
+                        console.warn('[JoinerDebug] parseAgentResultDocument repaired newline characters.');
+                        return JSON.parse(repaired);
+                    } catch (repairError) {
+                        if (!(options && options.silent)) {
+                            console.warn('[JoinerDebug] parseAgentResultDocument repair failed:', repairError);
+                            console.warn('[JoinerDebug] Original text:', trimmed);
+                            console.warn('[JoinerDebug] Repaired text:', repaired);
+                        }
+                    }
+                } else if (!(options && options.silent)) {
+                    console.warn('[JoinerDebug] parseAgentResultDocument parse error:', err);
+                    console.warn('[JoinerDebug] Document text:', trimmed);
+                }
                 return null;
             }
         }
@@ -4144,6 +4463,23 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 parts.push(markup);
             }
             return parts.length ? parts.join("") : null;
+        }
+
+        function documentBlocksToText(documentPayload) {
+            if (!documentPayload || typeof documentPayload !== 'object' || !Array.isArray(documentPayload.blocks)) {
+                return '';
+            }
+            const parts = [];
+            for (const block of documentPayload.blocks) {
+                if (!block || typeof block.text !== 'string') {
+                    continue;
+                }
+                const normalized = block.text.replace(/\s+/g, ' ').trim();
+                if (normalized) {
+                    parts.push(normalized);
+                }
+            }
+            return parts.join('\\n\\n');
         }
 
 
@@ -4797,6 +5133,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             const modelSelect = getContextElement(ctx, 'modelSelectId');
             const nameInput = getContextElement(ctx, 'nameInputId');
             const promptTextarea = getContextElement(ctx, 'promptTextareaId');
+            preparePromptTextarea(promptTextarea);
 
             if (select) select.addEventListener('change', () => updateAgentUIFromSelection(ctx));
             if (runBtn) {
@@ -4836,6 +5173,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                         try { await updateAgentUIFromSelection(ctx); } catch (e) { /* ignore */ }
                         const promptField = getContextElement(ctx, 'promptTextareaId');
                         if (promptField) {
+                            preparePromptTextarea(promptField);
                             requestAnimationFrame(() => autoResizeTextarea(promptField));
                         }
                     }

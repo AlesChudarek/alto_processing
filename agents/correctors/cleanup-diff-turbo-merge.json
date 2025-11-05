@@ -1,0 +1,28 @@
+{
+  "name": "cleanup-diff-turbo-merge",
+  "display_name": "cleanup-diff-turbo-merge",
+  "prompt": "Jsi korektor zaměřený na opravy OCR rozbitých bloků bez změny obsahu. Dostaneš JSON {\"language_hint\", \"page_meta\", \"blocks\"}, kde bloky jsou {id, type, text}. Tvým úkolem je vracet pouze nutné opravy formou diffu.\n\nPravidla:\n1. Neměň strukturu, pořadí ani typy bloků. Bloky s \"type\": \"note\" vždy ponech beze změny.\n2. Zachovej plný obsah: NIKDY nepřidávej nová slova ani interpunkci, nepřesouvej text mezi bloky, neměň slovosled a neodstraňuj existující slova či věty.\n3. Smíš pouze nahrazovat jednotlivé znaky uvnitř slov (např. opravit chybné písmeno, doplnit diakritiku nebo spojit rozdělené slovo). Koncové tečky nedoplňuj, pokud v originále nebyly, a nikdy nevytvářej duplicitní kopie textu – každý nový znak musí pouze nahrazovat původní chybný znak. Při nejistotě text neměň.\n4. Odstraňovat smíš pouze izolovaný šum (např. náhodné symboly). Celý blok vyprázdni jen tehdy, pokud původně obsahoval výhradně šum bez čitelného textu.\n5. Každou změnu vrať jako {\"id\": \"...\", \"text\": \"...\"} a před odesláním diffu ověř, že se liší od originálu – totožné řetězce vynech.\n6. Výsledek napiš výhradně jako JSON {\"changes\": [...]}, bez Markdownu nebo kódových bloků. Pokud není co měnit, vrať {\"changes\": []}.\n",
+  "temperature": 0.0,
+  "top_p": 0.1,
+  "model": "gpt-4o-mini",
+  "reasoning_effort": "",
+  "settings": {
+    "defaults": {
+      "temperature": 0.0,
+      "top_p": 0.1,
+      "reasoning_effort": "medium"
+    },
+    "per_model": {
+      "gpt-4.0-mini": {
+        "temperature": 0.0,
+        "top_p": 0.1
+      },
+      "gpt-4o-mini": {
+        "temperature": 0.0,
+        "top_p": 0.1
+      }
+    }
+  },
+  "collection": "correctors",
+  "updated_at": 1762256801.449279
+}

@@ -35,19 +35,33 @@ from agent_runner import (
 
 ROOT_DIR = Path(__file__).resolve().parent
 TS_DIST_PATH = ROOT_DIR / 'dist' / 'run_original.js'
+MODEL_REGISTRY_PATH = ROOT_DIR / 'config' / 'models.json'
 DEFAULT_WIDTH = 800
 DEFAULT_HEIGHT = 1200
 DEFAULT_AGENT_PROMPT_TEXT = (
     "Jsi pečlivý korektor češtiny. Dostaneš JSON s klíči "
-    "\"language_hint\", \"page_meta\" a \"blocks\". Blocks je pole "
-    "objektů {id, type, text}. Oprav překlepy a zjevné OCR chyby pouze "
-    "v hodnotách \"text\". Nesjednocuj styl, neměň typy bloků ani jejich "
-    "pořadí. Zachovej diakritiku, pokud lze. Odpovídej pouze validním "
-    "JSON se stejnou strukturou a klíči jako vstup."
+    "\"language_hint\" a \"blocks\". Blocks je pole objektů {id, type, text}. "
+    "Oprav překlepy a zjevné OCR chyby pouze v hodnotách \"text\". Nesjednocuj styl, "
+    "neměň typy bloků ani jejich pořadí. Zachovej diakritiku, pokud lze. "
+    "Odpovídej pouze validním JSON se stejnou strukturou a klíči jako vstup."
 )
 
 # Style value reused for <note> blocks in agent diff rendering.
 NOTE_STYLE_ATTR = 'display:block;font-size:0.82em;color:#1e5aa8;font-weight:bold;'
+
+try:
+    _model_registry_raw = json.loads(MODEL_REGISTRY_PATH.read_text(encoding='utf-8'))
+    MODEL_REGISTRY = _model_registry_raw if isinstance(_model_registry_raw, dict) else {}
+except FileNotFoundError:
+    MODEL_REGISTRY = {}
+except json.JSONDecodeError as exc:  # pragma: no cover - invalid config should surface loudly
+    print(f"[ModelRegistry] Nelze načíst soubor {MODEL_REGISTRY_PATH}: {exc}")
+    MODEL_REGISTRY = {}
+if 'models' not in MODEL_REGISTRY or not isinstance(MODEL_REGISTRY['models'], list):
+    MODEL_REGISTRY['models'] = []
+if 'default_model' not in MODEL_REGISTRY or not isinstance(MODEL_REGISTRY['default_model'], str):
+    MODEL_REGISTRY['default_model'] = DEFAULT_MODEL
+MODEL_REGISTRY_JSON = json.dumps(MODEL_REGISTRY, ensure_ascii=False)
 
 KNOWN_LIBRARY_OVERRIDES: Dict[str, Dict[str, str]] = {
     "https://kramerius.mzk.cz/search/api/v5.0": {
@@ -574,6 +588,69 @@ def _supports_reasoning(model: str) -> bool:
     return _is_reasoning_model_id(model)
 
 
+def _load_json_if_string(value):
+    if not isinstance(value, str):
+        return value
+    trimmed = value.strip()
+    if not trimmed:
+        return None
+    try:
+        return json.loads(trimmed)
+    except json.JSONDecodeError:
+        return trimmed
+
+
+def _sanitize_response_format(value):
+    candidate = _load_json_if_string(value)
+    if candidate is None:
+        return None
+    if isinstance(candidate, str):
+        lowered = candidate.strip().lower()
+        if lowered == 'json_object':
+            return {'type': 'json_object'}
+        return None
+    if isinstance(candidate, dict):
+        type_value = candidate.get('type')
+        if not type_value and (candidate.get('json_schema') or candidate.get('schema') or candidate.get('name')):
+            type_value = 'json_schema'
+        if isinstance(type_value, str):
+            normalized_type = type_value.strip().lower()
+        else:
+            normalized_type = ''
+        if normalized_type == 'json_object':
+            return {'type': 'json_object'}
+        if normalized_type == 'json_schema':
+            schema_payload = candidate.get('json_schema')
+            if schema_payload is None:
+                schema_payload = {
+                    key: candidate.get(key)
+                    for key in ('name', 'schema', 'strict')
+                    if key in candidate
+                }
+            schema_payload = _load_json_if_string(schema_payload)
+            if not isinstance(schema_payload, dict):
+                return None
+            name_value = schema_payload.get('name')
+            schema_value = schema_payload.get('schema')
+            schema_value = _load_json_if_string(schema_value)
+            if isinstance(schema_value, str):
+                try:
+                    schema_value = json.loads(schema_value)
+                except json.JSONDecodeError:
+                    schema_value = None
+            if not isinstance(name_value, str) or not name_value.strip() or not isinstance(schema_value, dict):
+                return None
+            sanitized_schema = {'name': name_value.strip(), 'schema': schema_value}
+            if isinstance(schema_payload.get('strict'), bool):
+                sanitized_schema['strict'] = schema_payload['strict']
+            for extra_key, extra_value in schema_payload.items():
+                if extra_key in {'name', 'schema', 'strict'}:
+                    continue
+                sanitized_schema[extra_key] = extra_value
+            return {'type': 'json_schema', 'json_schema': sanitized_schema}
+    return None
+
+
 def agent_filepath(name: str, collection: Optional[str] = None) -> Path:
     collection_dir = ensure_agent_collection_dir(collection)
     return collection_dir / f"{name}.json"
@@ -674,6 +751,14 @@ def write_agent_file(data: dict, collection: Optional[str] = None) -> Optional[s
         'top_p': defaults_top_p,
         'reasoning_effort': defaults_reasoning,
     }
+    defaults_response_format = _sanitize_response_format(
+        defaults_input.get('response_format') if isinstance(defaults_input, dict) else None
+    )
+    if defaults_response_format:
+        try:
+            defaults_settings['response_format'] = json.loads(json.dumps(defaults_response_format))
+        except Exception:
+            defaults_settings['response_format'] = defaults_response_format
 
     per_model_settings: Dict[str, Dict[str, object]] = {}
     if isinstance(per_model_input, dict):
@@ -703,6 +788,13 @@ def write_agent_file(data: dict, collection: Optional[str] = None) -> Optional[s
                     settings.get('reasoning_effort'),
                     defaults_reasoning,
                 )
+            if 'response_format' in settings:
+                normalized_format = _sanitize_response_format(settings.get('response_format'))
+                if normalized_format:
+                    try:
+                        sanitized_entry['response_format'] = json.loads(json.dumps(normalized_format))
+                    except Exception:
+                        sanitized_entry['response_format'] = normalized_format
             per_model_settings[model_key] = sanitized_entry
 
     default_entry = per_model_settings.setdefault(model_value, {})
@@ -731,6 +823,18 @@ def write_agent_file(data: dict, collection: Optional[str] = None) -> Optional[s
         )
     else:
         default_entry.pop('reasoning_effort', None)
+    default_response_format = _sanitize_response_format(
+        default_entry.get('response_format')
+        or data.get('response_format')
+        or defaults_settings.get('response_format')
+    )
+    if default_response_format:
+        try:
+            default_entry['response_format'] = json.loads(json.dumps(default_response_format))
+        except Exception:
+            default_entry['response_format'] = default_response_format
+    else:
+        default_entry.pop('response_format', None)
 
     safe = {
         'name': nm,
@@ -747,6 +851,11 @@ def write_agent_file(data: dict, collection: Optional[str] = None) -> Optional[s
         'collection': collection_key,
         'updated_at': time.time(),
     }
+    if default_entry.get('response_format'):
+        try:
+            safe['response_format'] = json.loads(json.dumps(default_entry['response_format']))
+        except Exception:
+            safe['response_format'] = default_entry['response_format']
     if not p.parent.exists():
         p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix('.json.tmp')
@@ -1280,9 +1389,12 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         .action-row {
             display: flex;
             align-items: center;
-            justify-content: flex-start;
+            justify-content: flex-end;
             gap: 20px;
             flex-wrap: wrap;
+        }
+        #load-button {
+            min-width: calc(3 * 40px + 16px);
         }
         .tools-row {
             display: flex;
@@ -1985,12 +2097,15 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                             <select id="agent-default-model" aria-label="Vyberte model pro agenta" style="min-width:170px;"></select>
                         </div>
                         <div id="agent-parameter-fields" class="form-group" style="margin-top:8px;"></div>
-                        <div style="display:flex;gap:8px;margin-top:12px;">
+                        <div style="display:flex;gap:12px;margin-top:12px;flex-wrap:wrap;align-items:center;">
                             <span class="inline-tooltip-anchor">
                                 <button id="agent-save" type="button">Uložit agenta</button>
                                 <div id="agent-save-tooltip" class="inline-tooltip" role="status" aria-live="polite"></div>
                             </span>
                             <button id="agent-delete" type="button" style="background:#e53e3e;">Smazat</button>
+                            <div style="margin-left:auto;">
+                                <button id="agent-run-inline" type="button" style="height:36px;display:inline-flex;align-items:center;justify-content:center;padding:6px 12px;">Oprav</button>
+                            </div>
                         </div>
                     </div>
                     <div id="agent-output" style="display:none;margin-top:12px;">
@@ -2046,12 +2161,15 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                             <select id="stitch-agent-default-model" aria-label="Vyberte model pro napojovacího agenta" style="min-width:170px;"></select>
                         </div>
                         <div id="stitch-agent-parameter-fields" class="form-group" style="margin-top:8px;"></div>
-                        <div style="display:flex;gap:8px;margin-top:12px;">
+                        <div style="display:flex;gap:12px;margin-top:12px;flex-wrap:wrap;align-items:center;">
                             <span class="inline-tooltip-anchor">
                                 <button id="stitch-agent-save" type="button">Uložit agenta</button>
                                 <div id="stitch-agent-save-tooltip" class="inline-tooltip" role="status" aria-live="polite"></div>
                             </span>
                             <button id="stitch-agent-delete" type="button" style="background:#e53e3e;">Smazat</button>
+                            <div style="margin-left:auto;">
+                                <button id="stitch-agent-run-inline" type="button" style="height:36px;display:inline-flex;align-items:center;justify-content:center;padding:6px 12px;">Napoj</button>
+                            </div>
                         </div>
                     </div>
 
@@ -2133,6 +2251,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         </div>
     </div>
 
+    <script type="application/json" id="model-registry-data">__MODEL_REGISTRY_DATA__</script>
     <script type="application/json" id="default-agent-model">__DEFAULT_AGENT_MODEL__</script>
     <script type="application/json" id="default-agent-prompt-data">__DEFAULT_AGENT_PROMPT__</script>
     <script>
@@ -2195,6 +2314,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 selectSpinnerId: config.selectSpinnerId,
                 autoCheckboxId: config.autoCheckboxId,
                 runButtonId: config.runButtonId,
+                runButtonExtraIds: config.runButtonExtraIds || [],
                 expandToggleId: config.expandToggleId,
                 settingsId: config.settingsId,
                 nameInputId: config.nameInputId,
@@ -2236,6 +2356,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 selectSpinnerId: 'agent-select-spinner',
                 autoCheckboxId: 'agent-auto-correct',
                 runButtonId: 'agent-run',
+                runButtonExtraIds: ['agent-run-inline'],
                 expandToggleId: 'agent-expand-toggle',
                 settingsId: 'agent-settings',
                 nameInputId: 'agent-name',
@@ -2265,6 +2386,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 selectSpinnerId: 'stitch-agent-select-spinner',
                 autoCheckboxId: 'stitch-agent-auto-link',
                 runButtonId: 'stitch-agent-run',
+                runButtonExtraIds: ['stitch-agent-run-inline'],
                 expandToggleId: 'stitch-agent-expand-toggle',
                 settingsId: 'stitch-agent-settings',
                 nameInputId: 'stitch-agent-name',
@@ -3378,8 +3500,145 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             });
             return true;
         }
+        const MODEL_REGISTRY_DATA = (() => {
+            const element = document.getElementById('model-registry-data');
+            if (!element) {
+                return { models: [], default_model: '' };
+            }
+            const raw = element.textContent || '';
+            try {
+                const parsed = JSON.parse(raw);
+                return parsed && typeof parsed === 'object' ? parsed : { models: [], default_model: '' };
+            } catch (err) {
+                console.warn('Nelze načíst registr modelů:', err);
+                return { models: [], default_model: '' };
+            }
+        })();
+        const DEFAULT_REASONING_EFFORT = 'medium';
+        const DEFAULT_TEMPERATURE = 0.2;
+        const DEFAULT_TOP_P = 1.0;
+        const ENABLE_RESPONSE_FORMAT = false; // sleeper feature – aktivuj, až OpenRouter začne schéma respektovat
+        const FALLBACK_REASONING_PREFIXES = [
+            'openai/gpt-5',
+            'openai/o1',
+            'openai/o3',
+            'openai/o4',
+            'gpt-5',
+            'o1',
+            'o3',
+            'o4',
+        ];
+        const MODEL_CAPABILITIES_CACHE = new Map();
+
+        function loadJsonIfString(value) {
+            if (typeof value !== 'string') {
+                return value;
+            }
+            const trimmed = value.trim();
+            if (!trimmed.length) {
+                return null;
+            }
+            try {
+                return JSON.parse(trimmed);
+            } catch (err) {
+                return trimmed;
+            }
+        }
+
+        function normalizeResponseFormat(value) {
+            if (!ENABLE_RESPONSE_FORMAT) {
+                return null;
+            }
+            const candidate = loadJsonIfString(value);
+            if (!candidate) {
+                return null;
+            }
+            if (typeof candidate === 'string') {
+                const lowered = candidate.trim().toLowerCase();
+                if (lowered === 'json_object') {
+                    return { type: 'json_object' };
+                }
+                return null;
+            }
+            if (candidate && typeof candidate === 'object') {
+                let typeValue = candidate.type;
+                if (!typeValue && candidate.json_schema) {
+                    typeValue = 'json_schema';
+                } else if (!typeValue && (candidate.name || candidate.schema)) {
+                    typeValue = 'json_schema';
+                }
+                if (typeof typeValue !== 'string') {
+                    return null;
+                }
+                const normalizedType = typeValue.trim().toLowerCase();
+                if (normalizedType === 'json_object') {
+                    return { type: 'json_object' };
+                }
+                if (normalizedType === 'json_schema') {
+                    let schemaPayload = candidate.json_schema;
+                    if (!schemaPayload && (candidate.name || candidate.schema || typeof candidate.strict === 'boolean')) {
+                        schemaPayload = {};
+                        if (candidate.name !== undefined) schemaPayload.name = candidate.name;
+                        if (candidate.schema !== undefined) schemaPayload.schema = candidate.schema;
+                        if (typeof candidate.strict === 'boolean') schemaPayload.strict = candidate.strict;
+                    }
+                    schemaPayload = loadJsonIfString(schemaPayload);
+                    if (!schemaPayload || typeof schemaPayload !== 'object') {
+                        return null;
+                    }
+                    const nameValue = typeof schemaPayload.name === 'string' && schemaPayload.name.trim().length
+                        ? schemaPayload.name.trim()
+                        : '';
+                    let schemaValue = schemaPayload.schema;
+                    schemaValue = loadJsonIfString(schemaValue);
+                    if (typeof schemaValue === 'string') {
+                        try {
+                            schemaValue = JSON.parse(schemaValue);
+                        } catch (err) {
+                            schemaValue = null;
+                        }
+                    }
+                    if (!nameValue || !schemaValue || typeof schemaValue !== 'object') {
+                        return null;
+                    }
+                    const sanitized = { name: nameValue, schema: schemaValue };
+                    if (typeof schemaPayload.strict === 'boolean') {
+                        sanitized.strict = schemaPayload.strict;
+                    }
+                    for (const [extraKey, extraValue] of Object.entries(schemaPayload)) {
+                        if (extraKey === 'name' || extraKey === 'schema' || extraKey === 'strict') continue;
+                        sanitized[extraKey] = extraValue;
+                    }
+                    return { type: 'json_schema', json_schema: sanitized };
+                }
+            }
+            return null;
+        }
+        function normalizeModelId(model) {
+            return String(model || '').trim().toLowerCase();
+        }
+        const MODEL_REGISTRY_MODELS = Array.isArray(MODEL_REGISTRY_DATA.models) ? MODEL_REGISTRY_DATA.models : [];
+        const MODEL_REGISTRY_MAP = new Map();
+        for (const entry of MODEL_REGISTRY_MODELS) {
+            if (!entry || typeof entry !== 'object') {
+                continue;
+            }
+            const normalized = normalizeModelId(entry.id);
+            if (!normalized) {
+                continue;
+            }
+            MODEL_REGISTRY_MAP.set(normalized, entry);
+        }
+        const MODEL_REGISTRY_DEFAULT_MODEL = typeof MODEL_REGISTRY_DATA.default_model === 'string'
+            ? MODEL_REGISTRY_DATA.default_model
+            : '';
+        const AVAILABLE_AGENT_MODELS = MODEL_REGISTRY_MODELS
+            .map((entry) => (entry && typeof entry.id === 'string') ? entry.id : null)
+            .filter((id) => typeof id === 'string' && id.trim().length);
         const DEFAULT_AGENT_MODEL = (() => {
-            const fallback = 'gpt-4.1-mini';
+            const fallback = MODEL_REGISTRY_DEFAULT_MODEL && MODEL_REGISTRY_DEFAULT_MODEL.trim().length
+                ? MODEL_REGISTRY_DEFAULT_MODEL
+                : (AVAILABLE_AGENT_MODELS.length ? AVAILABLE_AGENT_MODELS[0] : 'openai/gpt-4o-mini');
             const element = document.getElementById('default-agent-model');
             if (!element) {
                 return fallback;
@@ -3393,26 +3652,11 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 return raw.trim().length ? raw : fallback;
             }
         })();
-        const AVAILABLE_AGENT_MODELS = [
-            'gpt-4.1-mini',
-            'gpt-4.1',
-            'gpt-4o-mini',
-            'gpt-4o',
-            'gpt-4-0613',
-            'gpt-3.5-turbo',
-            'gpt-5',
-            'o1',
-            'o1-mini',
-            'o3',
-            'o3-mini',
-        ];
-        const DEFAULT_REASONING_EFFORT = 'medium';
-        const DEFAULT_TEMPERATURE = 0.2;
-        const DEFAULT_TOP_P = 1.0;
-        const REASONING_MODEL_PREFIXES = ['gpt-5', 'o1', 'o3', 'o4'];
-        const MODEL_CAPABILITIES_CACHE = new Map();
+        if (DEFAULT_AGENT_MODEL && !AVAILABLE_AGENT_MODELS.includes(DEFAULT_AGENT_MODEL)) {
+            AVAILABLE_AGENT_MODELS.unshift(DEFAULT_AGENT_MODEL);
+        }
         const DEFAULT_AGENT_PROMPT = (() => {
-            const fallback = 'Jsi pečlivý korektor češtiny. Dostaneš JSON s klíči "language_hint", "page_meta" a "blocks". Blocks je pole objektů {id, type, text}. Oprav překlepy a zjevné OCR chyby pouze v hodnotách "text". Nesjednocuj styl, neměň typy bloků ani jejich pořadí. Zachovej diakritiku, pokud lze. Odpovídej pouze validním JSON se stejnou strukturou a klíči jako vstup.';
+            const fallback = 'Jsi pečlivý korektor češtiny. Dostaneš JSON s klíči "language_hint" a "blocks". Blocks je pole objektů {id, type, text}. Oprav překlepy a zjevné OCR chyby pouze v hodnotách "text". Nesjednocuj styl, neměň typy bloků ani jejich pořadí. Zachovej diakritiku, pokud lze. Odpovídej pouze validním JSON se stejnou strukturou a klíči jako vstup.';
             const element = document.getElementById('default-agent-prompt-data');
             if (!element) {
                 return fallback;
@@ -3432,15 +3676,14 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         const TRAILING_HYPHEN_SEQUENCE_REGEX = /[\-\u2010\u2011\u2012\u2013\u2014\u2015\u2212\uFE63\uFF0D]["'„“”«»‚‘’‹›)\]\}]*$/;
         const SENTENCE_END_REGEX = /[.!?…]+["'„“”«»‚‘’‹›)\]\}]*$/u;
         const SENTENCE_START_REGEX = /^[\s"'„“”«»‚‘’‹›(\[{\-—–]*[A-Z\u00C0-\u0178]/u;
-
-        function normalizeModelId(model) {
-            return String(model || '').trim().toLowerCase();
-        }
-
         function isReasoningModel(model) {
+            const definition = getModelDefinition(model);
+            if (definition && definition.capabilities) {
+                return Boolean(definition.capabilities.reasoning);
+            }
             const normalized = normalizeModelId(model);
             if (!normalized) return false;
-            for (const prefix of REASONING_MODEL_PREFIXES) {
+            for (const prefix of FALLBACK_REASONING_PREFIXES) {
                 const lowered = prefix.toLowerCase();
                 if (normalized === lowered || normalized.startsWith(`${lowered}-`)) {
                     return true;
@@ -3449,17 +3692,45 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             return false;
         }
 
+        function getModelDefinition(model) {
+            const normalized = normalizeModelId(model);
+            if (!normalized) {
+                return null;
+            }
+            return MODEL_REGISTRY_MAP.get(normalized) || null;
+        }
+
         function getModelCapabilities(model) {
             const normalized = normalizeModelId(model);
             if (!normalized) {
-                return { temperature: true, top_p: true, reasoning: false };
+                const defaults = { temperature: true, top_p: true, reasoning: false };
+                if (ENABLE_RESPONSE_FORMAT) defaults.response_format = true;
+                return defaults;
             }
             if (MODEL_CAPABILITIES_CACHE.has(normalized)) {
                 return MODEL_CAPABILITIES_CACHE.get(normalized);
             }
-            const capabilities = isReasoningModel(normalized)
-                ? { temperature: false, top_p: false, reasoning: true }
-                : { temperature: true, top_p: true, reasoning: false };
+            const definition = getModelDefinition(normalized);
+            let capabilities;
+            if (definition && definition.capabilities) {
+                capabilities = {
+                    temperature: Boolean(definition.capabilities.temperature),
+                    top_p: Boolean(definition.capabilities.top_p),
+                    reasoning: Boolean(definition.capabilities.reasoning),
+                };
+                if (ENABLE_RESPONSE_FORMAT) {
+                    capabilities.response_format = Object.prototype.hasOwnProperty.call(definition.capabilities, 'response_format')
+                        ? Boolean(definition.capabilities.response_format)
+                        : true;
+                }
+            } else {
+                capabilities = isReasoningModel(normalized)
+                    ? { temperature: false, top_p: false, reasoning: true }
+                    : { temperature: true, top_p: true, reasoning: false };
+                if (ENABLE_RESPONSE_FORMAT) {
+                    capabilities.response_format = true;
+                }
+            }
             MODEL_CAPABILITIES_CACHE.set(normalized, capabilities);
             return capabilities;
         }
@@ -3478,11 +3749,15 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         }
 
         function createDefaultModelSettings() {
-            return {
+            const base = {
                 temperature: DEFAULT_TEMPERATURE,
                 top_p: DEFAULT_TOP_P,
                 reasoning_effort: DEFAULT_REASONING_EFFORT,
             };
+            if (ENABLE_RESPONSE_FORMAT) {
+                base.response_format = null;
+            }
+            return base;
         }
 
         function buildManualJoinerAgent() {
@@ -3538,6 +3813,12 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     result.reasoning_effort = raw;
                 }
             }
+            if (ENABLE_RESPONSE_FORMAT && Object.prototype.hasOwnProperty.call(source, 'response_format')) {
+                const normalized = normalizeResponseFormat(source.response_format);
+                if (normalized) {
+                    result.response_format = normalized;
+                }
+            }
             return result;
         }
 
@@ -3545,6 +3826,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             const capabilities = getModelCapabilities(modelId);
             const sanitizedSource = sanitizeSettingsObject(source || {});
             const sanitizedDefaults = sanitizeSettingsObject(defaults || {});
+            const registryDefaults = sanitizeSettingsObject((getModelDefinition(modelId) || {}).defaults);
             const baseDefaults = createDefaultModelSettings();
             const result = {};
             if (capabilities.temperature) {
@@ -3552,6 +3834,8 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     result.temperature = clampTemperature(sanitizedSource.temperature);
                 } else if (Object.prototype.hasOwnProperty.call(sanitizedDefaults, 'temperature')) {
                     result.temperature = clampTemperature(sanitizedDefaults.temperature);
+                } else if (Object.prototype.hasOwnProperty.call(registryDefaults, 'temperature')) {
+                    result.temperature = clampTemperature(registryDefaults.temperature);
                 } else {
                     result.temperature = baseDefaults.temperature;
                 }
@@ -3561,13 +3845,32 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     result.top_p = clampTopP(sanitizedSource.top_p);
                 } else if (Object.prototype.hasOwnProperty.call(sanitizedDefaults, 'top_p')) {
                     result.top_p = clampTopP(sanitizedDefaults.top_p);
+                } else if (Object.prototype.hasOwnProperty.call(registryDefaults, 'top_p')) {
+                    result.top_p = clampTopP(registryDefaults.top_p);
                 } else {
                     result.top_p = baseDefaults.top_p;
                 }
-            }
-            if (capabilities.reasoning) {
-                const sourceValue = sanitizedSource.reasoning_effort || sanitizedDefaults.reasoning_effort || baseDefaults.reasoning_effort;
+           }
+           if (capabilities.reasoning) {
+                const sourceValue = sanitizedSource.reasoning_effort
+                    || sanitizedDefaults.reasoning_effort
+                    || registryDefaults.reasoning_effort
+                    || baseDefaults.reasoning_effort;
                 result.reasoning_effort = ['low', 'medium', 'high'].includes(sourceValue) ? sourceValue : baseDefaults.reasoning_effort;
+            }
+            if (ENABLE_RESPONSE_FORMAT && capabilities.response_format) {
+                const candidates = [
+                    sanitizedSource.response_format,
+                    sanitizedDefaults.response_format,
+                    registryDefaults.response_format,
+                ];
+                for (const candidate of candidates) {
+                    const normalized = normalizeResponseFormat(candidate);
+                    if (normalized) {
+                        result.response_format = normalized;
+                        break;
+                    }
+                }
             }
             return result;
         }
@@ -3712,6 +4015,13 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             if (capabilities.reasoning && Object.prototype.hasOwnProperty.call(effective, 'reasoning_effort')) {
                 payload.reasoning_effort = effective.reasoning_effort;
             }
+            if (ENABLE_RESPONSE_FORMAT && capabilities.response_format && Object.prototype.hasOwnProperty.call(effective, 'response_format')) {
+                try {
+                    payload.response_format = JSON.parse(JSON.stringify(effective.response_format));
+                } catch (err) {
+                    payload.response_format = effective.response_format;
+                }
+            }
             return payload;
         }
 
@@ -3742,7 +4052,10 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             modelOptions.forEach((modelId) => {
                 const option = document.createElement('option');
                 option.value = modelId;
-                option.textContent = modelId;
+                const definition = getModelDefinition(modelId);
+                option.textContent = definition && typeof definition.display_name === 'string'
+                    ? definition.display_name
+                    : modelId;
                 selectEl.appendChild(option);
             });
             const normalized = selectedModel && selectedModel.trim().length ? selectedModel : DEFAULT_AGENT_MODEL;
@@ -3766,6 +4079,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             const modelSettings = ensureAgentDraftModelSettings(ctx.currentAgentDraft, modelId);
             const controls = [];
             const idPrefix = ctx.collection === 'joiners' ? 'stitch' : 'agent';
+            const supportsResponseFormat = ENABLE_RESPONSE_FORMAT && Boolean(capabilities.response_format);
             if (capabilities.temperature) {
                 controls.push(`
                     <div class="agent-param" data-param="temperature" style="flex:1;min-width:220px;">
@@ -3800,6 +4114,22 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     </div>
                 `);
             }
+            if (supportsResponseFormat) {
+                controls.push(`
+                    <div class="agent-param" data-param="response_format" style="flex:1;min-width:260px;">
+                        <label for="${idPrefix}-param-response-format" style="display:block;margin-bottom:4px;font-weight:600;">Response Format</label>
+                        <select id="${idPrefix}-param-response-format" style="min-width:160px;">
+                            <option value="none">(bez formátu)</option>
+                            <option value="json_object">JSON object</option>
+                            <option value="json_schema">JSON schema</option>
+                        </select>
+                        <textarea id="${idPrefix}-param-response-format-schema" rows="6" style="display:none;margin-top:8px;width:100%;font-family:var(--font-monospace, monospace);font-size:12px;"></textarea>
+                        <div id="${idPrefix}-param-response-format-hint" class="muted" style="display:none;margin-top:4px;font-size:12px;">
+                            Očekává objekt {"name": "...", "schema": {...}} dle Responses API (OpenAI/OpenRouter).
+                        </div>
+                    </div>
+                `);
+            }
             if (!controls.length) {
                 container.innerHTML = '<div class="muted">Tento model nemá nastavitelné parametry.</div>';
                 return;
@@ -3810,6 +4140,14 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             const topRange = container.querySelector(`#${idPrefix}-param-top-p`);
             const topNumber = container.querySelector(`#${idPrefix}-param-top-p-number`);
             const reasoningSelect = container.querySelector(`#${idPrefix}-param-reasoning`);
+            const responseFormatSelect = supportsResponseFormat ? container.querySelector(`#${idPrefix}-param-response-format`) : null;
+            const responseFormatTextarea = supportsResponseFormat ? container.querySelector(`#${idPrefix}-param-response-format-schema`) : null;
+            const responseFormatHint = supportsResponseFormat ? container.querySelector(`#${idPrefix}-param-response-format-hint`) : null;
+            container.querySelectorAll('select').forEach(enableScrollPassthrough);
+            if (responseFormatTextarea) {
+                enableScrollPassthrough(responseFormatTextarea);
+                responseFormatTextarea.addEventListener('input', () => autoResizeTextarea(responseFormatTextarea));
+            }
 
             if (tempRange && tempNumber) {
                 const value = Object.prototype.hasOwnProperty.call(modelSettings, 'temperature')
@@ -3856,6 +4194,157 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     modelSettings.reasoning_effort = next;
                     markAgentDirty(ctx);
                 });
+            }
+            if (responseFormatSelect) {
+                let existingResponseFormat = normalizeResponseFormat(modelSettings.response_format);
+                if (existingResponseFormat) {
+                    modelSettings.response_format = existingResponseFormat;
+                } else {
+                    delete modelSettings.response_format;
+                    existingResponseFormat = null;
+                }
+                let currentResponseFormatSignature = JSON.stringify(existingResponseFormat || null);
+                const defaultSchemaTemplate = JSON.stringify({
+                    name: 'response',
+                    schema: {
+                        type: 'object',
+                        properties: {},
+                        additionalProperties: true,
+                    },
+                }, null, 2);
+                const initialType = existingResponseFormat
+                    ? (existingResponseFormat.type === 'json_schema' ? 'json_schema' : 'json_object')
+                    : 'none';
+                const initialSchemaText = existingResponseFormat && existingResponseFormat.type === 'json_schema'
+                    ? JSON.stringify(existingResponseFormat.json_schema, null, 2)
+                    : '';
+                responseFormatSelect.value = initialType;
+                if (responseFormatTextarea) {
+                    responseFormatTextarea.value = initialSchemaText;
+                    if (initialType === 'json_schema') {
+                        responseFormatTextarea.style.display = 'block';
+                        if (responseFormatHint) responseFormatHint.style.display = 'block';
+                        requestAnimationFrame(() => autoResizeTextarea(responseFormatTextarea));
+                    } else {
+                        responseFormatTextarea.style.display = 'none';
+                        if (responseFormatHint) responseFormatHint.style.display = 'none';
+                    }
+                }
+
+                const setResponseFormat = (format) => {
+                    const signature = JSON.stringify(format || null);
+                    let storedFormat = null;
+                    if (!format) {
+                        delete modelSettings.response_format;
+                    } else {
+                        try {
+                            storedFormat = JSON.parse(signature);
+                            modelSettings.response_format = storedFormat;
+                        } catch (err) {
+                            storedFormat = JSON.parse(JSON.stringify(format));
+                            modelSettings.response_format = storedFormat;
+                        }
+                    }
+                    if (!format) {
+                        existingResponseFormat = null;
+                    } else {
+                        existingResponseFormat = storedFormat || JSON.parse(JSON.stringify(format));
+                    }
+                    if (signature !== currentResponseFormatSignature) {
+                        currentResponseFormatSignature = signature;
+                        markAgentDirty(ctx);
+                    }
+                };
+
+                const setSchemaInvalid = (message) => {
+                    if (!responseFormatTextarea) return;
+                    responseFormatTextarea.dataset.invalid = 'true';
+                    responseFormatTextarea.style.borderColor = '#c00';
+                    responseFormatTextarea.title = message || 'Neplatné JSON schema';
+                };
+
+                const clearSchemaInvalid = () => {
+                    if (!responseFormatTextarea) return;
+                    delete responseFormatTextarea.dataset.invalid;
+                    responseFormatTextarea.style.borderColor = '';
+                    responseFormatTextarea.title = 'JSON schema {"name": "...", "schema": {...}}';
+                };
+
+                const handleSchemaUpdate = () => {
+                    if (!responseFormatTextarea || (responseFormatSelect && responseFormatSelect.value !== 'json_schema')) {
+                        return;
+                    }
+                    const rawValue = responseFormatTextarea.value.trim();
+                    if (!rawValue.length) {
+                        setSchemaInvalid('Zadejte JSON se strukturou {"name": "...", "schema": {...}}.');
+                        setResponseFormat(null);
+                        return;
+                    }
+                    let parsed;
+                    try {
+                        parsed = JSON.parse(rawValue);
+                    } catch (err) {
+                        setSchemaInvalid('Neplatný JSON – opravte schéma.');
+                        setResponseFormat(null);
+                        return;
+                    }
+                    const normalized = normalizeResponseFormat({ type: 'json_schema', json_schema: parsed });
+                    if (!normalized) {
+                        setSchemaInvalid('Schema musí obsahovat klíče "name" (string) a "schema" (object).');
+                        setResponseFormat(null);
+                        return;
+                    }
+                    clearSchemaInvalid();
+                    setResponseFormat(normalized);
+                };
+
+                const applySelectValue = (initializing = false) => {
+                    if (!responseFormatSelect) return;
+                    const selected = responseFormatSelect.value;
+                    if (selected === 'json_schema') {
+                        if (responseFormatTextarea) {
+                            responseFormatTextarea.style.display = 'block';
+                            if (responseFormatHint) responseFormatHint.style.display = 'block';
+                            if (!responseFormatTextarea.value.trim().length) {
+                                if (existingResponseFormat && existingResponseFormat.type === 'json_schema') {
+                                    responseFormatTextarea.value = JSON.stringify(existingResponseFormat.json_schema, null, 2);
+                                } else {
+                                    responseFormatTextarea.value = defaultSchemaTemplate;
+                                }
+                            }
+                            requestAnimationFrame(() => autoResizeTextarea(responseFormatTextarea));
+                        }
+                        if (!initializing) {
+                            handleSchemaUpdate();
+                        } else {
+                            clearSchemaInvalid();
+                        }
+                    } else {
+                        if (responseFormatTextarea) {
+                            responseFormatTextarea.style.display = 'none';
+                            if (responseFormatHint) responseFormatHint.style.display = 'none';
+                        }
+                        clearSchemaInvalid();
+                        if (!initializing) {
+                            if (selected === 'json_object') {
+                                setResponseFormat({ type: 'json_object' });
+                            } else {
+                                setResponseFormat(null);
+                            }
+                        }
+                    }
+                };
+
+                applySelectValue(true);
+                responseFormatSelect.addEventListener('change', () => applySelectValue(false));
+
+                if (responseFormatTextarea) {
+                    responseFormatTextarea.addEventListener('blur', handleSchemaUpdate);
+                    responseFormatTextarea.addEventListener('change', handleSchemaUpdate);
+                }
+            } else if (responseFormatTextarea) {
+                responseFormatTextarea.style.display = 'none';
+                if (responseFormatHint) responseFormatHint.style.display = 'none';
             }
         }
 
@@ -4119,11 +4608,11 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             scheduleThumbnailDrawerHeightSync();
         }
 
-        function preparePromptTextarea(textarea) {
-            if (!textarea) return;
-            textarea.style.overflow = 'hidden';
-            textarea.style.resize = 'none';
-            if (textarea.dataset.preventWheelScroll === 'true') {
+        function enableScrollPassthrough(element) {
+            if (!element) {
+                return;
+            }
+            if (element.dataset.scrollPassthrough === 'true' || element.dataset.preventWheelScroll === 'true') {
                 return;
             }
             const wheelHandler = (event) => {
@@ -4151,8 +4640,16 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     );
                 }
             };
-            textarea.addEventListener('wheel', wheelHandler, { passive: false });
-            textarea.dataset.preventWheelScroll = 'true';
+            element.addEventListener('wheel', wheelHandler, { passive: false });
+            element.dataset.scrollPassthrough = 'true';
+            element.dataset.preventWheelScroll = 'true';
+        }
+
+        function preparePromptTextarea(textarea) {
+            if (!textarea) return;
+            textarea.style.overflow = 'hidden';
+            textarea.style.resize = 'none';
+            enableScrollPassthrough(textarea);
         }
 
         function setAgentFields(ctx, agent) {
@@ -4841,6 +5338,13 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             persistContextAutoTrigger(ctx, Boolean(willAuto));
             const originalPythonHtml = pythonHtml;
             const runBtn = getContextElement(ctx, 'runButtonId');
+            const extraRunButtons = (ctx.runButtonExtraIds || [])
+                .map((extraId) => document.getElementById(extraId))
+                .filter((btn) => btn);
+            const extraRunButtonStates = extraRunButtons.map((btn) => ({
+                element: btn,
+                originalLabel: btn.textContent || '',
+            }));
 
             let workingDraft = null;
             if (ctx.currentAgentDraft && ctx.currentAgentName === name) {
@@ -4864,25 +5368,10 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             const capabilities = getModelCapabilities(normalizedModel);
             const effectiveSettings = getEffectiveModelSettings(workingDraft, normalizedModel);
 
-            const pageMeta = {};
-            if (currentPage) {
-                if (currentPage.pageNumber) pageMeta.page = currentPage.pageNumber;
-                else if (typeof currentPage.index === 'number' && !Number.isNaN(currentPage.index)) pageMeta.page = currentPage.index + 1;
-                if (typeof currentPage.index === 'number' && !Number.isNaN(currentPage.index)) pageMeta.page_index = currentPage.index;
-                if (currentPage.uuid) pageMeta.page_uuid = currentPage.uuid;
-                if (currentPage.pageType) pageMeta.page_type = currentPage.pageType;
-                if (currentPage.pageSide) pageMeta.page_side = currentPage.pageSide;
-            }
-            if (currentBook) {
-                if (currentBook.title) pageMeta.work = currentBook.title;
-                if (currentBook.uuid) pageMeta.book_uuid = currentBook.uuid;
-            }
-
             const payload = {
                 name,
                 auto_correct: Boolean(willAuto),
                 language_hint: DEFAULT_LANGUAGE_HINT,
-                page_meta: pageMeta,
                 page_uuid: currentPage && currentPage.uuid ? currentPage.uuid : '',
                 book_uuid: currentBook && currentBook.uuid ? currentBook.uuid : '',
                 book_title: currentBook && currentBook.title ? currentBook.title : '',
@@ -4900,27 +5389,38 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             if (capabilities.reasoning && Object.prototype.hasOwnProperty.call(effectiveSettings, 'reasoning_effort')) {
                 payload.reasoning_effort = effectiveSettings.reasoning_effort;
             }
+            if (ENABLE_RESPONSE_FORMAT && capabilities.response_format && Object.prototype.hasOwnProperty.call(effectiveSettings, 'response_format')) {
+                try {
+                    payload.response_format = JSON.parse(JSON.stringify(effectiveSettings.response_format));
+                } catch (err) {
+                    payload.response_format = effectiveSettings.response_format;
+                }
+            }
             payload.agent_snapshot = buildAgentSavePayload(ctx, workingDraft);
 
             const originalLabel = runBtn ? runBtn.textContent : '';
+            const restoreRunButtons = () => {
+                if (runBtn) {
+                    runBtn.disabled = false;
+                    runBtn.textContent = originalLabel || ctx.runButtonLabel;
+                }
+                extraRunButtonStates.forEach(({ element, originalLabel: label }) => {
+                    element.disabled = false;
+                    element.textContent = label;
+                });
+            };
 
             if (ctx.collection === 'joiners') {
                 const stitchContext = await refreshStitchUI({ reveal: !isAutoInvocation, keepVisible: isAutoInvocation, keepMerged: isAutoInvocation });
                 if (!stitchContext) {
                     safeSetAgentOutput(ctx, 'Nepodařilo se připravit data pro napojení stran.', '', 'error');
-                    if (runBtn) {
-                        runBtn.disabled = false;
-                        runBtn.textContent = originalLabel || ctx.runButtonLabel;
-                    }
+                    restoreRunButtons();
                     return;
                 }
                 const stitchPayload = buildJoinerAgentPayloadFromContext(stitchContext);
                 if (!stitchPayload) {
                     safeSetAgentOutput(ctx, 'Nepodařilo se připravit podklady pro agenta.', '', 'error');
-                    if (runBtn) {
-                        runBtn.disabled = false;
-                        runBtn.textContent = originalLabel || ctx.runButtonLabel;
-                    }
+                    restoreRunButtons();
                     return;
                 }
                 if (workingDraft.manual) {
@@ -4929,10 +5429,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     const elapsedMs = performance.now() - manualStart;
                     const elapsedLabel = `${(elapsedMs / 1000).toFixed(2)} s`;
                     safeSetAgentOutput(ctx, `Hotovo za ${elapsedLabel}`, '', 'success');
-                    if (runBtn) {
-                        runBtn.disabled = false;
-                        runBtn.textContent = originalLabel || ctx.runButtonLabel;
-                    }
+                    restoreRunButtons();
                     return;
                 }
                 payload.stitch_context = stitchPayload;
@@ -4982,6 +5479,10 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     runBtn.disabled = true;
                     runBtn.textContent = 'Spouštím...';
                 }
+                extraRunButtonStates.forEach(({ element }) => {
+                    element.disabled = true;
+                    element.textContent = 'Spouštím...';
+                });
                 startTime = performance.now();
                 safeSetAgentOutput(ctx, `Spouštím agenta ${name}...`, '', 'pending');
                 const agentConfig = workingDraft || {};
@@ -5090,10 +5591,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 console.error(err);
                 console.groupEnd();
             } finally {
-                if (runBtn) {
-                    runBtn.disabled = false;
-                    runBtn.textContent = originalLabel || ctx.runButtonLabel;
-                }
+                restoreRunButtons();
             }
         }
 
@@ -5125,6 +5623,9 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         async function initializeAgentUI(ctx) {
             const select = getContextElement(ctx, 'selectId');
             const runBtn = getContextElement(ctx, 'runButtonId');
+            const extraRunButtons = (ctx.runButtonExtraIds || [])
+                .map((extraId) => document.getElementById(extraId))
+                .filter((btn) => btn);
             const auto = getContextElement(ctx, 'autoCheckboxId');
             const toggle = getContextElement(ctx, 'expandToggleId');
             const settings = getContextElement(ctx, 'settingsId');
@@ -5134,17 +5635,23 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             const nameInput = getContextElement(ctx, 'nameInputId');
             const promptTextarea = getContextElement(ctx, 'promptTextareaId');
             preparePromptTextarea(promptTextarea);
+            enableScrollPassthrough(select);
+            enableScrollPassthrough(modelSelect);
 
             if (select) select.addEventListener('change', () => updateAgentUIFromSelection(ctx));
+            const handleRunClick = async () => {
+                try {
+                    await runSelectedAgent(ctx, { autoTriggered: false });
+                } catch (error) {
+                    console.warn('Spuštění agenta se nezdařilo:', error);
+                }
+            };
             if (runBtn) {
-                runBtn.addEventListener('click', async () => {
-                    try {
-                        await runSelectedAgent(ctx, { autoTriggered: false });
-                    } catch (error) {
-                        console.warn('Spuštění agenta se nezdařilo:', error);
-                    }
-                });
+                runBtn.addEventListener('click', handleRunClick);
             }
+            extraRunButtons.forEach((btn) => {
+                btn.addEventListener('click', handleRunClick);
+            });
             if (auto) {
                 auto.checked = loadContextAutoTrigger(ctx);
                 auto.addEventListener('change', () => {
@@ -7442,6 +7949,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
     </div>
 </body>
 </html>'''
+            html = html.replace('__MODEL_REGISTRY_DATA__', MODEL_REGISTRY_JSON)
             html = html.replace('__DEFAULT_AGENT_MODEL__', json.dumps(DEFAULT_MODEL))
             html = html.replace('__DEFAULT_AGENT_PROMPT__', json.dumps(DEFAULT_AGENT_PROMPT_TEXT))
             self.wfile.write(html.encode('utf-8'))

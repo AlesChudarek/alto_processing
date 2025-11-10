@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-"""Helpers for executing stored agents via the OpenAI Responses API."""
+"""Helpers for executing stored agents via the OpenRouter/OpenAI Responses API."""
 
 from __future__ import annotations
 
 import copy
 import json
 import os
+import inspect
+import re
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
+import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
@@ -28,38 +32,420 @@ else:  # pragma: no cover
 
 load_dotenv()
 
+ROOT_DIR = Path(__file__).resolve().parent
+MODEL_REGISTRY_PATH = ROOT_DIR / "config" / "models.json"
+
+
+def _load_model_registry() -> Dict[str, Any]:
+    try:
+        with MODEL_REGISTRY_PATH.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+            return payload if isinstance(payload, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError as exc:
+        raise AgentRunnerError(f"Soubor s modely je neplatný JSON: {MODEL_REGISTRY_PATH}") from exc
+
+
+MODEL_REGISTRY = _load_model_registry()
+MODEL_DEFINITION_MAP: Dict[str, Dict[str, Any]] = {}
+MODEL_CAPABILITY_MAP: Dict[str, Dict[str, bool]] = {}
+MODEL_DEFAULTS_MAP: Dict[str, Dict[str, Any]] = {}
+ENABLE_RESPONSE_FORMAT = False  # sleeper feature – enable once OpenRouter enforces response_format
+
+if ENABLE_RESPONSE_FORMAT:
+    SUPPORTED_RESPONSE_FORMAT_TYPES = {"json_object", "json_schema"}
+    _BLOCK_ID_PATTERN = re.compile(r"^b\d+$")
+
+    class _DictResponse:
+        """Minimal facade mimicking the Responses API object."""
+
+        def __init__(self, payload: Dict[str, Any]) -> None:
+            self._payload = payload
+            self.id = payload.get("id")
+            self.model = payload.get("model")
+            self.output = payload.get("output") or payload.get("outputs")
+
+        def model_dump(self) -> Dict[str, Any]:
+            return self._payload
+
+        @property
+        def output_text(self) -> str:
+            data = self._payload.get("output") or self._payload.get("outputs")
+            if isinstance(data, list):
+                chunks = []
+                for item in data:
+                    if not isinstance(item, dict):
+                        continue
+                    content = item.get("content") or []
+                    if not isinstance(content, list):
+                        continue
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") in {"text", "output_text"}:
+                            text_value = block.get("text")
+                            if isinstance(text_value, dict):
+                                inner = text_value.get("value") or text_value.get("text")
+                                if inner:
+                                    chunks.append(str(inner))
+                            elif isinstance(text_value, str):
+                                chunks.append(text_value)
+                return "\n".join(chunks)
+            return ""
+
+    def _load_json_if_string(value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        trimmed = value.strip()
+        if not trimmed:
+            return None
+        try:
+            return json.loads(trimmed)
+        except json.JSONDecodeError:
+            return trimmed
+
+    def _normalize_response_format(value: Any) -> Optional[Dict[str, Any]]:
+        candidate = _load_json_if_string(value)
+        if candidate is None:
+            return None
+        if isinstance(candidate, dict):
+            type_value = candidate.get("type")
+            if type_value is None and "json_schema" in candidate:
+                type_value = "json_schema"
+            if type_value is None and "schema" in candidate:
+                type_value = "json_schema"
+            if isinstance(type_value, str):
+                normalized_type = type_value.strip().lower()
+            else:
+                normalized_type = ""
+            if normalized_type == "json_object":
+                return {"type": "json_object"}
+            if normalized_type == "json_schema":
+                schema_payload = candidate.get("json_schema")
+                if schema_payload is None:
+                    schema_payload = {
+                        key: candidate.get(key)
+                        for key in ("name", "schema", "strict")
+                        if key in candidate
+                    }
+                schema_payload = _load_json_if_string(schema_payload)
+                if isinstance(schema_payload, dict):
+                    name = schema_payload.get("name")
+                    schema = schema_payload.get("schema")
+                    if isinstance(schema, str):
+                        schema = _load_json_if_string(schema)
+                    if isinstance(name, str) and isinstance(schema, dict):
+                        sanitized: Dict[str, Any] = {"name": name, "schema": schema}
+                        if isinstance(schema_payload.get("strict"), bool):
+                            sanitized["strict"] = schema_payload["strict"]
+                        for key, extra_value in schema_payload.items():
+                            if key in {"name", "schema", "strict"}:
+                                continue
+                            sanitized[key] = extra_value
+                        return {"type": "json_schema", "json_schema": sanitized}
+        if isinstance(candidate, str):
+            lowered = candidate.strip().lower()
+            if lowered in SUPPORTED_RESPONSE_FORMAT_TYPES:
+                return {"type": lowered}
+        return None
+
+    def _client_supports_response_format(client: OpenAI) -> bool:
+        try:
+            signature = inspect.signature(client.responses.create)
+        except (AttributeError, ValueError, TypeError):
+            return False
+        return "response_format" in signature.parameters
+
+    def _perform_responses_request(
+        client: OpenAI,
+        request_kwargs: Dict[str, Any],
+        native_response_format_support: bool,
+    ) -> Response:
+        if USE_DIRECT_OPENAI or native_response_format_support:
+            return client.responses.create(**request_kwargs)
+
+        payload = copy.deepcopy(request_kwargs)
+        extra_body = payload.pop("extra_body", None)
+        if isinstance(extra_body, dict):
+            payload.update(extra_body)
+
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        if not api_key:
+            raise AgentRunnerError(
+                "Chybí proměnná prostředí OPENROUTER_API_KEY – nelze odeslat požadavek s response_format."
+            )
+
+        url = OPENROUTER_BASE_URL.rstrip("/") + "/responses"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        if OPENROUTER_SITE_URL:
+            headers["HTTP-Referer"] = OPENROUTER_SITE_URL
+        if OPENROUTER_APP_NAME:
+            headers["X-Title"] = OPENROUTER_APP_NAME
+
+        response = requests.post(url, headers=headers, json=payload, timeout=90)
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            raise AgentRunnerError(
+                f"OpenRouter responses API vrátil chybu {response.status_code}: {response.text}"
+            ) from exc
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise AgentRunnerError("OpenRouter vrátil neplatný JSON.") from exc
+        return _DictResponse(payload)
+
+    def _validate_text_block_corrector(payload: Any) -> Tuple[bool, str]:
+        if not isinstance(payload, dict):
+            return False, "odpověď není JSON objekt"
+        if "changes" not in payload:
+            return False, "chybí pole 'changes'"
+        changes = payload.get("changes")
+        if not isinstance(changes, list):
+            return False, "pole 'changes' není list"
+        for index, item in enumerate(changes):
+            if not isinstance(item, dict):
+                return False, f"položka changes[{index}] není objekt"
+            if set(item.keys()) - {"id", "text"}:
+                return False, f"položka changes[{index}] obsahuje nepovolené klíče"
+            if "id" not in item or "text" not in item:
+                return False, f"položka changes[{index}] postrádá 'id' nebo 'text'"
+            if not isinstance(item["id"], str) or not _BLOCK_ID_PATTERN.match(item["id"]):
+                return False, f"changes[{index}].id není ve formátu 'b<number>'"
+            if not isinstance(item["text"], str):
+                return False, f"changes[{index}].text není řetězec"
+        return True, ""
+else:
+    def _normalize_response_format(value: Any) -> Optional[Dict[str, Any]]:
+        return None
+
+    def _client_supports_response_format(_: Any) -> bool:
+        return False
+
+    def _perform_responses_request(
+        client: OpenAI,
+        request_kwargs: Dict[str, Any],
+        native_response_format_support: bool,
+    ) -> Response:
+        return client.responses.create(**request_kwargs)
+
+    def _validate_text_block_corrector(_: Any) -> Tuple[bool, str]:
+        return True, ""
+_CLIENT_SUPPORTS_NATIVE_RESPONSE_FORMAT: Optional[bool] = None
+
+
+def _normalize_model_id(value: Optional[str]) -> str:
+    return (value or "").strip().lower()
+
+
+for entry in MODEL_REGISTRY.get("models", []) or []:
+    if not isinstance(entry, dict):
+        continue
+    raw_id = entry.get("id")
+    normalized = _normalize_model_id(raw_id)
+    if not normalized:
+        continue
+    MODEL_DEFINITION_MAP[normalized] = entry
+    raw_caps = entry.get("capabilities") or {}
+    caps = {
+        "temperature": bool(raw_caps.get("temperature", True)),
+        "top_p": bool(raw_caps.get("top_p", True)),
+        "reasoning": bool(raw_caps.get("reasoning", False)),
+    }
+    if ENABLE_RESPONSE_FORMAT:
+        caps["response_format"] = bool(raw_caps.get("response_format", True))
+    MODEL_CAPABILITY_MAP[normalized] = caps
+    raw_defaults = entry.get("defaults") or {}
+    if isinstance(raw_defaults, dict):
+        MODEL_DEFAULTS_MAP[normalized] = raw_defaults
+
+
+DEFAULT_TEMPERATURE = 0.2
+DEFAULT_TOP_P = 1.0
+DEFAULT_REASONING_EFFORT = "medium"
+MIN_OUTPUT_TOKENS = 1
+MAX_OUTPUT_TOKENS = 128000
+
 DEFAULT_MODEL = (
     os.getenv("OPENAI_DEFAULT_MODEL")
     or os.getenv("OPENAI_MODEL")
-    or "gpt-4.1-mini"
+    or MODEL_REGISTRY.get("default_model")
+    or "openai/gpt-4o-mini"
 )
 DEFAULT_LANGUAGE_HINT = os.getenv("OPENAI_LANGUAGE_HINT") or "cs"
 
-REASONING_EFFORT_VALUES = {"low", "medium", "high"}
-REASONING_PREFIXES = ("gpt-5", "o1", "o3", "o4")
+USE_DIRECT_OPENAI = str(os.getenv("USE_DIRECT_OPENAI", "0")).strip().lower() in {"1", "true", "yes", "on"}
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1"
+OPENROUTER_SITE_URL = os.getenv("OPENROUTER_SITE_URL") or os.getenv("OPENROUTER_REFERER") or ""
+OPENROUTER_APP_NAME = os.getenv("OPENROUTER_APP_NAME") or os.getenv("OPENROUTER_TITLE") or "Alto Processing Tools"
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY") or ""
 
+REASONING_EFFORT_VALUES = {"low", "medium", "high"}
+FALLBACK_REASONING_PREFIXES = ("openai/gpt-5", "openai/o1", "openai/o3", "openai/o4", "gpt-5", "o1", "o3", "o4")
+# Backwards compatibility for modules importing REASONING_PREFIXES directly.
+REASONING_PREFIXES = FALLBACK_REASONING_PREFIXES
+SUPPORTED_RESPONSE_FORMAT_TYPES = {"json_object", "json_schema"}
+
+_BLOCK_ID_PATTERN = re.compile(r"^b\d+$")
+
+
+class _DictResponse:
+    """Minimal facade mimicking the Responses API object."""
+
+    def __init__(self, payload: Dict[str, Any]) -> None:
+        self._payload = payload
+        self.id = payload.get("id")
+        self.model = payload.get("model")
+        self.output = payload.get("output") or payload.get("outputs")
+
+    def model_dump(self) -> Dict[str, Any]:
+        return self._payload
+
+    @property
+    def output_text(self) -> str:
+        data = self._payload.get("output") or self._payload.get("outputs")
+        if isinstance(data, list):
+            chunks = []
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                content = item.get("content") or []
+                if not isinstance(content, list):
+                    continue
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") in {"text", "output_text"}:
+                        text_value = block.get("text")
+                        if isinstance(text_value, dict):
+                            inner = text_value.get("value") or text_value.get("text")
+                            if inner:
+                                chunks.append(str(inner))
+                        elif isinstance(text_value, str):
+                            chunks.append(text_value)
+            return "\n".join(chunks)
+        return ""
+
+
+def _validate_text_block_corrector(payload: Any) -> Tuple[bool, str]:
+    if not isinstance(payload, dict):
+        return False, "odpověď není JSON objekt"
+    if "changes" not in payload:
+        return False, "chybí pole 'changes'"
+    changes = payload.get("changes")
+    if not isinstance(changes, list):
+        return False, "pole 'changes' není list"
+    for index, item in enumerate(changes):
+        if not isinstance(item, dict):
+            return False, f"položka changes[{index}] není objekt"
+        if set(item.keys()) - {"id", "text"}:
+            return False, f"položka changes[{index}] obsahuje nepovolené klíče"
+        if "id" not in item or "text" not in item:
+            return False, f"položka changes[{index}] postrádá 'id' nebo 'text'"
+        if not isinstance(item["id"], str) or not _BLOCK_ID_PATTERN.match(item["id"]):
+            return False, f"changes[{index}].id není ve formátu 'b<number>'"
+        if not isinstance(item["text"], str):
+            return False, f"changes[{index}].text není řetězec"
+    return True, ""
 
 def _get_model_capabilities(model: str) -> Dict[str, bool]:
-    normalized = (model or "").strip().lower()
-    for prefix in REASONING_PREFIXES:
-        if not prefix:
-            continue
+    normalized = _normalize_model_id(model)
+    if normalized in MODEL_CAPABILITY_MAP:
+        return MODEL_CAPABILITY_MAP[normalized]
+    for prefix in FALLBACK_REASONING_PREFIXES:
         lowered = prefix.lower()
         if normalized == lowered or normalized.startswith(f"{lowered}-"):
-            return {"temperature": False, "top_p": False, "reasoning": True}
-    return {"temperature": True, "top_p": True, "reasoning": False}
+            caps = {"temperature": False, "top_p": False, "reasoning": True}
+            if ENABLE_RESPONSE_FORMAT:
+                caps["response_format"] = True
+            return caps
+    caps = {"temperature": True, "top_p": True, "reasoning": False}
+    if ENABLE_RESPONSE_FORMAT:
+        caps["response_format"] = True
+    return caps
 
 
 def _normalize_reasoning_effort(value: Optional[Any]) -> str:
     if value is None:
-        return "medium"
+        return DEFAULT_REASONING_EFFORT
     normalized = str(value).strip().lower()
-    return normalized if normalized in REASONING_EFFORT_VALUES else "medium"
+    return normalized if normalized in REASONING_EFFORT_VALUES else DEFAULT_REASONING_EFFORT
+
+
+def _load_json_if_string(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    trimmed = value.strip()
+    if not trimmed:
+        return None
+    try:
+        return json.loads(trimmed)
+    except json.JSONDecodeError:
+        return trimmed
+
+
+def _normalize_response_format(value: Any) -> Optional[Dict[str, Any]]:
+    candidate = _load_json_if_string(value)
+    if candidate is None:
+        return None
+    if isinstance(candidate, dict):
+        type_value = candidate.get("type")
+        if type_value is None and "json_schema" in candidate:
+            type_value = "json_schema"
+        if type_value is None and "schema" in candidate:
+            type_value = "json_schema"
+        if isinstance(type_value, str):
+            normalized_type = type_value.strip().lower()
+        else:
+            normalized_type = ""
+        if normalized_type == "json_object":
+            return {"type": "json_object"}
+        if normalized_type == "json_schema":
+            schema_payload = candidate.get("json_schema")
+            if schema_payload is None:
+                schema_payload = {
+                    key: candidate.get(key)
+                    for key in ("name", "schema", "strict")
+                    if key in candidate
+                }
+            schema_payload = _load_json_if_string(schema_payload)
+            if isinstance(schema_payload, dict):
+                name = schema_payload.get("name")
+                schema = schema_payload.get("schema")
+                if isinstance(schema, str):
+                    schema = _load_json_if_string(schema)
+                if isinstance(name, str) and isinstance(schema, dict):
+                    sanitized: Dict[str, Any] = {"name": name, "schema": schema}
+                    if isinstance(schema_payload.get("strict"), bool):
+                        sanitized["strict"] = schema_payload["strict"]
+                    # Preserve any other JSON-schema fields that are valid JSON objects.
+                    for key, extra_value in schema_payload.items():
+                        if key in {"name", "schema", "strict"}:
+                            continue
+                        sanitized[key] = extra_value
+                    return {"type": "json_schema", "json_schema": sanitized}
+    if isinstance(candidate, str):
+        lowered = candidate.strip().lower()
+        if lowered in SUPPORTED_RESPONSE_FORMAT_TYPES:
+            return {"type": lowered}
+    return None
 
 
 def _clamp_float(value: Any, minimum: float, maximum: float, default: float) -> float:
     try:
         number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if number < minimum:
+        return minimum
+    if number > maximum:
+        return maximum
+    return number
+
+
+def _clamp_int(value: Any, minimum: int, maximum: int, default: int) -> int:
+    try:
+        number = int(float(value))
     except (TypeError, ValueError):
         return default
     if number < minimum:
@@ -87,30 +473,73 @@ def _get_effective_settings(agent: Dict[str, Any], model: str) -> Dict[str, Any]
     defaults, per_model = _extract_settings(agent)
     model_settings = per_model.get(model) if isinstance(per_model.get(model), dict) else {}
     capabilities = _get_model_capabilities(model)
+    normalized_model = _normalize_model_id(model)
+    registry_defaults = MODEL_DEFAULTS_MAP.get(normalized_model, {})
     result: Dict[str, Any] = {}
     if capabilities.get("temperature"):
         if isinstance(model_settings, dict) and "temperature" in model_settings:
-            result["temperature"] = _clamp_float(model_settings["temperature"], 0.0, 2.0, 0.0)
+            result["temperature"] = _clamp_float(model_settings["temperature"], 0.0, 2.0, DEFAULT_TEMPERATURE)
         elif "temperature" in defaults:
-            result["temperature"] = _clamp_float(defaults["temperature"], 0.0, 2.0, 0.0)
+            result["temperature"] = _clamp_float(defaults["temperature"], 0.0, 2.0, DEFAULT_TEMPERATURE)
+        elif "temperature" in registry_defaults:
+            result["temperature"] = _clamp_float(registry_defaults["temperature"], 0.0, 2.0, DEFAULT_TEMPERATURE)
         elif "temperature" in agent:
-            result["temperature"] = _clamp_float(agent["temperature"], 0.0, 2.0, 0.0)
+            result["temperature"] = _clamp_float(agent["temperature"], 0.0, 2.0, DEFAULT_TEMPERATURE)
+        else:
+            result["temperature"] = DEFAULT_TEMPERATURE
     if capabilities.get("top_p"):
         if isinstance(model_settings, dict) and "top_p" in model_settings:
-            result["top_p"] = _clamp_float(model_settings["top_p"], 0.0, 1.0, 1.0)
+            result["top_p"] = _clamp_float(model_settings["top_p"], 0.0, 1.0, DEFAULT_TOP_P)
         elif "top_p" in defaults:
-            result["top_p"] = _clamp_float(defaults["top_p"], 0.0, 1.0, 1.0)
+            result["top_p"] = _clamp_float(defaults["top_p"], 0.0, 1.0, DEFAULT_TOP_P)
+        elif "top_p" in registry_defaults:
+            result["top_p"] = _clamp_float(registry_defaults["top_p"], 0.0, 1.0, DEFAULT_TOP_P)
         elif "top_p" in agent:
-            result["top_p"] = _clamp_float(agent["top_p"], 0.0, 1.0, 1.0)
+            result["top_p"] = _clamp_float(agent["top_p"], 0.0, 1.0, DEFAULT_TOP_P)
+        else:
+            result["top_p"] = DEFAULT_TOP_P
     if capabilities.get("reasoning"):
         reasoning_source = None
         if isinstance(model_settings, dict) and "reasoning_effort" in model_settings:
             reasoning_source = model_settings["reasoning_effort"]
         elif "reasoning_effort" in defaults:
             reasoning_source = defaults["reasoning_effort"]
+        elif "reasoning_effort" in registry_defaults:
+            reasoning_source = registry_defaults["reasoning_effort"]
         elif "reasoning_effort" in agent:
             reasoning_source = agent["reasoning_effort"]
         result["reasoning_effort"] = _normalize_reasoning_effort(reasoning_source)
+    if ENABLE_RESPONSE_FORMAT and capabilities.get("response_format"):
+        response_candidates = (
+            model_settings,
+            defaults,
+            registry_defaults,
+            agent,
+        )
+        for source in response_candidates:
+            if not isinstance(source, dict):
+                continue
+            normalized_format = _normalize_response_format(source.get("response_format"))
+            if normalized_format is not None:
+                result["response_format"] = normalized_format
+                break
+    max_tokens_source = (
+        model_settings,
+        defaults,
+        registry_defaults,
+        agent,
+    )
+    for source in max_tokens_source:
+        if not isinstance(source, dict):
+            continue
+        if "max_output_tokens" in source and source["max_output_tokens"] is not None:
+            result["max_output_tokens"] = _clamp_int(
+                source["max_output_tokens"],
+                MIN_OUTPUT_TOKENS,
+                MAX_OUTPUT_TOKENS,
+                MAX_OUTPUT_TOKENS,
+            )
+            break
     return result
 
 BLOCK_TAGS = ("h1", "h2", "h3", "p", "div", "small", "note", "blockquote", "li")
@@ -138,13 +567,90 @@ def _get_client() -> OpenAI:
         if reason:
             message = f"{message} ({reason})"
         raise AgentRunnerError(message)
-    api_key = os.getenv("OPENAI_API_KEY")
+    if USE_DIRECT_OPENAI:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise AgentRunnerError(
+                "Chybí proměnná prostředí OPENAI_API_KEY. Uložte ji do .env nebo prostředí."
+            )
+        _client = OpenAI(api_key=api_key)
+        return _client
+
+    api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
         raise AgentRunnerError(
-            "Chybí proměnná prostředí OPENAI_API_KEY. Uložte ji do .env nebo prostředí."
+            "Chybí proměnná prostředí OPENROUTER_API_KEY. Uložte ji do .env nebo prostředí."
         )
-    _client = OpenAI(api_key=api_key)
+    client_kwargs: Dict[str, Any] = {
+        "api_key": api_key,
+        "base_url": OPENROUTER_BASE_URL,
+    }
+    headers: Dict[str, str] = {}
+    if OPENROUTER_SITE_URL:
+        headers["HTTP-Referer"] = OPENROUTER_SITE_URL
+    if OPENROUTER_APP_NAME:
+        headers["X-Title"] = OPENROUTER_APP_NAME
+    if headers:
+        client_kwargs["default_headers"] = headers
+    _client = OpenAI(**client_kwargs)
     return _client
+
+
+def _client_supports_response_format(client: OpenAI) -> bool:
+    global _CLIENT_SUPPORTS_NATIVE_RESPONSE_FORMAT
+    if _CLIENT_SUPPORTS_NATIVE_RESPONSE_FORMAT is not None:
+        return _CLIENT_SUPPORTS_NATIVE_RESPONSE_FORMAT
+    supports = False
+    try:
+        signature = inspect.signature(client.responses.create)
+    except (AttributeError, ValueError, TypeError):
+        supports = False
+    else:
+        supports = "response_format" in signature.parameters
+    _CLIENT_SUPPORTS_NATIVE_RESPONSE_FORMAT = supports
+    return supports
+
+
+def _perform_responses_request(
+    client: OpenAI,
+    request_kwargs: Dict[str, Any],
+    native_response_format_support: bool,
+) -> Response:
+    if USE_DIRECT_OPENAI or native_response_format_support:
+        return client.responses.create(**request_kwargs)
+
+    payload = copy.deepcopy(request_kwargs)
+    extra_body = payload.pop("extra_body", None)
+    if isinstance(extra_body, dict):
+        payload.update(extra_body)
+
+    if not OPENROUTER_API_KEY:
+        raise AgentRunnerError(
+            "Chybí proměnná prostředí OPENROUTER_API_KEY – nelze odeslat požadavek s response_format."
+        )
+
+    url = OPENROUTER_BASE_URL.rstrip("/") + "/responses"
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    if OPENROUTER_SITE_URL:
+        headers["HTTP-Referer"] = OPENROUTER_SITE_URL
+    if OPENROUTER_APP_NAME:
+        headers["X-Title"] = OPENROUTER_APP_NAME
+
+    response = requests.post(url, headers=headers, json=payload, timeout=90)
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        raise AgentRunnerError(
+            f"OpenRouter responses API vrátil chybu {response.status_code}: {response.text}"
+        ) from exc
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise AgentRunnerError("OpenRouter vrátil neplatný JSON.") from exc
+    return _DictResponse(payload)
 
 
 def _extract_output_text(response: Response) -> str:
@@ -234,24 +740,11 @@ def _log_diff_warning(payload: Dict[str, Any], message: str) -> None:
     """Print a warning about diff processing failure including page context."""
     if not isinstance(payload, dict):
         payload = {}
-    page_meta = {}
-    if isinstance(payload.get("page_meta"), dict):
-        page_meta = payload["page_meta"]
     details = []
-    page_uuid = (
-        payload.get("page_uuid")
-        or payload.get("page_id")
-        or page_meta.get("page_uuid")
-        or page_meta.get("uuid")
-    )
-    if page_uuid:
+    page_uuid = payload.get("page_uuid") or payload.get("page_id")
+    if page_uuid not in (None, "", []):
         details.append(f"page_uuid={page_uuid}")
-    page_label = (
-        payload.get("page_number")
-        or payload.get("page_index")
-        or page_meta.get("page")
-        or page_meta.get("page_number")
-    )
+    page_label = payload.get("page_number") or payload.get("page_index")
     if page_label not in (None, "", []):
         details.append(f"page_ref={page_label}")
     context = ", ".join(details) if details else "page_context=unknown"
@@ -422,33 +915,8 @@ def _build_document_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     language_hint = payload.get("language_hint") or DEFAULT_LANGUAGE_HINT
 
-    page_meta: Dict[str, Any] = {}
-    provided_meta = payload.get("page_meta")
-    if isinstance(provided_meta, dict):
-        page_meta.update({
-            key: value
-            for key, value in provided_meta.items()
-            if value not in (None, "", [], {})
-        })
-
-    for key in ("page_uuid", "book_uuid", "book_title", "page_number", "page_index"):
-        value = payload.get(key)
-        if value not in (None, "", [], {}):
-            page_meta.setdefault(key, value)
-
-    if "page" not in page_meta:
-        candidate = payload.get("page_number") or page_meta.get("page_number")
-        if candidate not in (None, "", [], {}):
-            page_meta["page"] = candidate
-        elif isinstance(page_meta.get("page_index"), (int, float)):
-            page_meta["page"] = page_meta["page_index"]
-
-    if payload.get("book_title") and "work" not in page_meta:
-        page_meta["work"] = payload["book_title"]
-
     return {
         "language_hint": language_hint,
-        "page_meta": page_meta,
         "blocks": blocks,
     }
 
@@ -472,12 +940,27 @@ def run_agent(agent: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     client = _get_client()
+    native_response_format_support = _client_supports_response_format(client)
 
     capabilities = _get_model_capabilities(model)
     effective_settings = _get_effective_settings(agent, model)
     payload_temperature = payload.get("temperature") if isinstance(payload, dict) else None
     payload_top_p = payload.get("top_p") if isinstance(payload, dict) else None
     payload_reasoning = payload.get("reasoning_effort") if isinstance(payload, dict) else None
+    payload_response_format = (
+        payload.get("response_format") if ENABLE_RESPONSE_FORMAT and isinstance(payload, dict) else None
+    )
+
+    max_output_tokens = effective_settings.get("max_output_tokens")
+    if isinstance(max_output_tokens, (int, float)):
+        max_output_tokens = _clamp_int(
+            max_output_tokens,
+            MIN_OUTPUT_TOKENS,
+            MAX_OUTPUT_TOKENS,
+            MAX_OUTPUT_TOKENS,
+        )
+    else:
+        max_output_tokens = None
 
     temperature = None
     if capabilities.get("temperature"):
@@ -498,6 +981,15 @@ def run_agent(agent: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
     supports_temperature = capabilities.get("temperature", True)
     supports_top_p = capabilities.get("top_p", True)
     supports_reasoning = capabilities.get("reasoning", False)
+    supports_response_format = ENABLE_RESPONSE_FORMAT and capabilities.get("response_format", True)
+
+    response_format = None
+    expected_response_format = None
+    if ENABLE_RESPONSE_FORMAT and supports_response_format:
+        response_format = _normalize_response_format(payload_response_format)
+        if response_format is None:
+            response_format = _normalize_response_format(effective_settings.get("response_format"))
+        expected_response_format = response_format if response_format is not None else None
 
     request_kwargs: Dict[str, Any] = {
         "model": model,
@@ -533,6 +1025,15 @@ def run_agent(agent: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
     if supports_reasoning:
         request_kwargs["reasoning"] = {"effort": normalized_reasoning_effort}
         agent["reasoning_effort"] = normalized_reasoning_effort
+    if ENABLE_RESPONSE_FORMAT and response_format is not None:
+        if supports_response_format:
+            request_kwargs["response_format"] = response_format
+            if not native_response_format_support and not USE_DIRECT_OPENAI:
+                print("[AgentDebug] Klient nepodporuje response_format nativně – požadavek pošlu přímo přes REST.")
+        else:
+            print(f"[AgentDebug] Model {model} ignoruje parametr response_format – nebude odeslán.")
+    if max_output_tokens is not None:
+        request_kwargs["max_output_tokens"] = int(max_output_tokens)
 
     debug_agent = agent.get("name") or agent.get("display_name") or "unknown"
     print("\n=== [AgentDebug] OpenAI Request ===")
@@ -544,6 +1045,14 @@ def run_agent(agent: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
         print(f"Top P: {request_kwargs.get('top_p')}")
     if "reasoning" in request_kwargs:
         print(f"Reasoning effort: {request_kwargs['reasoning'].get('effort')}")
+    if "max_output_tokens" in request_kwargs:
+        print(f"Max output tokens: {request_kwargs.get('max_output_tokens')}")
+    if ENABLE_RESPONSE_FORMAT and "response_format" in request_kwargs:
+        try:
+            formatted_response_format = json.dumps(request_kwargs["response_format"], ensure_ascii=False)
+        except Exception:
+            formatted_response_format = str(request_kwargs["response_format"])
+        print(f"Response format: {formatted_response_format}")
     print("--- Prompt ---")
     for part in request_kwargs.get("input", []):
         role = part.get("role")
@@ -554,29 +1063,48 @@ def run_agent(agent: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
     print("=== [AgentDebug] End Request ===\n")
 
     def _retry_without_unsupported(error: Exception) -> Optional[Response]:
-        if BadRequestError is None or not isinstance(error, BadRequestError):
-            return None
-        message = " ".join(str(part) for part in error.args if part)
-        message_lower = message.lower()
         removed_any = False
-        if "temperature" in request_kwargs and "temperature" in message_lower:
-            print("[AgentDebug] Model nepodporuje parametr temperature – opakuji bez něj.")
-            request_kwargs.pop("temperature", None)
+        message = " ".join(str(part) for part in getattr(error, "args", []) if part)
+        message_lower = message.lower()
+        if ENABLE_RESPONSE_FORMAT and isinstance(error, TypeError) and "response_format" in message_lower and "unexpected keyword" in message_lower:
+            print("[AgentDebug] Klient nepodporuje parametr response_format – opakuji bez něj.")
+            request_kwargs.pop("response_format", None)
             removed_any = True
-        if "top_p" in request_kwargs and "top_p" in message_lower:
-            print("[AgentDebug] Model nepodporuje parametr top_p – opakuji bez něj.")
-            request_kwargs.pop("top_p", None)
-            removed_any = True
-        if "reasoning" in request_kwargs and "reasoning" in message_lower:
-            print("[AgentDebug] Model nepodporuje pole reasoning – opakuji bez něj.")
-            request_kwargs.pop("reasoning", None)
-            removed_any = True
+            global _CLIENT_SUPPORTS_NATIVE_RESPONSE_FORMAT
+            _CLIENT_SUPPORTS_NATIVE_RESPONSE_FORMAT = False
+        if BadRequestError is None or not isinstance(error, BadRequestError):
+            if not removed_any:
+                return None
+        else:
+            if "temperature" in request_kwargs and "temperature" in message_lower:
+                print("[AgentDebug] Model nepodporuje parametr temperature – opakuji bez něj.")
+                request_kwargs.pop("temperature", None)
+                removed_any = True
+            if "top_p" in request_kwargs and "top_p" in message_lower:
+                print("[AgentDebug] Model nepodporuje parametr top_p – opakuji bez něj.")
+                request_kwargs.pop("top_p", None)
+                removed_any = True
+            if "max_output_tokens" in request_kwargs and (
+                "max_output_tokens" in message_lower or "max tokens" in message_lower
+            ):
+                print("[AgentDebug] Model nepodporuje parametr max_output_tokens – opakuji bez něj.")
+                request_kwargs.pop("max_output_tokens", None)
+                removed_any = True
+            if "reasoning" in request_kwargs and "reasoning" in message_lower:
+                print("[AgentDebug] Model nepodporuje pole reasoning – opakuji bez něj.")
+                request_kwargs.pop("reasoning", None)
+                removed_any = True
+            if ENABLE_RESPONSE_FORMAT and "response_format" in request_kwargs and "response_format" in message_lower:
+                print("[AgentDebug] Model nepodporuje pole response_format – opakuji bez něj.")
+                request_kwargs.pop("response_format", None)
+                removed_any = True
         if not removed_any:
             return None
-        return client.responses.create(**request_kwargs)
+        updated_support = _client_supports_response_format(client_obj) if ENABLE_RESPONSE_FORMAT else False
+        return _perform_responses_request(client_obj, request_kwargs, updated_support)
 
     try:
-        response = client.responses.create(**request_kwargs)
+        response = _perform_responses_request(client, request_kwargs, native_response_format_support)
     except Exception as exc:
         retry = _retry_without_unsupported(exc)
         if retry is None:
@@ -606,6 +1134,20 @@ def run_agent(agent: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
     output_document: Optional[Dict[str, Any]] = None
 
     parsed_output = _safe_json_loads(text)
+    if ENABLE_RESPONSE_FORMAT and expected_response_format:
+        if parsed_output is None:
+            raise AgentRunnerError("Model vrátil výstup, který není platný JSON podle očekávaného schématu.")
+        fmt_type = expected_response_format.get("type")
+        if fmt_type == "json_object":
+            if not isinstance(parsed_output, dict):
+                raise AgentRunnerError("Model vrátil výstup v jiném formátu než JSON objekt.")
+        elif fmt_type == "json_schema":
+            schema_payload = expected_response_format.get("json_schema") or {}
+            schema_name = schema_payload.get("name")
+            if schema_name == "text_block_corrector":
+                ok, reason = _validate_text_block_corrector(parsed_output)
+                if not ok:
+                    raise AgentRunnerError(f"Výstup modelu neodpovídá očekávanému schématu: {reason}.")
     blocks_present = isinstance(document_payload.get("blocks"), list)
     if blocks_present and parsed_output:
         if isinstance(parsed_output.get("changes"), list):

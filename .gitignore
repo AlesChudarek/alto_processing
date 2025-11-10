@@ -54,6 +54,7 @@ test_*.txt
 test_*.html
 ORIGINAL_alto-service.ts
 run_original.ts
+outputs/
 
 # Node.js (if using TypeScript version)
 node_modules/

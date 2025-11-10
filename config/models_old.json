@@ -1,0 +1,211 @@
+{
+  "default_model": "openai/gpt-4o-mini",
+  "models": [
+    {
+      "id": "openai/gpt-4o-mini",
+      "display_name": "OpenAI GPT-4o Mini",
+      "provider": "openrouter",
+      "tier": "standard",
+      "capabilities": {
+        "temperature": true,
+        "top_p": true,
+        "reasoning": false
+      },
+      "defaults": {
+        "temperature": 0.2,
+        "top_p": 1.0
+      }
+    },
+    {
+      "id": "openai/gpt-4o",
+      "display_name": "OpenAI GPT-4o",
+      "provider": "openrouter",
+      "tier": "standard",
+      "capabilities": {
+        "temperature": true,
+        "top_p": true,
+        "reasoning": false
+      },
+      "defaults": {
+        "temperature": 0.2,
+        "top_p": 1.0
+      }
+    },
+    {
+      "id": "openai/gpt-4.1-mini",
+      "display_name": "OpenAI GPT-4.1 Mini",
+      "provider": "openrouter",
+      "tier": "standard",
+      "capabilities": {
+        "temperature": true,
+        "top_p": true,
+        "reasoning": false
+      },
+      "defaults": {
+        "temperature": 0.2,
+        "top_p": 1.0
+      }
+    },
+    {
+      "id": "openai/o3-mini",
+      "display_name": "OpenAI o3-mini",
+      "provider": "openrouter",
+      "tier": "advanced",
+      "capabilities": {
+        "temperature": false,
+        "top_p": false,
+        "reasoning": true
+      },
+      "defaults": {
+        "reasoning_effort": "low"
+      }
+    },
+    {
+      "id": "nvidia/nemotron-nano-12b-v2-vl:free",
+      "display_name": "Nemotron Nano 12B v2 VL (Free)",
+      "provider": "openrouter",
+      "tier": "free",
+      "capabilities": {
+        "temperature": true,
+        "top_p": true,
+        "reasoning": false
+      },
+      "defaults": {
+        "temperature": 0.2,
+        "top_p": 1.0
+      }
+    },
+    {
+      "id": "minimax/minimax-m2:free",
+      "display_name": "MiniMax M2 (Free)",
+      "provider": "openrouter",
+      "tier": "free",
+      "capabilities": {
+        "temperature": true,
+        "top_p": true,
+        "reasoning": false
+      },
+      "defaults": {
+        "temperature": 0.2,
+        "top_p": 1.0
+      }
+    },
+    {
+      "id": "alibaba/tongyi-deepresearch-30b-a3b:free",
+      "display_name": "Tongyi DeepResearch 30B A3B (Free)",
+      "provider": "openrouter",
+      "tier": "free",
+      "capabilities": {
+        "temperature": true,
+        "top_p": true,
+        "reasoning": false
+      },
+      "defaults": {
+        "temperature": 0.2,
+        "top_p": 1.0
+      }
+    },
+    {
+      "id": "meituan/longcat-flash-chat:free",
+      "display_name": "LongCat Flash Chat (Free)",
+      "provider": "openrouter",
+      "tier": "free",
+      "capabilities": {
+        "temperature": true,
+        "top_p": true,
+        "reasoning": false
+      },
+      "defaults": {
+        "temperature": 0.2,
+        "top_p": 1.0
+      }
+    },
+    {
+      "id": "deepseek/deepseek-chat-v3-0324:free",
+      "display_name": "DeepSeek V3 0324 (Free)",
+      "provider": "openrouter",
+      "tier": "free",
+      "capabilities": {
+        "temperature": true,
+        "top_p": true,
+        "reasoning": false
+      },
+      "defaults": {
+        "temperature": 0.2,
+        "top_p": 1.0
+      }
+    },
+    {
+      "id": "deepseek/deepseek-chat-v3.1:free",
+      "display_name": "DeepSeek V3.1 (Free)",
+      "provider": "openrouter",
+      "tier": "free",
+      "capabilities": {
+        "temperature": true,
+        "top_p": true,
+        "reasoning": false
+      },
+      "defaults": {
+        "temperature": 0.2,
+        "top_p": 1.0
+      }
+    },
+    {
+      "id": "deepseek/deepseek-r1:free",
+      "display_name": "DeepSeek R1 (Free)",
+      "provider": "openrouter",
+      "tier": "free",
+      "capabilities": {
+        "temperature": true,
+        "top_p": true,
+        "reasoning": true
+      },
+      "defaults": {
+        "reasoning_effort": "low"
+      }
+    },
+    {
+      "id": "deepseek/deepseek-r1-0528:free",
+      "display_name": "DeepSeek R1 0528 (Free)",
+      "provider": "openrouter",
+      "tier": "free",
+      "capabilities": {
+        "temperature": true,
+        "top_p": true,
+        "reasoning": true
+      },
+      "defaults": {
+        "reasoning_effort": "low"
+      }
+    },
+    {
+      "id": "deepseek/deepseek-r1-0528-qwen3-8b:free",
+      "display_name": "DeepSeek R1 0528 Qwen3 8B (Free)",
+      "provider": "openrouter",
+      "tier": "free",
+      "capabilities": {
+        "temperature": true,
+        "top_p": true,
+        "reasoning": true
+      },
+      "defaults": {
+        "reasoning_effort": "low"
+      }
+    },
+    {
+      "id": "qwen/qwen3-coder:free",
+      "display_name": "Qwen3 Coder 480B A35B (Free)",
+      "provider": "openrouter",
+      "tier": "free",
+      "capabilities": {
+        "temperature": true,
+        "top_p": true,
+        "reasoning": false
+      },
+      "defaults": {
+        "temperature": 0.2,
+        "top_p": 1.0
+      }
+    }
+  ]
+}

@@ -2951,7 +2951,7 @@ class AltoProcessor:
                         token_text_for_hpos = content_value
                     elif subs_type == 'HypPart2':
                         # continuation fragment: use the full reconstructed word for HPOS purposes,
-                        # but don't add it to line_parts to avoid duplication.
+                        # but don't add it to line_parts or word metrics to avoid duplication.
                         content_value = ''
                         token_text_for_hpos = subs_content or content
                     else:
@@ -2972,11 +2972,13 @@ class AltoProcessor:
                     height = string_el.get('HEIGHT')
                     if height:
                         try:
-                            current_line_word_heights.append(float(height))
+                            height_value = float(height)
+                        except (TypeError, ValueError):
+                            height_value = None
+                        if height_value is not None and content_value:
+                            current_line_word_heights.append(height_value)
                             current_line_word_lengths.append(non_space_length)
                             current_line_word_tokens.append(token_text)
-                        except (TypeError, ValueError):
-                            pass
 
                     if content_value:
                         line_parts.append(content_value)

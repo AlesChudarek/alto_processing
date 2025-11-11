@@ -3705,7 +3705,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         const MANUAL_JOINER_NAME = 'manual-joiner';
         const HYPHEN_LIKE_REGEX = /[\-\u2010\u2011\u2012\u2013\u2014\u2015\u2212\uFE63\uFF0D]/;
         const TRAILING_HYPHEN_SEQUENCE_REGEX = /[\-\u2010\u2011\u2012\u2013\u2014\u2015\u2212\uFE63\uFF0D]["'„“”«»‚‘’‹›)\]\}]*$/;
-        const SENTENCE_END_REGEX = /[.!?…]+["'„“”«»‚‘’‹›)\]\}]*$/u;
+        const SENTENCE_END_REGEX = /[.!?…:]+["'„“”«»‚‘’‹›)\]\}]*$/u;
         const SENTENCE_START_REGEX = /^[\s"'„“”«»‚‘’‹›(\[{\-—–]*[A-Z\u00C0-\u0178]/u;
         function isReasoningModel(model) {
             const definition = getModelDefinition(model);

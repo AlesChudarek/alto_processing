@@ -974,6 +974,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
 :root {
             --thumbnail-drawer-width: clamp(260px, 35vw, 460px);
             --thumbnail-toggle-size: 32px;
+            --primary-max-width: 1200px;
         }
         body {
             font-family: Arial, sans-serif;
@@ -983,7 +984,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         }
         .page-shell {
             position: relative;
-            max-width: 1200px;
+            max-width: var(--primary-max-width);
             margin: 0 auto;
             padding-left: 0;
             overflow: visible;
@@ -995,13 +996,23 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             margin-bottom: 20px;
             position: relative;
-            max-width: 1200px;
+            max-width: var(--primary-max-width);
             margin-left: auto;
             margin-right: auto;
         }
         .main-content {
-            max-width: 1200px;
+            max-width: var(--primary-max-width);
             margin: 0 auto;
+        }
+        @media (min-width: 1101px) {
+            body:not(.thumbnail-drawer-collapsed) .page-shell,
+            body:not(.thumbnail-drawer-collapsed) .container,
+            body:not(.thumbnail-drawer-collapsed) .main-content {
+                width: min(
+                    var(--primary-max-width),
+                    max(360px, calc(100vw - 2 * var(--thumbnail-drawer-width) - 32px))
+                );
+            }
         }
         #thumbnail-drawer {
             position: absolute;
@@ -1101,7 +1112,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         }
         .thumbnail-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+            grid-template-columns: repeat(3, minmax(0, 1fr));
             gap: 8px;
         }
         .page-thumbnail {
@@ -1184,9 +1195,26 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         .main-content {
             min-width: 0;
         }
+        @media (max-width: 2150px) {
+            :root {
+                --thumbnail-drawer-width: clamp(220px, 32vw, 340px);
+            }
+            .thumbnail-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+        }
+        @media (max-width: 1880px) {
+            :root {
+                --thumbnail-drawer-width: clamp(220px, 38vw, 300px);
+            }
+            body:not(.thumbnail-drawer-collapsed) {
+                --primary-max-width: 1020px;
+            }
+        }
         @media (max-width: 1100px) {
             body {
                 padding: 12px;
+                --primary-max-width: 100%;
             }
             .page-shell {
                 max-width: none;
@@ -1214,6 +1242,9 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             }
             .thumbnail-scroll {
                 max-height: none;
+            }
+            .thumbnail-grid {
+                grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
             }
             .thumbnail-toggle {
                 position: static;

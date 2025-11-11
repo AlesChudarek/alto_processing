@@ -6,6 +6,8 @@
       "display_name": "Gemini 2.5 Flash Lite",
       "provider": "openrouter",
       "tier": "standard",
+      "supports_text": true,
+      "supports_scan": false,
       "capabilities": {
         "temperature": true,
         "top_p": true,
@@ -25,6 +27,8 @@
       "display_name": "Gemini 2.5 Flash",
       "provider": "openrouter",
       "tier": "standard",
+      "supports_text": true,
+      "supports_scan": false,
       "capabilities": {
         "temperature": true,
         "top_p": true,
@@ -44,6 +48,8 @@
       "display_name": "Gemini 2.5 Pro",
       "provider": "openrouter",
       "tier": "advanced",
+      "supports_text": true,
+      "supports_scan": false,
       "capabilities": {
         "temperature": true,
         "top_p": true,
@@ -63,6 +69,8 @@
       "display_name": "Gemma 3 12B Instruct",
       "provider": "openrouter",
       "tier": "standard",
+      "supports_text": true,
+      "supports_scan": false,
       "capabilities": {
         "temperature": true,
         "top_p": true,
@@ -82,6 +90,8 @@
       "display_name": "Mistral 7B Instruct",
       "provider": "openrouter",
       "tier": "standard",
+      "supports_text": true,
+      "supports_scan": false,
       "capabilities": {
         "temperature": true,
         "top_p": true,
@@ -101,6 +111,8 @@
       "display_name": "OpenAI GPT-4.1 Mini",
       "provider": "openrouter",
       "tier": "standard",
+      "supports_text": true,
+      "supports_scan": false,
       "capabilities": {
         "temperature": true,
         "top_p": true,
@@ -120,6 +132,8 @@
       "display_name": "OpenAI GPT-4o Mini",
       "provider": "openrouter",
       "tier": "standard",
+      "supports_text": true,
+      "supports_scan": false,
       "capabilities": {
         "temperature": false,
         "top_p": false,
@@ -138,6 +152,8 @@
       "display_name": "OpenAI GPT-4o",
       "provider": "openrouter",
       "tier": "standard",
+      "supports_text": true,
+      "supports_scan": false,
       "capabilities": {
         "temperature": true,
         "top_p": true,
@@ -157,6 +173,8 @@
       "display_name": "OpenAI GPT-5",
       "provider": "openrouter",
       "tier": "advanced",
+      "supports_text": true,
+      "supports_scan": false,
       "capabilities": {
         "temperature": false,
         "top_p": false,
@@ -176,6 +194,8 @@
       "display_name": "Qwen2.5 7B Instruct",
       "provider": "openrouter",
       "tier": "standard",
+      "supports_text": true,
+      "supports_scan": false,
       "capabilities": {
         "temperature": true,
         "top_p": true,
@@ -195,6 +215,8 @@
       "display_name": "Tongyi DeepResearch 30B A3B (Free)",
       "provider": "openrouter",
       "tier": "free",
+      "supports_text": true,
+      "supports_scan": false,
       "capabilities": {
         "temperature": true,
         "top_p": true,
@@ -207,6 +229,29 @@
       "pricing": {
         "input_per_million_usd": 0.0,
         "output_per_million_usd": 0.0
+      }
+    },
+    {
+      "id": "openai/gpt-4.1",
+      "display_name": "OpenAI GPT-4.1 Vision",
+      "provider": "openrouter",
+      "tier": "advanced",
+      "supports_text": false,
+      "supports_scan": true,
+      "capabilities": {
+        "temperature": true,
+        "top_p": true,
+        "reasoning": true
+      },
+      "defaults": {
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "reasoning_effort": "medium",
+        "max_output_tokens": 4096
+      },
+      "pricing": {
+        "input_per_million_usd": null,
+        "output_per_million_usd": null
       }
     }
   ]

@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import base64
 import copy
+import inspect
+import io
 import json
 import os
-import inspect
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
@@ -14,6 +16,11 @@ from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+
+try:  # Pillow is optional but recommended for scan resizing
+    from PIL import Image
+except ImportError:  # pragma: no cover - fallback when Pillow missing
+    Image = None  # type: ignore
 
 try:
     from openai import OpenAI, BadRequestError
@@ -52,6 +59,14 @@ MODEL_DEFINITION_MAP: Dict[str, Dict[str, Any]] = {}
 MODEL_CAPABILITY_MAP: Dict[str, Dict[str, bool]] = {}
 MODEL_DEFAULTS_MAP: Dict[str, Dict[str, Any]] = {}
 ENABLE_RESPONSE_FORMAT = False  # sleeper feature – enable once OpenRouter enforces response_format
+
+DEFAULT_API_BASES = [
+    "https://kramerius.mzk.cz/search/api/v5.0",
+    "https://kramerius5.nkp.cz/search/api/v5.0",
+]
+READER_DEFAULT_STREAM = "IMG_FULL"
+READER_STREAM_FALLBACK = ("IMG_FULL", "IMG_PREVIEW", "IMG_THUMB")
+READER_MAX_IMAGE_DIMENSION = 2000
 
 if ENABLE_RESPONSE_FORMAT:
     SUPPORTED_RESPONSE_FORMAT_TYPES = {"json_object", "json_schema"}
@@ -260,6 +275,223 @@ for entry in MODEL_REGISTRY.get("models", []) or []:
     raw_defaults = entry.get("defaults") or {}
     if isinstance(raw_defaults, dict):
         MODEL_DEFAULTS_MAP[normalized] = raw_defaults
+
+
+def _model_supports_scan(model_id: str) -> bool:
+    entry = MODEL_DEFINITION_MAP.get(_normalize_model_id(model_id))
+    if not entry:
+        return False
+    if "supports_scan" in entry:
+        return bool(entry["supports_scan"])
+    return False
+
+
+def _model_supports_text(model_id: str) -> bool:
+    entry = MODEL_DEFINITION_MAP.get(_normalize_model_id(model_id))
+    if not entry:
+        return True
+    if "supports_text" in entry:
+        return bool(entry["supports_text"])
+    return True
+
+
+def _iter_reader_api_bases(override: Optional[str] = None):
+    seen: set[str] = set()
+    if override:
+        normalized = override.rstrip("/")
+        if normalized:
+            seen.add(normalized)
+            yield normalized
+    for base in DEFAULT_API_BASES:
+        normalized = base.rstrip("/")
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        yield normalized
+
+
+def _fetch_scan_image_bytes(
+    uuid: str,
+    preferred_stream: str,
+    api_base_override: Optional[str],
+) -> Tuple[bytes, str, str]:
+    if not uuid:
+        raise AgentRunnerError("Reader agent vyžaduje 'scan_uuid'.")
+    normalized_stream = (preferred_stream or READER_DEFAULT_STREAM).upper()
+    if normalized_stream not in READER_STREAM_FALLBACK:
+        normalized_stream = READER_DEFAULT_STREAM
+    candidate_streams = []
+    for stream in (normalized_stream,) + tuple(s for s in READER_STREAM_FALLBACK if s != normalized_stream):
+        if stream not in candidate_streams:
+            candidate_streams.append(stream)
+    last_error = None
+    for stream in candidate_streams:
+        for base in _iter_reader_api_bases(api_base_override):
+            upstream_url = f"{base}/item/uuid:{uuid}/streams/{stream}"
+            try:
+                response = requests.get(upstream_url, timeout=25)
+            except requests.RequestException as exc:
+                last_error = f"Chyba při stahování skenu: {exc}"
+                continue
+            if response.status_code != 200 or not response.content:
+                last_error = f"Stream {stream} ({base}) vrátil {response.status_code}"
+                response.close()
+                continue
+            content_type = response.headers.get("Content-Type", "image/jpeg")
+            if "jp2" in content_type.lower():
+                last_error = f"Stream {stream} vrací nepodporovaný formát {content_type}"
+                response.close()
+                continue
+            payload = response.content
+            response.close()
+            return payload, content_type or "image/jpeg", stream
+    raise AgentRunnerError(last_error or "Nepodařilo se stáhnout obrázek stránky pro reader agenta.")
+
+
+def _downscale_reader_image(image_bytes: bytes, content_type: Optional[str]) -> Tuple[bytes, str]:
+    media_type = (content_type or "image/jpeg").lower()
+    if media_type == "image/jp2":
+        media_type = "image/jpeg"
+    if Image is None:
+        return image_bytes, media_type or "image/jpeg"
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            width, height = img.size
+            max_dim = max(width, height)
+            target_media_type = media_type or f"image/{(img.format or 'jpeg').lower()}"
+            if max_dim <= READER_MAX_IMAGE_DIMENSION:
+                if target_media_type == "image/jp2":
+                    target_media_type = "image/jpeg"
+                return image_bytes, target_media_type or "image/jpeg"
+            scale = READER_MAX_IMAGE_DIMENSION / float(max_dim)
+            new_width = max(64, int(width * scale))
+            new_height = max(64, int(height * scale))
+            resized = img.convert("RGB").resize((new_width, new_height), Image.LANCZOS)
+            output = io.BytesIO()
+            resized.save(output, format="JPEG", quality=92, optimize=True)
+            return output.getvalue(), "image/jpeg"
+    except Exception as exc:
+        print(f"[AgentDebug] Downscale obrázku selhal: {exc}")
+    return image_bytes, media_type or "image/jpeg"
+
+
+def _prepare_reader_inputs(payload: Dict[str, Any]) -> Dict[str, Any]:
+    scan_uuid = str(payload.get("scan_uuid") or payload.get("page_uuid") or "").strip()
+    if not scan_uuid:
+        raise AgentRunnerError("Reader agent vyžaduje 'scan_uuid'.")
+    preferred_stream = str(payload.get("scan_stream") or READER_DEFAULT_STREAM).strip().upper()
+    api_base_override = str(payload.get("api_base") or "").strip() or None
+    image_bytes, content_type, used_stream = _fetch_scan_image_bytes(scan_uuid, preferred_stream, api_base_override)
+    processed_bytes, media_type = _downscale_reader_image(image_bytes, content_type)
+    image_b64 = base64.b64encode(processed_bytes).decode("ascii")
+    language_hint = payload.get("language_hint") or DEFAULT_LANGUAGE_HINT
+    page_number = payload.get("page_number") or ""
+    const_parts = [f"Jazyková nápověda: {language_hint}"]
+    if page_number:
+        const_parts.append(f"Číslo strany: {page_number}")
+    const_parts.append("")
+    const_parts.extend([
+        "Úkol: Přepiš text z přiloženého skenu do čistého HTML (stejné bloky jako vstupní ALTO).",
+        "Používej pouze bloky <h1>-<h3>, <p>, <blockquote>, <small>, <div class=\"note\">.",
+        "Nepřidávej vlastní poznámky ani Markdown.",
+        "Pokud je obsah nečitelný, vrať pouze <p>[nečitelná strana]</p>.",
+    ])
+    instruction_text = "\n".join(const_parts).strip()
+    document_payload = {
+        "language_hint": language_hint,
+        "page_uuid": scan_uuid,
+        "page_number": page_number,
+        "page_index": payload.get("page_index"),
+        "book_uuid": payload.get("book_uuid") or "",
+        "api_base": api_base_override or "",
+        "image_stream": used_stream,
+        "image_media_type": media_type,
+        "source": "scan_reader",
+    }
+    data_url = f"data:{media_type or 'image/jpeg'};base64,{image_b64}"
+    chat_content = [
+        {"type": "text", "text": instruction_text.strip()},
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": data_url,
+                "detail": "auto",
+            },
+        },
+    ]
+    return {
+        "document_payload": document_payload,
+        "chat_content": chat_content,
+    }
+
+
+def _extract_chat_output_text(response: Any) -> str:
+    try:
+        choice = response.choices[0]
+        content = getattr(choice.message, "content", None)
+    except (AttributeError, IndexError):
+        content = None
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if text:
+                    parts.append(text)
+        if parts:
+            return "\n".join(parts)
+    return str(content or "")
+
+
+def _run_reader_chat_completion(
+    client: OpenAI,
+    model: str,
+    prompt: str,
+    chat_content: list,
+    temperature: Optional[float],
+    top_p: Optional[float],
+    max_output_tokens: Optional[int],
+) -> Any:
+    messages = [
+        {"role": "system", "content": [{"type": "text", "text": prompt}]},
+        {"role": "user", "content": chat_content},
+    ]
+    chat_kwargs: Dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+    }
+    if temperature is not None:
+        chat_kwargs["temperature"] = temperature
+    if top_p is not None:
+        chat_kwargs["top_p"] = top_p
+    if max_output_tokens is not None:
+        chat_kwargs["max_tokens"] = int(max_output_tokens)
+
+    print("\n=== [AgentDebug] Chat Completion Request ===")
+    print(f"Model: {model}")
+    if "temperature" in chat_kwargs:
+        print(f"Temperature: {chat_kwargs['temperature']}")
+    if "top_p" in chat_kwargs:
+        print(f"Top P: {chat_kwargs['top_p']}")
+    if "max_tokens" in chat_kwargs:
+        print(f"Max tokens: {chat_kwargs['max_tokens']}")
+    for msg in messages:
+        role = msg.get("role")
+        for item in msg.get("content", []):
+            item_type = item.get("type")
+            if item_type == "text":
+                print(f"[{role}] {item.get('text')}")
+            elif item_type == "image_url":
+                image_data = item.get("image_url") or {}
+                url_value = image_data.get("url")
+                descriptor = f"url length={len(url_value) if isinstance(url_value, str) else 0}"
+                print(f"[{role}] <image_url {descriptor}>")
+    print("=== [AgentDebug] End Chat Request ===\n")
+
+    response = client.chat.completions.create(**chat_kwargs)
+    return response
 
 
 DEFAULT_TEMPERATURE = 0.2
@@ -930,14 +1162,27 @@ def run_agent(agent: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
     if not prompt:
         raise AgentRunnerError("Agent nemá vyplněný prompt.")
 
-    document_payload = _build_document_payload(payload or {})
-    user_payload = json.dumps(document_payload, ensure_ascii=False, indent=2)
+    collection = str(payload.get("collection") or "").strip().lower()
+    reader_inputs: Optional[Dict[str, Any]] = None
+    user_payload = ''
+    user_message_blocks: Optional[list] = None
+    if collection == "readers":
+        reader_inputs = _prepare_reader_inputs(payload or {})
+        document_payload = reader_inputs["document_payload"]
+    else:
+        document_payload = _build_document_payload(payload or {})
+        user_payload = json.dumps(document_payload, ensure_ascii=False, indent=2)
+        user_message_blocks = [{"type": "input_text", "text": user_payload}]
 
     model = (
         str(agent.get("model")).strip()
         if agent.get("model")
         else DEFAULT_MODEL
     )
+    if collection == "readers" and not _model_supports_scan(model):
+        raise AgentRunnerError(f"Model {model} nepodporuje čtení ze skenu – vyberte jiný model.")
+    if collection != "readers" and not _model_supports_text(model):
+        raise AgentRunnerError(f"Model {model} není povolený pro textové agenty.")
 
     client = _get_client()
     native_response_format_support = _client_supports_response_format(client)
@@ -991,144 +1236,174 @@ def run_agent(agent: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
             response_format = _normalize_response_format(effective_settings.get("response_format"))
         expected_response_format = response_format if response_format is not None else None
 
-    request_kwargs: Dict[str, Any] = {
-        "model": model,
-        "input": [
-            {
-                "role": "system",
-                "content": [{"type": "input_text", "text": prompt}],
-            },
-            {
-                "role": "user",
-                "content": [{"type": "input_text", "text": user_payload}],
-            },
-        ],
-    }
-    if supports_temperature and temperature is not None:
-        request_kwargs["temperature"] = _clamp_float(
-            temperature,
-            0.0,
-            2.0,
-            effective_settings.get("temperature", 0.0),
-        )
-    elif not supports_temperature and payload_temperature is not None:
-        print(f"[AgentDebug] Model {model} ignoruje parametr temperature – nebude odeslán.")
-    if supports_top_p and top_p is not None:
-        request_kwargs["top_p"] = _clamp_float(
-            top_p,
-            0.0,
-            1.0,
-            effective_settings.get("top_p", 1.0),
-        )
-    elif not supports_top_p and payload_top_p is not None:
-        print(f"[AgentDebug] Model {model} ignoruje parametr top_p – nebude odeslán.")
-    if supports_reasoning:
-        request_kwargs["reasoning"] = {"effort": normalized_reasoning_effort}
-        agent["reasoning_effort"] = normalized_reasoning_effort
-    if ENABLE_RESPONSE_FORMAT and response_format is not None:
-        if supports_response_format:
-            request_kwargs["response_format"] = response_format
-            if not native_response_format_support and not USE_DIRECT_OPENAI:
-                print("[AgentDebug] Klient nepodporuje response_format nativně – požadavek pošlu přímo přes REST.")
-        else:
-            print(f"[AgentDebug] Model {model} ignoruje parametr response_format – nebude odeslán.")
-    if max_output_tokens is not None:
-        request_kwargs["max_output_tokens"] = int(max_output_tokens)
+    request_kwargs: Dict[str, Any] = {}
+    if collection != "readers":
+        request_kwargs = {
+            "model": model,
+            "input": [
+                {
+                    "role": "system",
+                    "content": [{"type": "input_text", "text": prompt}],
+                },
+                {
+                    "role": "user",
+                    "content": user_message_blocks or [],
+                },
+            ],
+        }
+    if collection != "readers":
+        if supports_temperature and temperature is not None:
+            request_kwargs["temperature"] = _clamp_float(
+                temperature,
+                0.0,
+                2.0,
+                effective_settings.get("temperature", 0.0),
+            )
+        elif not supports_temperature and payload_temperature is not None:
+            print(f"[AgentDebug] Model {model} ignoruje parametr temperature – nebude odeslán.")
+        if supports_top_p and top_p is not None:
+            request_kwargs["top_p"] = _clamp_float(
+                top_p,
+                0.0,
+                1.0,
+                effective_settings.get("top_p", 1.0),
+            )
+        elif not supports_top_p and payload_top_p is not None:
+            print(f"[AgentDebug] Model {model} ignoruje parametr top_p – nebude odeslán.")
+        if supports_reasoning:
+            request_kwargs["reasoning"] = {"effort": normalized_reasoning_effort}
+            agent["reasoning_effort"] = normalized_reasoning_effort
+        if ENABLE_RESPONSE_FORMAT and response_format is not None:
+            if supports_response_format:
+                request_kwargs["response_format"] = response_format
+                if not native_response_format_support and not USE_DIRECT_OPENAI:
+                    print("[AgentDebug] Klient nepodporuje response_format nativně – požadavek pošlu přímo přes REST.")
+            else:
+                print(f"[AgentDebug] Model {model} ignoruje parametr response_format – nebude odeslán.")
+        if max_output_tokens is not None:
+            request_kwargs["max_output_tokens"] = int(max_output_tokens)
 
-    debug_agent = agent.get("name") or agent.get("display_name") or "unknown"
-    print("\n=== [AgentDebug] OpenAI Request ===")
-    print(f"Agent: {debug_agent}")
-    print(f"Model: {request_kwargs.get('model')}")
-    if "temperature" in request_kwargs:
-        print(f"Temperature: {request_kwargs.get('temperature')}")
-    if "top_p" in request_kwargs:
-        print(f"Top P: {request_kwargs.get('top_p')}")
-    if "reasoning" in request_kwargs:
-        print(f"Reasoning effort: {request_kwargs['reasoning'].get('effort')}")
-    if "max_output_tokens" in request_kwargs:
-        print(f"Max output tokens: {request_kwargs.get('max_output_tokens')}")
-    if ENABLE_RESPONSE_FORMAT and "response_format" in request_kwargs:
-        try:
-            formatted_response_format = json.dumps(request_kwargs["response_format"], ensure_ascii=False)
-        except Exception:
-            formatted_response_format = str(request_kwargs["response_format"])
-        print(f"Response format: {formatted_response_format}")
-    print("--- Prompt ---")
-    for part in request_kwargs.get("input", []):
-        role = part.get("role")
-        contents = part.get("content") or []
-        for block in contents:
-            if block.get("type") == "input_text":
-                print(f"[{role}] {block.get('text')}")
-    print("=== [AgentDebug] End Request ===\n")
+        debug_agent = agent.get("name") or agent.get("display_name") or "unknown"
+        print("\n=== [AgentDebug] OpenAI Request ===")
+        print(f"Agent: {debug_agent}")
+        print(f"Model: {request_kwargs.get('model')}")
+        if "temperature" in request_kwargs:
+            print(f"Temperature: {request_kwargs.get('temperature')}")
+        if "top_p" in request_kwargs:
+            print(f"Top P: {request_kwargs.get('top_p')}")
+        if "reasoning" in request_kwargs:
+            print(f"Reasoning effort: {request_kwargs['reasoning'].get('effort')}")
+        if "max_output_tokens" in request_kwargs:
+            print(f"Max output tokens: {request_kwargs.get('max_output_tokens')}")
+        if ENABLE_RESPONSE_FORMAT and "response_format" in request_kwargs:
+            try:
+                formatted_response_format = json.dumps(request_kwargs["response_format"], ensure_ascii=False)
+            except Exception:
+                formatted_response_format = str(request_kwargs["response_format"])
+            print(f"Response format: {formatted_response_format}")
+        print("--- Prompt ---")
+        for part in request_kwargs.get("input", []):
+            role = part.get("role")
+            contents = part.get("content") or []
+            for block in contents:
+                if block.get("type") == "input_text":
+                    print(f"[{role}] {block.get('text')}")
+        print("=== [AgentDebug] End Request ===\n")
 
-    def _retry_without_unsupported(error: Exception) -> Optional[Response]:
-        removed_any = False
-        message = " ".join(str(part) for part in getattr(error, "args", []) if part)
-        message_lower = message.lower()
-        if ENABLE_RESPONSE_FORMAT and isinstance(error, TypeError) and "response_format" in message_lower and "unexpected keyword" in message_lower:
-            print("[AgentDebug] Klient nepodporuje parametr response_format – opakuji bez něj.")
-            request_kwargs.pop("response_format", None)
-            removed_any = True
-            global _CLIENT_SUPPORTS_NATIVE_RESPONSE_FORMAT
-            _CLIENT_SUPPORTS_NATIVE_RESPONSE_FORMAT = False
-        if BadRequestError is None or not isinstance(error, BadRequestError):
-            if not removed_any:
-                return None
-        else:
-            if "temperature" in request_kwargs and "temperature" in message_lower:
-                print("[AgentDebug] Model nepodporuje parametr temperature – opakuji bez něj.")
-                request_kwargs.pop("temperature", None)
-                removed_any = True
-            if "top_p" in request_kwargs and "top_p" in message_lower:
-                print("[AgentDebug] Model nepodporuje parametr top_p – opakuji bez něj.")
-                request_kwargs.pop("top_p", None)
-                removed_any = True
-            if "max_output_tokens" in request_kwargs and (
-                "max_output_tokens" in message_lower or "max tokens" in message_lower
-            ):
-                print("[AgentDebug] Model nepodporuje parametr max_output_tokens – opakuji bez něj.")
-                request_kwargs.pop("max_output_tokens", None)
-                removed_any = True
-            if "reasoning" in request_kwargs and "reasoning" in message_lower:
-                print("[AgentDebug] Model nepodporuje pole reasoning – opakuji bez něj.")
-                request_kwargs.pop("reasoning", None)
-                removed_any = True
-            if ENABLE_RESPONSE_FORMAT and "response_format" in request_kwargs and "response_format" in message_lower:
-                print("[AgentDebug] Model nepodporuje pole response_format – opakuji bez něj.")
+        def _retry_without_unsupported(error: Exception) -> Optional[Response]:
+            removed_any = False
+            message = " ".join(str(part) for part in getattr(error, "args", []) if part)
+            message_lower = message.lower()
+            if ENABLE_RESPONSE_FORMAT and isinstance(error, TypeError) and "response_format" in message_lower and "unexpected keyword" in message_lower:
+                print("[AgentDebug] Klient nepodporuje parametr response_format – opakuji bez něj.")
                 request_kwargs.pop("response_format", None)
                 removed_any = True
-        if not removed_any:
-            return None
-        updated_support = _client_supports_response_format(client_obj) if ENABLE_RESPONSE_FORMAT else False
-        return _perform_responses_request(client_obj, request_kwargs, updated_support)
+                global _CLIENT_SUPPORTS_NATIVE_RESPONSE_FORMAT
+                _CLIENT_SUPPORTS_NATIVE_RESPONSE_FORMAT = False
+            if BadRequestError is None or not isinstance(error, BadRequestError):
+                if not removed_any:
+                    return None
+            else:
+                if "temperature" in request_kwargs and "temperature" in message_lower:
+                    print("[AgentDebug] Model nepodporuje parametr temperature – opakuji bez něj.")
+                    request_kwargs.pop("temperature", None)
+                    removed_any = True
+                if "top_p" in request_kwargs and "top_p" in message_lower:
+                    print("[AgentDebug] Model nepodporuje parametr top_p – opakuji bez něj.")
+                    request_kwargs.pop("top_p", None)
+                    removed_any = True
+                if "max_output_tokens" in request_kwargs and (
+                    "max_output_tokens" in message_lower or "max tokens" in message_lower
+                ):
+                    print("[AgentDebug] Model nepodporuje parametr max_output_tokens – opakuji bez něj.")
+                    request_kwargs.pop("max_output_tokens", None)
+                    removed_any = True
+                if "reasoning" in request_kwargs and "reasoning" in message_lower:
+                    print("[AgentDebug] Model nepodporuje pole reasoning – opakuji bez něj.")
+                    request_kwargs.pop("reasoning", None)
+                    removed_any = True
+                if ENABLE_RESPONSE_FORMAT and "response_format" in request_kwargs and "response_format" in message_lower:
+                    print("[AgentDebug] Model nepodporuje pole response_format – opakuji bez něj.")
+                    request_kwargs.pop("response_format", None)
+                    removed_any = True
+            if not removed_any:
+                return None
+            updated_support = _client_supports_response_format(client) if ENABLE_RESPONSE_FORMAT else False
+            return _perform_responses_request(client, request_kwargs, updated_support)
 
-    try:
-        response = _perform_responses_request(client, request_kwargs, native_response_format_support)
-    except Exception as exc:
-        retry = _retry_without_unsupported(exc)
-        if retry is None:
-            raise
-        response = retry
-
-    try:
-        response_dict = response.model_dump()
-    except AttributeError:
-        response_dict = getattr(response, "__dict__", {})
-
-    print("=== [AgentDebug] OpenAI Response ===")
-    try:
-        print(response.output_text)
-    except Exception:
         try:
-            print(json.dumps(response_dict, ensure_ascii=False, indent=2))
-        except Exception:
-            print("[AgentDebug] Nelze zobrazit odpověď.")
-    print("=== [AgentDebug] End Response ===\n")
+            response = _perform_responses_request(client, request_kwargs, native_response_format_support)
+        except Exception as exc:
+            retry = _retry_without_unsupported(exc)
+            if retry is None:
+                raise
+            response = retry
 
-    text = _extract_output_text(response)
-    stop_reason = _extract_stop_reason(response_dict)
-    usage = _extract_usage(response_dict)
+        try:
+            response_dict = response.model_dump()
+        except AttributeError:
+            response_dict = getattr(response, "__dict__", {})
+
+        print("=== [AgentDebug] OpenAI Response ===")
+        try:
+            print(response.output_text)
+        except Exception:
+            try:
+                print(json.dumps(response_dict, ensure_ascii=False, indent=2))
+            except Exception:
+                print("[AgentDebug] Nelze zobrazit odpověď.")
+        print("=== [AgentDebug] End Response ===\n")
+
+        text = _extract_output_text(response)
+        stop_reason = _extract_stop_reason(response_dict)
+        usage = _extract_usage(response_dict)
+    else:
+        chat_content = (reader_inputs or {}).get("chat_content") or []
+        response = _run_reader_chat_completion(
+            client,
+            model,
+            prompt,
+            chat_content,
+            temperature if supports_temperature else None,
+            top_p if supports_top_p else None,
+            max_output_tokens,
+        )
+        try:
+            response_dict = response.model_dump()
+        except AttributeError:
+            response_dict = getattr(response, "__dict__", {})
+        print("=== [AgentDebug] Chat Completion Response ===")
+        try:
+            print(_extract_chat_output_text(response))
+        except Exception:
+            try:
+                print(json.dumps(response_dict, ensure_ascii=False, indent=2))
+            except Exception:
+                print("[AgentDebug] Nelze zobrazit odpověď.")
+        print("=== [AgentDebug] End Chat Response ===\n")
+        text = _extract_chat_output_text(response)
+        stop_reason = None
+        usage = response_dict.get("usage") if isinstance(response_dict, dict) else None
     diff_applied = False
     diff_changes = None
     output_document: Optional[Dict[str, Any]] = None

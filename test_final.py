@@ -4,6 +4,7 @@
 Test script pro ověření funkčnosti ALTO procesoru
 """
 
+import os
 from main_processor import AltoProcessor
 
 def test_processor():
@@ -11,7 +12,7 @@ def test_processor():
     processor = AltoProcessor()
 
     # Test UUID
-    test_uuid = "0f7d662c-56c7-4d62-aaa0-e6743158e8d5"
+    test_uuid = "93373db0-270c-11e5-855a-5ef3fc9ae867"
 
     print("=== Test ALTO Procesoru ===")
     print(f"Testuji s UUID: {test_uuid}")
@@ -48,14 +49,17 @@ def test_processor():
         print("Prvních 200 znaků:")
         print(repr(formatted_text[:200]))
 
+    # Vytvoření adresáře pro výstupy, pokud neexistuje
+    os.makedirs('test_output', exist_ok=True)
+
     # Uložení výsledků
-    with open('test_formatted.html', 'w', encoding='utf-8') as f:
+    with open(os.path.join('test_output', 'test_formatted.html'), 'w', encoding='utf-8') as f:
         f.write(formatted_text)
 
-    with open('test_full.txt', 'w', encoding='utf-8') as f:
+    with open(os.path.join('test_output', 'test_full.txt'), 'w', encoding='utf-8') as f:
         f.write(full_text)
 
-    print("✅ Výsledky uloženy do test_formatted.html a test_full.txt")
+    print("✅ Výsledky uloženy do test_output/test_formatted.html a test_output/test_full.txt")
     print("\n=== NÁHLED ===")
     print(formatted_text[:300] + "...")
 

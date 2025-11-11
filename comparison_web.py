@@ -494,6 +494,7 @@ DEFAULT_AGENT_COLLECTION = 'correctors'
 AGENT_COLLECTIONS = {
     'correctors': AGENTS_DIR / 'correctors',
     'joiners': AGENTS_DIR / 'joiners',
+    'readers': AGENTS_DIR / 'readers',
 }
 AGENT_NAME_RE = re.compile(r'^[A-Za-z0-9._-]{1,64}$')
 
@@ -1545,6 +1546,38 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             margin-top: 0;
             color: #333;
         }
+        .scan-result-frame {
+            position: relative;
+            border: 1px solid #dbe4f0;
+            border-radius: 6px;
+            min-height: 280px;
+            background: linear-gradient(135deg, #f8fafc 0%, #edf2fb 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+        }
+        .scan-result-frame.has-image {
+            background: #ffffff;
+        }
+        .scan-result-image {
+            width: 100%;
+            height: auto;
+            display: none;
+            border-radius: 4px;
+            object-fit: contain;
+            background: #ffffff;
+        }
+        .scan-result-placeholder {
+            color: #4b5563;
+            font-size: 14px;
+            text-align: center;
+            padding: 16px;
+            line-height: 1.5;
+        }
+        .scan-result-frame.has-image .scan-result-placeholder {
+            display: none;
+        }
         .diff-section {
             margin-top: 28px;
             display: none;
@@ -2160,6 +2193,69 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                         </div>
                     </div>
                 </div>
+                <div id="reader-row" class="info-section" style="margin-top:18px;">
+                    <h2 style="margin-bottom:12px;">Čtení ze skenu</h2>
+                    <div style="display:flex;align-items:center;gap:8px;">
+                        <label for="reader-agent-select" style="margin:0;font-weight:600;">Agent:</label>
+                        <select id="reader-agent-select" aria-label="Vyberte agenta pro čtení"></select>
+                        <div id="reader-agent-select-spinner" title="Načítám agenty" style="margin-left:8px;display:none;">
+                            <span class="inline-spinner" aria-hidden="true"></span>
+                        </div>
+                        <div style="margin-left:auto;display:flex;align-items:center;gap:8px;">
+                            <label style="display:inline-flex;align-items:center;gap:6px;">
+                                <input id="reader-agent-auto-read" type="checkbox">
+                                <span style="font-size:13px;">Automaticky vyčítat</span>
+                            </label>
+                            <button id="reader-agent-run" type="button" style="height:36px;display:inline-flex;align-items:center;justify-content:center;padding:6px 12px;">Vyčti</button>
+                            <button id="reader-agent-expand-toggle" type="button" aria-expanded="false" title="Zobrazit nastavení agenta" style="height:36px;display:inline-flex;align-items:center;justify-content:center;padding:6px 10px;">⚙️</button>
+                        </div>
+                    </div>
+
+                    <div id="reader-agent-settings" style="display:none;margin-top:12px;border-top:1px solid #e6e9ef;padding-top:12px;">
+                        <div class="form-group">
+                            <label for="reader-agent-name">Název agenta</label>
+                            <input type="text" id="reader-agent-name" placeholder="Např. default-reader">
+                        </div>
+                        <div class="form-group">
+                            <label for="reader-agent-prompt">Prompt</label>
+                            <textarea id="reader-agent-prompt" rows="6" style="width:100%;font-family:monospace;">Zadejte prompt...</textarea>
+                        </div>
+                        <div class="form-group">
+                            <label for="reader-agent-default-model">Model</label>
+                            <select id="reader-agent-default-model" aria-label="Vyberte model pro čtení" style="min-width:170px;"></select>
+                        </div>
+                        <div id="reader-agent-parameter-fields" class="form-group" style="margin-top:8px;"></div>
+                        <div style="display:flex;gap:12px;margin-top:12px;flex-wrap:wrap;align-items:center;">
+                            <span class="inline-tooltip-anchor">
+                                <button id="reader-agent-save" type="button">Uložit agenta</button>
+                                <div id="reader-agent-save-tooltip" class="inline-tooltip" role="status" aria-live="polite"></div>
+                            </span>
+                            <button id="reader-agent-delete" type="button" style="background:#e53e3e;">Smazat</button>
+                            <div style="margin-left:auto;">
+                                <button id="reader-agent-run-inline" type="button" style="height:36px;display:inline-flex;align-items:center;justify-content:center;padding:6px 12px;">Vyčti</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="reader-agent-output" style="display:none;margin-top:12px;">
+                        <div id="reader-agent-output-status" class="muted" style="margin-bottom:6px;"></div>
+                        <pre id="reader-agent-output-text" style="white-space:pre-wrap;"></pre>
+                    </div>
+                    <div id="reader-results" class="results" style="display:none;margin-top:16px;">
+                        <div class="result-box">
+                            <h3>Sken strany</h3>
+                            <div id="reader-result-scan" class="scan-result-frame">
+                                <img id="reader-result-scan-img" class="scan-result-image" alt="Aktuální sken strany" src="">
+                                <div class="scan-result-placeholder">Náhled aktuální strany zatím není k dispozici.</div>
+                            </div>
+                        </div>
+                        <div class="result-box">
+                            <h3>Formátovaný text</h3>
+                            <div id="reader-result-text" class="result-rendered">
+                                <div class="muted">Výsledek se zobrazí po spuštění „Vyčti“.</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
                 <div id="stitch-row" class="info-section" style="margin-top:18px;">
                     <h2 style="margin-bottom:12px;">Napojení stran</h2>
                     <div style="display:flex;align-items:center;gap:8px;">
@@ -2367,6 +2463,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 selectedStorageKey: config.selectedStorageKey,
                 hasOutputPanel: Boolean(config.hasOutputPanel),
                 supportsDiff: Boolean(config.supportsDiff),
+                requiresPythonHtml: config.requiresPythonHtml !== false,
                 runButtonLabel: config.runButtonLabel || 'Spustit',
                 agentsCache: {},
                 agentFingerprintCache: new Map(),
@@ -2409,7 +2506,34 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 selectedStorageKey: 'altoAgentSelected_v1',
                 hasOutputPanel: true,
                 supportsDiff: true,
+                requiresPythonHtml: true,
                 runButtonLabel: 'Oprav',
+            }),
+            readers: createAgentContext({
+                collection: 'readers',
+                selectId: 'reader-agent-select',
+                selectSpinnerId: 'reader-agent-select-spinner',
+                autoCheckboxId: 'reader-agent-auto-read',
+                runButtonId: 'reader-agent-run',
+                runButtonExtraIds: ['reader-agent-run-inline'],
+                expandToggleId: 'reader-agent-expand-toggle',
+                settingsId: 'reader-agent-settings',
+                nameInputId: 'reader-agent-name',
+                promptTextareaId: 'reader-agent-prompt',
+                modelSelectId: 'reader-agent-default-model',
+                parameterFieldsId: 'reader-agent-parameter-fields',
+                saveButtonId: 'reader-agent-save',
+                deleteButtonId: 'reader-agent-delete',
+                saveTooltipId: 'reader-agent-save-tooltip',
+                outputContainerId: 'reader-agent-output',
+                outputStatusId: 'reader-agent-output-status',
+                outputTextId: 'reader-agent-output-text',
+                autoStorageKey: 'altoReaderAuto_v1',
+                selectedStorageKey: 'altoReaderSelected_v1',
+                hasOutputPanel: true,
+                supportsDiff: false,
+                requiresPythonHtml: false,
+                runButtonLabel: 'Vyčti',
             }),
             joiners: createAgentContext({
                 collection: 'joiners',
@@ -2434,6 +2558,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 selectedStorageKey: 'altoStitchSelected_v1',
                 hasOutputPanel: true,
                 supportsDiff: false,
+                requiresPythonHtml: true,
                 runButtonLabel: 'Napoj',
             }),
         };
@@ -3731,6 +3856,40 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             return MODEL_REGISTRY_MAP.get(normalized) || null;
         }
 
+        function getModelUsageFlags(modelId) {
+            const definition = getModelDefinition(modelId);
+            const supportsText = definition && Object.prototype.hasOwnProperty.call(definition, 'supports_text')
+                ? Boolean(definition.supports_text)
+                : true;
+            const supportsScan = definition && Object.prototype.hasOwnProperty.call(definition, 'supports_scan')
+                ? Boolean(definition.supports_scan)
+                : false;
+            return { supportsText, supportsScan };
+        }
+
+        function getAllowedModelsForCollection(collection) {
+            const normalized = String(collection || '').trim().toLowerCase();
+            const filtered = AVAILABLE_AGENT_MODELS.filter((modelId) => {
+                const usage = getModelUsageFlags(modelId);
+                if (normalized === 'readers') {
+                    return usage.supportsScan;
+                }
+                return usage.supportsText;
+            });
+            if (filtered.length) {
+                return filtered;
+            }
+            return AVAILABLE_AGENT_MODELS.slice();
+        }
+
+        function getDefaultModelForCollection(collection) {
+            const allowed = getAllowedModelsForCollection(collection);
+            if (allowed.length) {
+                return allowed[0];
+            }
+            return DEFAULT_AGENT_MODEL;
+        }
+
         function getModelCapabilities(model) {
             const normalized = normalizeModelId(model);
             if (!normalized) {
@@ -4067,18 +4226,24 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 selectEl.disabled = true;
                 return;
             }
-            selectEl.disabled = false;
-            const modelOptions = [...AVAILABLE_AGENT_MODELS];
-            if (ctx.currentAgentDraft && ctx.currentAgentDraft.settings && ctx.currentAgentDraft.settings.per_model) {
+            const modelOptions = getAllowedModelsForCollection(ctx.collection);
+            if (ctx.collection !== 'readers' && ctx.currentAgentDraft && ctx.currentAgentDraft.settings && ctx.currentAgentDraft.settings.per_model) {
                 Object.keys(ctx.currentAgentDraft.settings.per_model).forEach((modelId) => {
                     if (modelId && !modelOptions.includes(modelId)) {
                         modelOptions.push(modelId);
                     }
                 });
             }
-            if (selectedModel && !modelOptions.includes(selectedModel)) {
+            if (ctx.collection !== 'readers' && selectedModel && !modelOptions.includes(selectedModel)) {
                 modelOptions.push(selectedModel);
             }
+            if (!modelOptions.length) {
+                selectEl.innerHTML = '<option value="">Žádné dostupné modely</option>';
+                selectEl.value = '';
+                selectEl.disabled = true;
+                return;
+            }
+            selectEl.disabled = false;
             selectEl.innerHTML = '';
             modelOptions.forEach((modelId) => {
                 const option = document.createElement('option');
@@ -4089,8 +4254,13 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     : modelId;
                 selectEl.appendChild(option);
             });
-            const normalized = selectedModel && selectedModel.trim().length ? selectedModel : DEFAULT_AGENT_MODEL;
+            const normalized = (selectedModel && modelOptions.includes(selectedModel))
+                ? selectedModel
+                : modelOptions[0];
             selectEl.value = normalized;
+            if (ctx.currentAgentDraft) {
+                ctx.currentAgentDraft.model = normalized;
+            }
         }
 
         function renderAgentParameterControls(ctx, modelId) {
@@ -4109,7 +4279,12 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             const capabilities = getModelCapabilities(modelId);
             const modelSettings = ensureAgentDraftModelSettings(ctx.currentAgentDraft, modelId);
             const controls = [];
-            const idPrefix = ctx.collection === 'joiners' ? 'stitch' : 'agent';
+            let idPrefix = 'agent';
+            if (ctx.collection === 'joiners') {
+                idPrefix = 'stitch';
+            } else if (ctx.collection === 'readers') {
+                idPrefix = 'reader';
+            }
             const supportsResponseFormat = ENABLE_RESPONSE_FORMAT && Boolean(capabilities.response_format);
             if (capabilities.temperature) {
                 controls.push(`
@@ -4569,11 +4744,12 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             const name = select.value;
             const auto = getContextElement(ctx, 'autoCheckboxId');
             if (auto) auto.checked = loadContextAutoTrigger(ctx);
+            const fallbackModel = getDefaultModelForCollection(ctx.collection);
             let fallbackAgent = normalizeAgentData({
                 name,
                 display_name: name,
                 prompt: DEFAULT_AGENT_PROMPT,
-                model: DEFAULT_AGENT_MODEL,
+                model: fallbackModel,
             });
             if (ctx.collection === 'joiners' && name === MANUAL_JOINER_NAME) {
                 ensureManualJoinerAgent(ctx);
@@ -4683,11 +4859,29 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             enableScrollPassthrough(textarea);
         }
 
+        function ensureAgentModelFitsContext(ctx) {
+            if (!ctx || !ctx.currentAgentDraft) {
+                return;
+            }
+            if (ctx.collection === 'joiners' && ctx.currentAgentDraft.manual) {
+                return;
+            }
+            const allowed = getAllowedModelsForCollection(ctx.collection);
+            if (!allowed.length) {
+                ctx.currentAgentDraft.model = '';
+                return;
+            }
+            if (!ctx.currentAgentDraft.model || !allowed.includes(ctx.currentAgentDraft.model)) {
+                ctx.currentAgentDraft.model = allowed[0];
+            }
+        }
+
         function setAgentFields(ctx, agent) {
             const normalized = normalizeAgentData(agent || {});
             ctx.currentAgentDraft = deepCloneAgent(normalized);
             ctx.currentAgentName = normalized.name || '';
             ensureAgentDraftStructure(ctx.currentAgentDraft);
+            ensureAgentModelFitsContext(ctx);
             const nameEl = getContextElement(ctx, 'nameInputId');
             const promptEl = getContextElement(ctx, 'promptTextareaId');
             const modelEl = getContextElement(ctx, 'modelSelectId');
@@ -5053,8 +5247,10 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
 
         function clearAgentOutput() {
             setContextAgentOutput(agentContexts.correctors, '', '', '');
+            setContextAgentOutput(agentContexts.readers, '', '', '');
             setContextAgentOutput(agentContexts.joiners, '', '', '');
             setAgentResultPanels(null, null, false);
+            setReaderResultPanels('', '', { forceVisible: false });
         }
 
         function setAgentOutput(statusText, bodyText, state) {
@@ -5123,6 +5319,101 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             const shouldHideDiff = !(originalHtml && correctedContent);
             renderAgentDiff(null, agentDiffMode, { hidden: shouldHideDiff });
             scheduleThumbnailDrawerHeightSync();
+        }
+
+        function isLikelyHtmlContent(value) {
+            if (typeof value !== 'string') {
+                return false;
+            }
+            const trimmed = value.trim();
+            if (!trimmed.startsWith('<') || !trimmed.endsWith('>')) {
+                return false;
+            }
+            return /<\/?[a-zA-Z][\s\S]*?>/.test(trimmed);
+        }
+
+        function setReaderResultPanels(imageUrl, textContent, options = {}) {
+            const container = document.getElementById('reader-results');
+            const frame = document.getElementById('reader-result-scan');
+            const img = document.getElementById('reader-result-scan-img');
+            const textEl = document.getElementById('reader-result-text');
+            const placeholder = frame ? frame.querySelector('.scan-result-placeholder') : null;
+            if (!container || !frame || !img || !textEl) {
+                return;
+            }
+            const normalizedText = typeof textContent === 'string' ? textContent : '';
+            const hasText = normalizedText.trim().length > 0;
+            const hasImage = Boolean(imageUrl);
+            if (hasImage) {
+                if (img.src !== imageUrl) {
+                    img.src = imageUrl;
+                }
+                img.style.display = 'block';
+                frame.classList.add('has-image');
+                if (placeholder) {
+                    placeholder.style.display = 'none';
+                }
+            } else {
+                img.removeAttribute('src');
+                img.style.display = 'none';
+                frame.classList.remove('has-image');
+                if (placeholder) {
+                    placeholder.style.display = 'block';
+                }
+            }
+            const forceVisible = Boolean(options && options.forceVisible);
+            if (!forceVisible && !hasImage && !hasText) {
+                container.style.display = 'none';
+                textEl.innerHTML = '<div class="muted">Výsledek se zobrazí po spuštění „Vyčti“.</div>';
+                scheduleThumbnailDrawerHeightSync();
+                return;
+            }
+            container.style.display = 'grid';
+            if (hasText) {
+                const treatAsHtml = Boolean(options && options.isHtml) || isLikelyHtmlContent(normalizedText);
+                if (treatAsHtml) {
+                    const compactHtml = normalizedText.replace(/>\s+</g, '><').trim();
+                    textEl.innerHTML = `<pre>${compactHtml}</pre>`;
+                } else {
+                    textEl.innerHTML = `<pre>${escapeHtml(normalizedText)}</pre>`;
+                }
+            } else {
+                textEl.innerHTML = '<div class="muted">Formátovaný text zatím není k dispozici.</div>';
+            }
+            scheduleThumbnailDrawerHeightSync();
+        }
+
+        async function getReaderScanPreviewUrl() {
+            if (!currentPage || !currentPage.uuid) {
+                return '';
+            }
+            if (previewImageUuid === currentPage.uuid && previewObjectUrl) {
+                return previewObjectUrl;
+            }
+            try {
+                const entry = await ensurePreviewEntry(currentPage.uuid);
+                if (entry && entry.objectUrl) {
+                    return entry.objectUrl;
+                }
+            } catch (error) {
+                console.warn('Nelze načíst náhled pro čtení ze skenu:', error);
+            }
+            return `/preview?uuid=${encodeURIComponent(currentPage.uuid)}&stream=IMG_FULL`;
+        }
+
+        async function applyReaderAgentResult(ctx, agentResult, rawText) {
+            const normalizedRaw = typeof rawText === 'string' ? rawText.trim() : '';
+            const htmlOutput = agentResult && typeof agentResult.html === 'string' ? agentResult.html.trim() : '';
+            const formattedText = agentResult && typeof agentResult.formatted_text === 'string'
+                ? agentResult.formatted_text.trim()
+                : '';
+            const finalText = htmlOutput || formattedText || normalizedRaw;
+            const scanUrl = await getReaderScanPreviewUrl();
+            setReaderResultPanels(scanUrl, finalText, {
+                isHtml: Boolean(htmlOutput),
+                forceVisible: Boolean(scanUrl || finalText),
+            });
+            return Boolean(scanUrl || finalText);
         }
 
         function loadStoredAgentDiffMode() {
@@ -5360,8 +5651,11 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             }
             const isAutoInvocation = Boolean(options && options.autoTriggered);
             const pythonHtml = currentResults && currentResults.python ? String(currentResults.python) : '';
-            if (!pythonHtml.trim()) {
-                alert('Python výstup je prázdný – nejprve načtěte stránku.');
+            const hasInputData = contextHasInputData(ctx);
+            if (!hasInputData) {
+                alert(ctx.requiresPythonHtml !== false
+                    ? 'Python výstup je prázdný – nejprve načtěte stránku.'
+                    : 'Nejprve načtěte stránku se skenem.');
                 return;
             }
             const autoCheckbox = getContextElement(ctx, 'autoCheckboxId');
@@ -5405,12 +5699,18 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 language_hint: DEFAULT_LANGUAGE_HINT,
                 page_uuid: currentPage && currentPage.uuid ? currentPage.uuid : '',
                 book_uuid: currentBook && currentBook.uuid ? currentBook.uuid : '',
-                book_title: currentBook && currentBook.title ? currentBook.title : '',
                 page_number: currentPage && currentPage.pageNumber ? currentPage.pageNumber : '',
                 page_index: currentPage && typeof currentPage.index === 'number' ? currentPage.index : null,
                 model: normalizedModel,
                 model_override: normalizedModel,
             };
+            const resolvedLibrary = currentLibrary
+                || (currentPage && currentPage.library)
+                || (currentBook && currentBook.library)
+                || null;
+            if (resolvedLibrary && resolvedLibrary.api_base) {
+                payload.api_base = resolvedLibrary.api_base;
+            }
             if (capabilities.temperature && Object.prototype.hasOwnProperty.call(effectiveSettings, 'temperature')) {
                 payload.temperature = effectiveSettings.temperature;
             }
@@ -5464,6 +5764,15 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     return;
                 }
                 payload.stitch_context = stitchPayload;
+            } else if (ctx.collection === 'readers') {
+                payload.scan_uuid = currentPage && currentPage.uuid ? currentPage.uuid : '';
+                payload.page_title = currentPage && currentPage.title ? currentPage.title : '';
+                payload.book_title = currentBook && currentBook.title ? currentBook.title : '';
+                const previewHost = document.getElementById('page-preview');
+                const currentStream = previewHost && previewHost.dataset && previewHost.dataset.previewStream
+                    ? previewHost.dataset.previewStream
+                    : 'IMG_FULL';
+                payload.scan_stream = currentStream;
             } else {
                 payload.python_html = pythonHtml;
             }
@@ -5584,7 +5893,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     } else {
                         renderAgentDiff(null, agentDiffMode, { hidden: true });
                     }
-                } else {
+                } else if (ctx.collection === 'joiners') {
                     const applied = applyJoinerAgentResult(ctx, text);
                     if (!applied) {
                         ctx.lastJoinerResult = {
@@ -5593,6 +5902,8 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                             timestamp: Date.now(),
                         };
                     }
+                } else if (ctx.collection === 'readers') {
+                    await applyReaderAgentResult(ctx, result, text);
                 }
 
                 const elapsedMs = performance.now() - startTime;
@@ -5626,6 +5937,16 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             }
         }
 
+        function contextHasInputData(ctx) {
+            if (!ctx) {
+                return false;
+            }
+            if (ctx.requiresPythonHtml === false) {
+                return Boolean(currentPage && currentPage.uuid);
+            }
+            return Boolean(currentResults && typeof currentResults.python === 'string' && currentResults.python.trim().length > 0);
+        }
+
         function scheduleAutoAgentRun(ctx, attemptsRemaining = 5) {
             const autoCheckbox = getContextElement(ctx, 'autoCheckboxId');
             if (!autoCheckbox || !autoCheckbox.checked) {
@@ -5635,8 +5956,8 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             const runButton = getContextElement(ctx, 'runButtonId');
             const select = getContextElement(ctx, 'selectId');
             const hasAgent = Boolean(select && select.value);
-            const hasPython = currentResults && typeof currentResults.python === 'string' && currentResults.python.trim().length > 0;
-            if ((runButton && runButton.disabled) || !hasAgent || !hasPython) {
+            const hasInputs = contextHasInputData(ctx);
+            if ((runButton && runButton.disabled) || !hasAgent || !hasInputs) {
                 if (attemptsRemaining > 0 && autoCheckbox.checked) {
                     window.setTimeout(() => scheduleAutoAgentRun(ctx, attemptsRemaining - 1), 200);
                 } else {
@@ -5690,8 +6011,8 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     if (auto.checked) {
                         ctx.autoRunScheduled = false;
                         const hasAgent = Boolean(select && select.value);
-                        const hasPython = currentResults && typeof currentResults.python === 'string' && currentResults.python.trim().length > 0;
-                        if (hasAgent && hasPython && !(runBtn && runBtn.disabled)) {
+                        const hasInputs = contextHasInputData(ctx);
+                        if (hasAgent && hasInputs && !(runBtn && runBtn.disabled)) {
                             runSelectedAgent(ctx, { autoTriggered: true }).catch((error) => {
                                 console.warn('Automatické spuštění agenta po změně zaškrtávacího políčka selhalo:', error);
                             });
@@ -7491,6 +7812,17 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 correctorCtx.autoRunScheduled = false;
             }
 
+            const readerCtx = agentContexts.readers;
+            const readerAuto = getContextElement(readerCtx, 'autoCheckboxId');
+            if (readerAuto && readerAuto.checked) {
+                if (!readerCtx.autoRunScheduled) {
+                    readerCtx.autoRunScheduled = true;
+                    scheduleAutoAgentRun(readerCtx, 5);
+                }
+            } else {
+                readerCtx.autoRunScheduled = false;
+            }
+
             const joinerCtx = agentContexts.joiners;
             stitchRefreshPromise.then(() => {
                 const joinerAuto = getContextElement(joinerCtx, 'autoCheckboxId');
@@ -7869,6 +8201,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             initializeThumbnailDrawer();
             initializeDiffControls();
             initializeAgentUI(agentContexts.correctors);
+            initializeAgentUI(agentContexts.readers);
             initializeAgentUI(agentContexts.joiners);
             initializeStitchingUI();
             initializeAgentDiffControls();

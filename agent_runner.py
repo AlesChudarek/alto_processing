@@ -426,11 +426,40 @@ def _prepare_reader_inputs(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _extract_chat_output_text(response: Any) -> str:
+    # Debug: inspect response shape to handle both object and dict forms
+    try:
+        print("[LLMDebug][_extract_chat_output_text] response type:", type(response))
+    except Exception:
+        pass
+    content = None
     try:
         choice = response.choices[0]
-        content = getattr(choice.message, "content", None)
-    except (AttributeError, IndexError):
-        content = None
+        try:
+            content = getattr(choice.message, "content", None)
+            print("[LLMDebug][_extract_chat_output_text] content (attr) type:", type(content), "preview:", repr(str(content)[:500]))
+        except Exception as e:  # pragma: no cover - defensive
+            print("[LLMDebug][_extract_chat_output_text] error accessing choice.message.content:", e)
+            content = None
+    except (AttributeError, IndexError) as e:
+        # Fallback: try dict-style access from model_dump
+        print("[LLMDebug][_extract_chat_output_text] choice access failed:", e)
+        try:
+            resp_dict = response.model_dump() if hasattr(response, "model_dump") else getattr(response, "__dict__", {})
+        except Exception as e2:
+            resp_dict = {}
+            print("[LLMDebug][_extract_chat_output_text] response.model_dump failed:", e2)
+        choices = resp_dict.get("choices") or resp_dict.get("output") or []
+        print("[LLMDebug][_extract_chat_output_text] choices (dict) type:", type(choices))
+        if isinstance(choices, list) and choices:
+            ch0 = choices[0]
+            print("[LLMDebug][_extract_chat_output_text] first choice type:", type(ch0))
+            if isinstance(ch0, dict):
+                msg = ch0.get("message") or {}
+                print("[LLMDebug][_extract_chat_output_text] first choice.message (dict) keys:", list(msg.keys()) if isinstance(msg, dict) else type(msg))
+                if isinstance(msg, dict):
+                    content = msg.get("content")
+                    print("[LLMDebug][_extract_chat_output_text] content (dict) preview:", repr(str(content)[:500]))
+    # Normalize content
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -440,9 +469,15 @@ def _extract_chat_output_text(response: Any) -> str:
                 text = item.get("text")
                 if text:
                     parts.append(text)
+            elif isinstance(item, str):
+                parts.append(item)
         if parts:
             return "\n".join(parts)
-    return str(content or "")
+    # Last resort: try to stringify
+    try:
+        return str(content or "")
+    except Exception:
+        return ""
 
 
 def _run_reader_chat_completion(
@@ -887,8 +922,17 @@ def _perform_responses_request(
 
 def _extract_output_text(response: Response) -> str:
     """Safely extract concatenated text output from a Responses API reply."""
+    try:
+        print("[LLMDebug][_extract_output_text] response type:", type(response))
+        has_out = hasattr(response, "output_text")
+        print("[LLMDebug][_extract_output_text] has output_text attr:", has_out)
+    except Exception:
+        pass
     if hasattr(response, "output_text") and response.output_text:
-        return response.output_text.strip()
+        try:
+            return response.output_text.strip()
+        except Exception:
+            print("[LLMDebug][_extract_output_text] failed to read response.output_text")
 
     data: Dict[str, Any]
     try:
@@ -898,17 +942,30 @@ def _extract_output_text(response: Response) -> str:
 
     output_chunks = []
     output = data.get("output") or data.get("outputs") or []
+    try:
+        print("[LLMDebug][_extract_output_text] data keys:", list(data.keys()) if isinstance(data, dict) else type(data))
+        print("[LLMDebug][_extract_output_text] output type:", type(output))
+    except Exception:
+        pass
     if isinstance(output, list):
         for item in output:
             if not isinstance(item, dict):
                 continue
             content = item.get("content") or []
+            try:
+                print("[LLMDebug][_extract_output_text] item type:", type(item), "content type:", type(content))
+            except Exception:
+                pass
             if not isinstance(content, list):
                 continue
             for block in content:
                 if not isinstance(block, dict):
                     continue
                 block_type = block.get("type")
+                try:
+                    print("[LLMDebug][_extract_output_text] block type:", block_type)
+                except Exception:
+                    pass
                 if block_type not in {"text", "output_text"}:
                     continue
                 text_payload = block.get("text")
@@ -964,6 +1021,10 @@ def _safe_json_loads(candidate: str) -> Optional[Dict[str, Any]]:
     try:
         parsed = json.loads(text)
     except (TypeError, ValueError, json.JSONDecodeError):
+        try:
+            print("[LLMDebug][_safe_json_loads] JSON parse failed; preview:\n", repr(text)[:1000])
+        except Exception:
+            pass
         return None
     return parsed if isinstance(parsed, dict) else None
 
@@ -1409,6 +1470,11 @@ def run_agent(agent: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
     output_document: Optional[Dict[str, Any]] = None
 
     parsed_output = _safe_json_loads(text)
+    try:
+        print("[LLMDebug] parsed text preview:\n", repr(str(text)[:1000]))
+        print("[LLMDebug] parsed_output type:", type(parsed_output))
+    except Exception:
+        pass
     if ENABLE_RESPONSE_FORMAT and expected_response_format:
         if parsed_output is None:
             raise AgentRunnerError("Model vrátil výstup, který není platný JSON podle očekávaného schématu.")
@@ -1436,6 +1502,10 @@ def run_agent(agent: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
                 diff_applied = True
                 diff_changes = copy.deepcopy(parsed_output.get("changes"))
                 output_document = applied_document
+                try:
+                    print("[LLMDebug] Diff applied, changes count:", len(diff_changes))
+                except Exception:
+                    pass
         elif isinstance(parsed_output.get("blocks"), list):
             # Agent vrátil plný dokument – znormalizujeme formátování.
             text = json.dumps(parsed_output, ensure_ascii=False, indent=2)

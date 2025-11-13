@@ -87,6 +87,7 @@ _VOID_HTML_ELEMENTS = {
 _TAG_REGEX = re.compile(r'<[^>]+?>')
 _TAG_NAME_REGEX = re.compile(r'^<\s*/?\s*([a-zA-Z0-9:-]+)')
 _WORD_SPLIT_REGEX = re.compile(r'(\s+|[^\w]+)', re.UNICODE)
+_BLOCK_TEXT_STRIPPER = re.compile(r'<[^>]+>')
 
 
 @dataclass(frozen=True)
@@ -253,6 +254,155 @@ def wrap_block(content: str, change: str) -> str:
     return f'<div class="{class_attr}"{data_attr}>{content}</div>'
 
 
+def _normalize_block_text(block_html: str) -> str:
+    if not block_html:
+        return ''
+    stripped = _BLOCK_TEXT_STRIPPER.sub(' ', block_html)
+    stripped = re.sub(r'\s+', ' ', stripped).strip().lower()
+    return stripped
+
+def _block_similarity(a_html: str, b_html: str) -> float:
+    """Similarity of normalized text content (0..1)."""
+    a = _normalize_block_text(a_html)
+    b = _normalize_block_text(b_html)
+    if not a and not b:
+        return 1.0
+    from difflib import SequenceMatcher
+    return SequenceMatcher(None, a, b, autojunk=False).ratio()
+
+def _is_noise_block(block_html: str) -> bool:
+    """
+    Heuristika: krátké útržky / převážně interpunkce / římské číslice / odrážky / čísla stran.
+    Příklad: '• • • I V /V 55'
+    """
+    t = _normalize_block_text(block_html)
+    if not t:
+        return True
+    if len(t) <= 6:
+        return True
+    if re.fullmatch(r'[•\sIVXLCDM/0-9.,\-]+', t):
+        return True
+    punct = sum(ch in '•.,/ -' for ch in t)
+    if punct / max(1, len(t)) > 0.7:
+        return True
+    return False
+
+def _merge_html(block_list: List[str]) -> str:
+    """Join adjacent blocks for matching (used in split/merge)."""
+    return ''.join(block_list)
+
+# Helper to build a stable key from tag+normalized text for alignment
+def _block_key(block_html: str) -> str:
+    """Build a stable alignment key from the first tag name + normalized text."""
+    if not block_html:
+        return ''
+    tag = _extract_tag_name(block_html)
+    text_key = _normalize_block_text(block_html)
+    return f"{tag}|{text_key}"
+
+
+def _align_block_slices(left_blocks: List[str], right_blocks: List[str]) -> List[Tuple[Optional[str], Optional[str]]]:
+    if not left_blocks and not right_blocks:
+        return []
+
+    i, j = 0, 0
+    out: List[Tuple[Optional[str], Optional[str]]] = []
+
+    # prahy laditelné podle dat
+    THRESH_STRICT = 0.60
+    THRESH_LOOSE = 0.50
+    MAX_MERGE = 2  # zkoušíme sloučit až 2 bloky na každé straně
+
+    nL, nR = len(left_blocks), len(right_blocks)
+
+    def best_candidate(i0: int, j0: int) -> Tuple[float, int, int, str]:
+        """
+        Vrátí (score, li, rj, level) pro nejlepší z kombinací
+        li in {1..MAX_MERGE}, rj in {1..MAX_MERGE}.
+        level je 'strict' nebo 'loose' podle prahu.
+        """
+        best = (0.0, 1, 1, 'loose')
+        for li in range(1, min(MAX_MERGE, nL - i0) + 1):
+            left_merged = _merge_html(left_blocks[i0:i0+li])
+            # noise na levé straně nepáruj agresivně
+            if li == 1 and _is_noise_block(left_merged):
+                continue
+            for rj in range(1, min(MAX_MERGE, nR - j0) + 1):
+                right_merged = _merge_html(right_blocks[j0:j0+rj])
+                if rj == 1 and _is_noise_block(right_merged):
+                    continue
+                s = _block_similarity(left_merged, right_merged)
+                level = 'strict' if s >= THRESH_STRICT else ('loose' if s >= THRESH_LOOSE else '')
+                if level and s > best[0]:
+                    best = (s, li, rj, level)
+        return best
+
+    while i < nL or j < nR:
+        # vyčerpání jedné strany
+        if i >= nL:
+            out.append((None, right_blocks[j]))
+            j += 1
+            continue
+        if j >= nR:
+            out.append((left_blocks[i], None))
+            i += 1
+            continue
+
+        # odpad (šum) – rovnou zahodit na své straně
+        if _is_noise_block(left_blocks[i]):
+            out.append((left_blocks[i], None))
+            i += 1
+            continue
+        if _is_noise_block(right_blocks[j]):
+            out.append((None, right_blocks[j]))
+            j += 1
+            continue
+
+        score, li, rj, level = best_candidate(i, j)
+
+        if level:  # máme match
+            left_merged = _merge_html(left_blocks[i:i+li])
+            right_merged = _merge_html(right_blocks[j:j+rj])
+            out.append((left_merged, right_merged))
+            i += li
+            j += rj
+            continue
+
+        # žádný rozumný match – rozhodni, co odhodit (lookahead do 2)
+        # 1) jak dobře se aktuální left[i] hodí k některému z right[j:j+2]
+        best_right = 0.0
+        for rj2 in range(1, min(2, nR - j) + 1):
+            s = _block_similarity(left_blocks[i], _merge_html(right_blocks[j:j+rj2]))
+            if s > best_right:
+                best_right = s
+        # 2) jak dobře se aktuální right[j] hodí k některému z left[i:i+2]
+        best_left = 0.0
+        for li2 in range(1, min(2, nL - i) + 1):
+            s = _block_similarity(_merge_html(left_blocks[i:i+li2]), right_blocks[j])
+            if s > best_left:
+                best_left = s
+
+        # odhoď stranu s horší vyhlídkou, šum preferenčně odhazuj
+        if best_right < best_left:
+            out.append((left_blocks[i], None))
+            i += 1
+        elif best_left < best_right:
+            out.append((None, right_blocks[j]))
+            j += 1
+        else:
+            # pat – odhoď kratší/„šumovější“ blok
+            li_txt = _normalize_block_text(left_blocks[i])
+            rj_txt = _normalize_block_text(right_blocks[j])
+            if _is_noise_block(left_blocks[i]) or len(li_txt) <= len(rj_txt):
+                out.append((left_blocks[i], None))
+                i += 1
+            else:
+                out.append((None, right_blocks[j]))
+                j += 1
+
+    return out
+
+
 def wrap_diff_content(blocks: List[str], mode: str) -> str:
     mode_attr = f' data-diff-mode="{mode}"' if mode in {DIFF_MODE_WORD, DIFF_MODE_CHAR} else ''
     inner = ''.join(blocks)
@@ -328,22 +478,29 @@ def build_html_diff(python_html: str, ts_html: str, mode: str) -> Dict[str, str]
 
         if tag == 'delete':
             for block in py_slice:
-                python_render.append(wrap_block(block, 'added'))
-            continue
+                python_render.append(wrap_block(block, 'removed'))
+                continue
         if tag == 'insert':
             for block in ts_slice:
-                ts_render.append(wrap_block(block, 'removed'))
+                ts_render.append(wrap_block(block, 'added'))
             continue
 
-        if len(py_slice) == 1 and len(ts_slice) == 1:
-            left_markup, right_markup = diff_block_content(py_slice[0], ts_slice[0], mode_normalized)
-            python_render.append(wrap_block(left_markup, 'changed'))
-            ts_render.append(wrap_block(right_markup, 'changed'))
+        if tag == 'replace':
+            aligned_pairs = _align_block_slices(py_slice, ts_slice)
+            for left_block, right_block in aligned_pairs:
+                if left_block and right_block:
+                    left_markup, right_markup = diff_block_content(left_block, right_block, mode_normalized)
+                    python_render.append(wrap_block(left_markup, 'changed'))
+                    ts_render.append(wrap_block(right_markup, 'changed'))
+                elif left_block:
+                    python_render.append(wrap_block(left_block, 'removed'))
+                elif right_block:
+                    ts_render.append(wrap_block(right_block, 'added'))
         else:
             for block in py_slice:
-                python_render.append(wrap_block(block, 'added'))
+                python_render.append(wrap_block(block, 'removed'))
             for block in ts_slice:
-                ts_render.append(wrap_block(block, 'removed'))
+                ts_render.append(wrap_block(block, 'added'))
 
     return {
         'python': wrap_diff_content(python_render, mode_normalized),
@@ -976,6 +1133,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             --thumbnail-drawer-width: clamp(260px, 35vw, 460px);
             --thumbnail-toggle-size: 32px;
             --primary-max-width: 1200px;
+            --preview-drawer-gap: 12px;
         }
         body {
             font-family: Arial, sans-serif;
@@ -985,6 +1143,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         }
         .page-shell {
             position: relative;
+            z-index: 50;
             max-width: var(--primary-max-width);
             margin: 0 auto;
             padding-left: 0;
@@ -1000,6 +1159,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             max-width: var(--primary-max-width);
             margin-left: auto;
             margin-right: auto;
+            z-index: 20;
         }
         .main-content {
             max-width: var(--primary-max-width);
@@ -1008,7 +1168,10 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         @media (min-width: 1101px) {
             body:not(.thumbnail-drawer-collapsed) .page-shell,
             body:not(.thumbnail-drawer-collapsed) .container,
-            body:not(.thumbnail-drawer-collapsed) .main-content {
+            body:not(.thumbnail-drawer-collapsed) .main-content,
+            body.right-preview-visible .page-shell,
+            body.right-preview-visible .container,
+            body.right-preview-visible .main-content {
                 width: min(
                     var(--primary-max-width),
                     max(360px, calc(100vw - 2 * var(--thumbnail-drawer-width) - 32px))
@@ -1064,12 +1227,92 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             box-shadow: none;
             cursor: pointer;
             transition: background 0.2s ease, color 0.2s ease, box-shadow 0.25s ease;
-            z-index: 6;
+            z-index: 21;
+        }
+        body.page-is-loading .thumbnail-toggle {
+            z-index: 5;
+            pointer-events: none;
+            opacity: 0;
         }
         .thumbnail-toggle:hover {
             background: #1f78ff;
             color: #ffffff;
             box-shadow: none;
+        }
+        #preview-drawer {
+            position: fixed;
+            top: 20px;
+            width: var(--thumbnail-drawer-width);
+            max-width: var(--thumbnail-drawer-width);
+            left: auto;
+            right: 20px;
+            z-index: 5; /* keep behind .container (20) */
+            transition: opacity 0.3s ease;
+            transform: none; /* avoid creating new stacking context on the host */
+            pointer-events: auto;
+        }
+        #preview-drawer .preview-drawer-panel {
+            background: white;
+            border: 1px solid #dbe4f0;
+            border-left: none;
+            border-radius: 0 8px 8px 0;
+            box-shadow: none; /* remove elevation so it visually sits behind primary */
+            z-index: auto;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            max-height: calc(100vh - 40px);
+            overflow: auto;
+            pointer-events: auto;
+            transition: transform 0.3s ease, opacity 0.3s ease;
+            transform: none;
+        }
+        .preview-drawer-image {
+            width: 100%;
+            height: auto;
+            border-radius: 6px;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.15);
+            object-fit: contain;
+            display: none;
+        }
+        .preview-drawer-empty {
+            font-size: 13px;
+            color: #5f6b7c;
+            text-align: center;
+            padding: 20px 8px;
+        }
+        .preview-drawer-toggle {
+            position: fixed;
+            top: 38px;
+            left: auto;
+            right: calc(var(--thumbnail-drawer-width) + 28px);
+            width: var(--thumbnail-toggle-size);
+            height: var(--thumbnail-toggle-size);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: white;
+            color: #1f2933;
+            font-weight: 600;
+            border: 1px solid #d0d7e2;
+            border-radius: 10px;
+            box-shadow: none;
+            cursor: pointer;
+            transition: background 0.2s ease, color 0.2s ease, box-shadow 0.25s ease;
+            z-index: 120;
+        }
+        .preview-drawer-toggle:hover {
+            background: #1f78ff;
+            color: #ffffff;
+            box-shadow: none;
+        }
+        /* Collapse only affects inner panel so the fixed host doesn't create new stacking context
+           and the panel can slide under the main container. */
+        body.preview-drawer-collapsed #preview-drawer .preview-drawer-panel {
+            transform: translateX(calc(-100% - var(--preview-drawer-gap)));
+            opacity: 0;
+            pointer-events: none;
         }
         .page-jump {
             display: flex;
@@ -1289,7 +1532,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             resize: none;
             overflow: hidden;
         }
-        button:not(.page-thumbnail):not(.thumbnail-toggle):not(.diff-toggle):not(.agent-diff-toggle) {
+        button:not(.page-thumbnail):not(.thumbnail-toggle):not(.diff-toggle):not(.agent-diff-toggle):not(.preview-drawer-toggle) {
             background-color: #007bff;
             color: white;
             padding: 10px 20px;
@@ -1298,10 +1541,10 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             cursor: pointer;
             font-size: 14px;
         }
-        button:not(.page-thumbnail):not(.thumbnail-toggle):not(.diff-toggle):not(.agent-diff-toggle):hover {
+        button:not(.page-thumbnail):not(.thumbnail-toggle):not(.diff-toggle):not(.agent-diff-toggle):not(.preview-drawer-toggle):hover {
             background-color: #0056b3;
         }
-        button:not(.page-thumbnail):not(.thumbnail-toggle):not(.diff-toggle):not(.agent-diff-toggle):disabled {
+        button:not(.page-thumbnail):not(.thumbnail-toggle):not(.diff-toggle):not(.agent-diff-toggle):not(.preview-drawer-toggle):disabled {
             background-color: #9aa0a6;
             cursor: not-allowed;
         }
@@ -1568,6 +1811,25 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             object-fit: contain;
             background: #ffffff;
         }
+        .comparison-status {
+            margin-top: 8px;
+            display: none;
+        }
+        .comparison-status.is-error {
+            color: #b91c1c;
+        }
+        .comparison-status.is-pending {
+            font-weight: 600;
+        }
+        #reader-result-text pre {
+            margin: 0;
+        }
+        #reader-result-text pre p {
+            margin: 0;
+        }
+        #reader-result-text pre p + p {
+            margin-top: 12px;
+        }
         .scan-result-placeholder {
             color: #4b5563;
             font-size: 14px;
@@ -1705,7 +1967,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             flex-direction: column;
             gap: 12px;
             text-align: center;
-            z-index: 200;
+            z-index: 9999;
         }
         .container.is-loading .loading {
             display: flex;
@@ -2043,7 +2305,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 <div class="form-group uuid-group">
                     <label for="uuid">UUID stránky nebo dokumentu:</label>
                     <div class="uuid-input-group">
-                        <input type="text" id="uuid" placeholder="Zadejte UUID (např. dcbff727-d3cd-4e8b-9309-9a8647ddaba5)" value="dcbff727-d3cd-4e8b-9309-9a8647ddaba5" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false">
+                        <input type="text" id="uuid" placeholder="Zadejte UUID (např. 49c6424a-c820-4224-9475-4aa0d8a9d844)" value="49c6424a-c820-4224-9475-4aa0d8a9d844" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false">
                         <span class="inline-tooltip-anchor">
                             <button type="button" id="uuid-copy" title="Zkopírovat UUID" aria-label="Zkopírovat UUID">📋</button>
                             <div id="uuid-copy-tooltip" class="inline-tooltip" role="status" aria-live="polite"></div>
@@ -2100,11 +2362,11 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 </div>
                 <div id="results" class="results" style="display: none;">
                     <div class="result-box">
-                        <h3>TypeScript výsledek (simulace)</h3>
+                        <h3>Aktuálně nasazené zpracování ALTO</h3>
                         <div id="typescript-result" class="result-rendered"></div>
                     </div>
                     <div class="result-box">
-                        <h3>Python výsledek</h3>
+                        <h3>Nový přístup zpracování ALTO</h3>
                         <div id="python-result" class="result-rendered"></div>
                     </div>
                 </div>
@@ -2130,7 +2392,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
 
                 <!-- LLM agent settings UI -->
                 <div id="agent-row" class="info-section" style="margin-top:18px;">
-                    <h2 style="margin-bottom:12px;">Oprava textu</h2>
+                    <h2 style="margin-bottom:12px;">Oprava zpracovaného textu pomocí LLM</h2>
                     <div style="display:flex;align-items:center;gap:8px;">
                         <label for="agent-select" style="margin:0;font-weight:600;">Agent:</label>
                         <select id="agent-select" aria-label="Vyberte agenta"></select>
@@ -2194,7 +2456,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     </div>
                 </div>
                 <div id="reader-row" class="info-section" style="margin-top:18px;">
-                    <h2 style="margin-bottom:12px;">Čtení ze skenu</h2>
+                    <h2 style="margin-bottom:12px;">Čtení přímo ze skenu (OCR)</h2>
                     <div style="display:flex;align-items:center;gap:8px;">
                         <label for="reader-agent-select" style="margin:0;font-weight:600;">Agent:</label>
                         <select id="reader-agent-select" aria-label="Vyberte agenta pro čtení"></select>
@@ -2253,6 +2515,65 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                             <div id="reader-result-text" class="result-rendered">
                                 <div class="muted">Výsledek se zobrazí po spuštění „Vyčti“.</div>
                             </div>
+                        </div>
+                    </div>
+                </div>
+                <!-- Additional comparison: processed ALTO (Python) vs new OCR -->
+                <div id="comparison2-row" class="info-section" style="margin-top:18px;">
+                    <h2 style="margin-bottom:12px;">Porovnání: Zpracované ALTO x nové OCR</h2>
+                    <div style="display:flex;align-items:center;gap:8px;">
+                        <div style="margin-left:auto;display:flex;align-items:center;gap:8px;">
+                            <label style="display:inline-flex;align-items:center;gap:6px;">
+                                <input id="comparison2-auto-run" type="checkbox">
+                                <span style="font-size:13px;">Automaticky porovnávat</span>
+                            </label>
+                            <button id="comparison2-run" type="button" style="height:36px;display:inline-flex;align-items:center;justify-content:center;padding:6px 12px;">Porovnej</button>
+                        </div>
+                    </div>
+                    <div id="comparison2-status" class="comparison-status muted" aria-live="polite"></div>
+                    <div id="comparison2-results" class="results" style="display:none;margin-top:16px;">
+                        <div class="result-box">
+                            <h3>Agent – původní Python</h3>
+                            <div id="comparison2-result-left" class="result-rendered"></div>
+                        </div>
+                        <div class="result-box">
+                            <h3>Formátovaný text (OCR)</h3>
+                            <div id="comparison2-result-right" class="result-rendered"></div>
+                        </div>
+                    </div>
+                    <div style="margin-top:8px;display:flex;justify-content:flex-end;">
+                        <div id="comparison2-diff-mode-controls" class="agent-diff-controls" role="group" aria-label="Režim zvýraznění porovnání" style="display:none;">
+                            <button type="button" class="agent-diff-toggle" data-mode="word">Slova</button>
+                            <button type="button" class="agent-diff-toggle" data-mode="char">Znaky</button>
+                        </div>
+                    </div>
+                </div>
+                <div id="comparison-row" class="info-section" style="margin-top:18px;">
+                    <h2 style="margin-bottom:12px;">Porovnání: LLM opravené zpracování ALTO x nové OCR</h2>
+                    <div style="display:flex;align-items:center;gap:8px;">
+                        <div style="margin-left:auto;display:flex;align-items:center;gap:8px;">
+                            <label style="display:inline-flex;align-items:center;gap:6px;">
+                                <input id="comparison-auto-run" type="checkbox">
+                                <span style="font-size:13px;">Automaticky porovnávat</span>
+                            </label>
+                            <button id="comparison-run" type="button" style="height:36px;display:inline-flex;align-items:center;justify-content:center;padding:6px 12px;">Porovnej</button>
+                        </div>
+                    </div>
+                    <div id="comparison-status" class="comparison-status muted" aria-live="polite"></div>
+                    <div id="comparison-results" class="results" style="display:none;margin-top:16px;">
+                        <div class="result-box">
+                            <h3>Agent – opravený náhled</h3>
+                            <div id="comparison-result-left" class="result-rendered"></div>
+                        </div>
+                        <div class="result-box">
+                            <h3>Formátovaný text (OCR)</h3>
+                            <div id="comparison-result-right" class="result-rendered"></div>
+                        </div>
+                    </div>
+                    <div style="margin-top:8px;display:flex;justify-content:flex-end;">
+                        <div id="comparison-diff-mode-controls" class="agent-diff-controls" role="group" aria-label="Režim zvýraznění porovnání" style="display:none;">
+                            <button type="button" class="agent-diff-toggle" data-mode="word">Slova</button>
+                            <button type="button" class="agent-diff-toggle" data-mode="char">Znaky</button>
                         </div>
                     </div>
                 </div>
@@ -2368,12 +2689,19 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                         </section>
                     </div>
                 </div>
+        </div>
+        <button id="preview-drawer-toggle" class="preview-drawer-toggle" type="button" aria-expanded="true" aria-controls="preview-drawer-panel" aria-label="Skrýt pevný náhled">&lt;</button>
+        <aside id="preview-drawer" class="preview-drawer" aria-label="Pevný náhled aktuální stránky" aria-hidden="false">
+            <div id="preview-drawer-panel" class="preview-drawer-panel">
+                <div id="preview-pinned-placeholder" class="preview-drawer-empty">Náhled bude k dispozici po načtení.</div>
+                <img id="preview-pinned-image" class="preview-drawer-image" alt="Stálý náhled aktuální stránky" aria-hidden="true">
             </div>
-            <div id="loading" class="loading" aria-live="polite" aria-hidden="true">
-                <div class="loading-content">
-                    <div class="loading-spinner" role="presentation"></div>
-                    <p>Zpracovávám ALTO data...</p>
-                </div>
+        </aside>
+        <div id="loading" class="loading" aria-live="polite" aria-hidden="true">
+            <div class="loading-content">
+                <div class="loading-spinner" role="presentation"></div>
+                <p>Zpracovávám ALTO data...</p>
+            </div>
             </div>
         </div>
     </div>
@@ -2402,6 +2730,8 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         let lastRenderedBookUuid = null;
         let lastActiveThumbnailUuid = null;
         let thumbnailDrawerCollapsed = false;
+        let previewDrawerCollapsed = false;
+        let previewDrawerPositionFrame = null;
         let thumbnailObserver = null;
         const DIFF_MODES = {
             NONE: 'none',
@@ -2416,6 +2746,12 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             CHAR: 'char',
         };
         const AGENT_DIFF_MODE_STORAGE_KEY = 'altoAgentDiffMode';
+        const COMPARISON_DIFF_MODES = {
+            WORD: 'word',
+            CHAR: 'char',
+        };
+        const COMPARISON_DIFF_MODE_STORAGE_KEY = 'altoComparisonDiffMode';
+        let comparisonDiffMode = COMPARISON_DIFF_MODES.WORD;
         let agentDiffMode = AGENT_DIFF_MODES.WORD;
         let lastAgentOriginalHtml = '';
         let lastAgentCorrectedHtml = '';
@@ -2424,6 +2760,52 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         let lastAgentCorrectedDocumentJson = '';
         let lastAgentCacheBaseKey = null;
         let agentDiffRequestToken = 0;
+        let lastReaderResultHtml = '';
+        let lastReaderResultIsHtml = false;
+        const comparisonOutputs = {
+            leftHtml: '',
+            leftIsHtml: false,
+            leftDisplay: '',
+            rightHtml: '',
+            rightIsHtml: false,
+            rightDisplay: '',
+            diffCache: {
+                word: null,
+                char: null,
+            },
+        };
+        // Secondary comparison state (processed ALTO (Python) vs OCR)
+        const comparison2Outputs = {
+            leftHtml: '',
+            leftIsHtml: false,
+            leftDisplay: '',
+            rightHtml: '',
+            rightIsHtml: false,
+            rightDisplay: '',
+            diffCache: {
+                word: null,
+                char: null,
+            },
+        };
+        let comparison2DiffRequestToken = 0;
+        const COMPARISON2_DIFF_MODE_STORAGE_KEY = 'altoComparison2DiffMode';
+        let comparison2DiffMode = COMPARISON_DIFF_MODES.WORD;
+        const comparison2State = {
+            running: false,
+            autoRunScheduled: false,
+        };
+        const comparisonResultWaiters = {
+            corrector: [],
+            reader: [],
+        };
+        let comparisonDiffRequestToken = 0;
+        const comparisonState = {
+            running: false,
+            autoRunScheduled: false,
+            correctorRunPending: false,
+            readerRunPending: false,
+        };
+        let comparisonRunButtonLabel = '';
         let stitchScaleResizeBound = false;
         let thumbnailHeightSyncPending = false;
         let currentResults = {
@@ -5251,6 +5633,12 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             setContextAgentOutput(agentContexts.joiners, '', '', '');
             setAgentResultPanels(null, null, false);
             setReaderResultPanels('', '', { forceVisible: false });
+            lastReaderResultHtml = '';
+            lastReaderResultIsHtml = false;
+            rejectComparisonWaiters('corrector', new Error('Výsledek byl zrušen.'));
+            rejectComparisonWaiters('reader', new Error('Výsledek byl zrušen.'));
+            resetComparisonResults();
+            resetComparison2Results();
         }
 
         function setAgentOutput(statusText, bodyText, state) {
@@ -5316,6 +5704,13 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 correctedEl.innerHTML = '<div class="muted">Agent nevrátil HTML náhled.</div>';
             }
 
+            if (correctedContent && correctedContent.trim()) {
+                resolveComparisonWaiters('corrector', {
+                    html: correctedContent,
+                    isHtml: correctedIsHtml,
+                });
+            }
+
             const shouldHideDiff = !(originalHtml && correctedContent);
             renderAgentDiff(null, agentDiffMode, { hidden: shouldHideDiff });
             scheduleThumbnailDrawerHeightSync();
@@ -5371,13 +5766,16 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             container.style.display = 'grid';
             if (hasText) {
                 const treatAsHtml = Boolean(options && options.isHtml) || isLikelyHtmlContent(normalizedText);
-                if (treatAsHtml) {
-                    const compactHtml = normalizedText.replace(/>\s+</g, '><').trim();
-                    textEl.innerHTML = `<pre>${compactHtml}</pre>`;
-                } else {
-                    textEl.innerHTML = `<pre>${escapeHtml(normalizedText)}</pre>`;
-                }
+                lastReaderResultHtml = normalizedText;
+                lastReaderResultIsHtml = treatAsHtml;
+                resolveComparisonWaiters('reader', {
+                    html: normalizedText,
+                    isHtml: treatAsHtml,
+                });
+                textEl.innerHTML = `<pre>${buildPreMarkup(normalizedText, treatAsHtml)}</pre>`;
             } else {
+                lastReaderResultHtml = '';
+                lastReaderResultIsHtml = false;
                 textEl.innerHTML = '<div class="muted">Formátovaný text zatím není k dispozici.</div>';
             }
             scheduleThumbnailDrawerHeightSync();
@@ -5401,6 +5799,26 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             return `/preview?uuid=${encodeURIComponent(currentPage.uuid)}&stream=IMG_FULL`;
         }
 
+        function buildPreMarkup(content, treatAsHtml) {
+            if (!content) {
+                return '';
+            }
+            if (treatAsHtml) {
+                return content.replace(/>\s+</g, '><').trim();
+            }
+            return escapeHtml(content);
+        }
+
+        function normalizeContentForDiff(content, isHtml) {
+            if (!content) {
+                return '';
+            }
+            if (isHtml) {
+                return content.replace(/>\s+</g, '><').trim();
+            }
+            return content;
+        }
+
         async function applyReaderAgentResult(ctx, agentResult, rawText) {
             const normalizedRaw = typeof rawText === 'string' ? rawText.trim() : '';
             const htmlOutput = agentResult && typeof agentResult.html === 'string' ? agentResult.html.trim() : '';
@@ -5414,6 +5832,681 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 forceVisible: Boolean(scanUrl || finalText),
             });
             return Boolean(scanUrl || finalText);
+        }
+
+        function setComparisonStatus(message, state) {
+            const statusEl = document.getElementById('comparison-status');
+            if (!statusEl) {
+                return;
+            }
+            statusEl.classList.remove('is-error', 'is-pending');
+            if (!message) {
+                statusEl.textContent = '';
+                statusEl.style.display = 'none';
+                return;
+            }
+            statusEl.textContent = message;
+            statusEl.style.display = 'block';
+            if (state === 'error') {
+                statusEl.classList.add('is-error');
+            } else if (state === 'pending') {
+                statusEl.classList.add('is-pending');
+            }
+        }
+
+        function setComparisonRunButtonState(isRunning) {
+            const runBtn = document.getElementById('comparison-run');
+            if (!runBtn) {
+                return;
+            }
+            if (!comparisonRunButtonLabel) {
+                comparisonRunButtonLabel = runBtn.textContent || 'Porovnej';
+            }
+            if (isRunning) {
+                runBtn.disabled = true;
+                runBtn.textContent = 'Porovnávám...';
+            } else {
+                runBtn.disabled = false;
+                runBtn.textContent = comparisonRunButtonLabel;
+            }
+        }
+
+        function resetComparisonResults() {
+            const container = document.getElementById('comparison-results');
+            const leftEl = document.getElementById('comparison-result-left');
+            const rightEl = document.getElementById('comparison-result-right');
+            if (container) {
+                container.style.display = 'none';
+            }
+            if (leftEl) {
+                leftEl.innerHTML = '';
+            }
+            if (rightEl) {
+                rightEl.innerHTML = '';
+            }
+            setComparisonDiffControlsVisible(false);
+            comparisonOutputs.leftHtml = '';
+            comparisonOutputs.leftIsHtml = false;
+            comparisonOutputs.leftDisplay = '';
+            comparisonOutputs.rightHtml = '';
+            comparisonOutputs.rightIsHtml = false;
+            comparisonOutputs.rightDisplay = '';
+            comparisonOutputs.diffCache.word = null;
+            comparisonOutputs.diffCache.char = null;
+            comparisonDiffRequestToken += 1;
+        }
+
+        function setComparisonDiffControlsVisible(visible) {
+            const controls = document.getElementById('comparison-diff-mode-controls');
+            if (controls) {
+                controls.style.display = visible ? 'inline-flex' : 'none';
+            }
+        }
+
+        function updateComparisonDiffToggleState() {
+            const container = document.getElementById('comparison-diff-mode-controls');
+            if (!container) {
+                return;
+            }
+            const buttons = container.querySelectorAll('.agent-diff-toggle');
+            buttons.forEach((button) => {
+                if (!(button instanceof HTMLElement)) {
+                    return;
+                }
+                const mode = button.getAttribute('data-mode');
+                const isActive = mode === comparisonDiffMode;
+                button.classList.toggle('is-active', Boolean(isActive));
+                button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+            });
+        }
+
+        function updateComparisonResultPanels(originalContent, originalIsHtml, readerContent, readerIsHtml) {
+            const container = document.getElementById('comparison-results');
+            const leftEl = document.getElementById('comparison-result-left');
+            const rightEl = document.getElementById('comparison-result-right');
+            if (!container || !leftEl || !rightEl) {
+                return;
+            }
+            if (!originalContent && !readerContent) {
+                container.style.display = 'none';
+                leftEl.innerHTML = '';
+                rightEl.innerHTML = '';
+                return;
+            }
+            container.style.display = 'grid';
+            const leftDisplay = originalContent ? buildPreMarkup(originalContent, originalIsHtml) : '';
+            const rightDisplay = readerContent ? buildPreMarkup(readerContent, readerIsHtml) : '';
+            leftEl.innerHTML = originalContent
+                ? `<pre>${leftDisplay}</pre>`
+                : '<div class="muted">Žádná data.</div>';
+            rightEl.innerHTML = readerContent
+                ? `<pre>${rightDisplay}</pre>`
+                : '<div class="muted">Žádná data.</div>';
+            comparisonOutputs.leftHtml = normalizeContentForDiff(originalContent, originalIsHtml);
+            comparisonOutputs.leftIsHtml = Boolean(originalIsHtml);
+            comparisonOutputs.leftDisplay = leftDisplay;
+            comparisonOutputs.rightHtml = normalizeContentForDiff(readerContent, readerIsHtml);
+            comparisonOutputs.rightIsHtml = Boolean(readerIsHtml);
+            comparisonOutputs.rightDisplay = rightDisplay;
+            comparisonOutputs.diffCache.word = null;
+            comparisonOutputs.diffCache.char = null;
+            comparisonDiffRequestToken += 1;
+            setComparisonDiffControlsVisible(false);
+        }
+
+        function applyComparisonDiffMarkup(diff) {
+            const leftPre = document.querySelector('#comparison-result-left pre');
+            const rightPre = document.querySelector('#comparison-result-right pre');
+            if (!diff || !leftPre || !rightPre) {
+                if (leftPre) {
+                    leftPre.innerHTML = comparisonOutputs.leftDisplay || buildPreMarkup(comparisonOutputs.leftHtml, comparisonOutputs.leftIsHtml);
+                }
+                if (rightPre) {
+                    rightPre.innerHTML = comparisonOutputs.rightDisplay || buildPreMarkup(comparisonOutputs.rightHtml, comparisonOutputs.rightIsHtml);
+                }
+                setComparisonDiffControlsVisible(false);
+                return;
+            }
+            if (diff.original && leftPre) {
+                leftPre.innerHTML = diff.original;
+            }
+            if (diff.corrected && rightPre) {
+                rightPre.innerHTML = diff.corrected;
+            }
+            setComparisonDiffControlsVisible(true);
+        }
+
+        function ensureCorrectorResult() {
+            if (lastAgentCorrectedHtml && lastAgentCorrectedHtml.trim()) {
+                return Promise.resolve({
+                    html: lastAgentCorrectedHtml,
+                    isHtml: lastAgentCorrectedIsHtml,
+                });
+            }
+            const promise = new Promise((resolve, reject) => {
+                comparisonResultWaiters.corrector.push({ resolve, reject });
+            });
+            triggerCorrectorRunIfIdle();
+            return promise;
+        }
+
+        function ensureReaderResult() {
+            if (lastReaderResultHtml && lastReaderResultHtml.trim()) {
+                return Promise.resolve({
+                    html: lastReaderResultHtml,
+                    isHtml: lastReaderResultIsHtml,
+                });
+            }
+            const promise = new Promise((resolve, reject) => {
+                comparisonResultWaiters.reader.push({ resolve, reject });
+            });
+            triggerReaderRunIfIdle();
+            return promise;
+        }
+
+        function triggerCorrectorRunIfIdle() {
+            const ctx = agentContexts.correctors;
+            if (!ctx) {
+                rejectComparisonWaiters('corrector', new Error('Chybí konfigurace pro opravu textu.'));
+                return;
+            }
+            const runBtn = getContextElement(ctx, 'runButtonId');
+            if ((runBtn && runBtn.disabled) || comparisonState.correctorRunPending) {
+                setComparisonStatus('Čekám na dokončení opravy textu...', 'pending');
+                return;
+            }
+            const select = getContextElement(ctx, 'selectId');
+            if (select && !select.value) {
+                const error = new Error('Vyberte agenta pro opravu textu.');
+                setComparisonStatus(error.message, 'error');
+                rejectComparisonWaiters('corrector', error);
+                return;
+            }
+            comparisonState.correctorRunPending = true;
+            setComparisonStatus('Spouštím opravu textu...', 'pending');
+            runSelectedAgent(ctx, { autoTriggered: false }).catch((error) => {
+                rejectComparisonWaiters('corrector', error instanceof Error ? error : new Error('Oprava textu selhala.'));
+            }).finally(() => {
+                comparisonState.correctorRunPending = false;
+                if (!(lastAgentCorrectedHtml && lastAgentCorrectedHtml.trim())) {
+                    rejectComparisonWaiters('corrector', new Error('Oprava textu nevrátila výsledek.'));
+                }
+            });
+        }
+
+        function triggerReaderRunIfIdle() {
+            const ctx = agentContexts.readers;
+            if (!ctx) {
+                rejectComparisonWaiters('reader', new Error('Chybí konfigurace pro čtení ze skenu.'));
+                return;
+            }
+            const runBtn = getContextElement(ctx, 'runButtonId');
+            if ((runBtn && runBtn.disabled) || comparisonState.readerRunPending) {
+                setComparisonStatus('Čekám na dokončení čtení ze skenu...', 'pending');
+                return;
+            }
+            const select = getContextElement(ctx, 'selectId');
+            if (select && !select.value) {
+                const error = new Error('Vyberte agenta pro čtení ze skenu.');
+                setComparisonStatus(error.message, 'error');
+                rejectComparisonWaiters('reader', error);
+                return;
+            }
+            comparisonState.readerRunPending = true;
+            setComparisonStatus('Spouštím čtení ze skenu...', 'pending');
+            runSelectedAgent(ctx, { autoTriggered: false }).catch((error) => {
+                rejectComparisonWaiters('reader', error instanceof Error ? error : new Error('Čtení ze skenu selhalo.'));
+            }).finally(() => {
+                comparisonState.readerRunPending = false;
+                if (!(lastReaderResultHtml && lastReaderResultHtml.trim())) {
+                    rejectComparisonWaiters('reader', new Error('Čtení ze skenu nevrátilo výsledek.'));
+                }
+            });
+        }
+
+        async function fetchComparisonDiffData(mode) {
+            const payload = {
+                python: comparisonOutputs.leftHtml || '',
+                typescript: comparisonOutputs.rightHtml || '',
+                mode: mode === COMPARISON_DIFF_MODES.CHAR ? 'char' : 'word',
+            };
+            const response = await fetch('/diff', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || !data || data.ok === false) {
+                throw new Error((data && data.error) || 'Diff request selhal');
+            }
+            const diff = data.diff || {};
+            return {
+                original: diff.python || null,
+                corrected: diff.typescript || null,
+            };
+        }
+
+        async function refreshComparisonDiff() {
+            if (!(comparisonOutputs.leftHtml && comparisonOutputs.rightHtml)) {
+                applyComparisonDiffMarkup(null);
+                return;
+            }
+            const cached = comparisonOutputs.diffCache[comparisonDiffMode];
+            if (cached) {
+                applyComparisonDiffMarkup(cached);
+                updateComparisonDiffToggleState();
+                return;
+            }
+            const token = ++comparisonDiffRequestToken;
+            setComparisonStatus('Počítám rozdíly...', 'pending');
+            try {
+                const diff = await fetchComparisonDiffData(comparisonDiffMode);
+                if (token !== comparisonDiffRequestToken) {
+                    return;
+                }
+                comparisonOutputs.diffCache[comparisonDiffMode] = diff;
+                applyComparisonDiffMarkup(diff);
+                updateComparisonDiffToggleState();
+                setComparisonStatus('');
+            } catch (error) {
+                if (token === comparisonDiffRequestToken) {
+                    applyComparisonDiffMarkup(null);
+                    setComparisonStatus('Porovnání se nepodařilo.', 'error');
+                }
+            }
+        }
+
+        function setComparisonDiffMode(mode) {
+            if (mode !== COMPARISON_DIFF_MODES.WORD && mode !== COMPARISON_DIFF_MODES.CHAR) {
+                return;
+            }
+            if (comparisonDiffMode === mode) {
+                return;
+            }
+            comparisonDiffMode = mode;
+            persistComparisonDiffMode(mode);
+            comparisonOutputs.diffCache[mode] = comparisonOutputs.diffCache[mode] || null;
+            comparisonDiffRequestToken += 1;
+            updateComparisonDiffToggleState();
+            refreshComparisonDiff().catch((error) => {
+                console.warn('Porovnání diffu selhalo:', error);
+            });
+        }
+
+        async function runComparison() {
+            if (comparisonState.running) {
+                setComparisonStatus('Porovnání již probíhá...', 'pending');
+                setComparisonRunButtonState(true);
+                return;
+            }
+            comparisonState.running = true;
+             setComparisonRunButtonState(true);
+            setComparisonStatus('Připravuji porovnání...', 'pending');
+            comparisonDiffRequestToken += 1;
+            try {
+                const [correctorResult, readerResult] = await Promise.all([
+                    ensureCorrectorResult(),
+                    ensureReaderResult(),
+                ]);
+                updateComparisonResultPanels(
+                    correctorResult && correctorResult.html ? correctorResult.html : '',
+                    Boolean(correctorResult && correctorResult.isHtml),
+                    readerResult && readerResult.html ? readerResult.html : '',
+                    Boolean(readerResult && readerResult.isHtml)
+                );
+                setComparisonStatus('Počítám rozdíly...', 'pending');
+                comparisonOutputs.diffCache.word = null;
+                comparisonOutputs.diffCache.char = null;
+                await refreshComparisonDiff();
+                setComparisonStatus('');
+            } catch (error) {
+                const message = error && error.message ? error.message : 'Porovnání se nepodařilo.';
+                setComparisonStatus(message, 'error');
+            } finally {
+                comparisonState.running = false;
+                setComparisonRunButtonState(false);
+            }
+        }
+
+        function handleComparisonDiffToggle(event) {
+            const target = event.target;
+            if (!target || !(target instanceof HTMLElement) || !target.matches('.agent-diff-toggle')) {
+                return;
+            }
+            const requestedMode = target.getAttribute('data-mode');
+            if (!requestedMode) {
+                return;
+            }
+            setComparisonDiffMode(requestedMode);
+        }
+
+        const COMPARISON_AUTO_STORAGE_KEY = 'altoComparisonAutoRun_v1';
+        function loadComparisonAutoFlag() {
+            try {
+                return localStorage.getItem(COMPARISON_AUTO_STORAGE_KEY) === '1';
+            } catch (error) {
+                return false;
+            }
+        }
+
+        function persistComparisonAutoFlag(value) {
+            try {
+                localStorage.setItem(COMPARISON_AUTO_STORAGE_KEY, value ? '1' : '0');
+            } catch (error) {
+                // ignore
+            }
+        }
+
+        function scheduleComparisonAutoRun(delay = 350) {
+            const checkbox = document.getElementById('comparison-auto-run');
+            if (!checkbox || !checkbox.checked) {
+                comparisonState.autoRunScheduled = false;
+                return;
+            }
+            if (comparisonState.autoRunScheduled || comparisonState.running) {
+                return;
+            }
+            comparisonState.autoRunScheduled = true;
+            window.setTimeout(() => {
+                comparisonState.autoRunScheduled = false;
+                if (checkbox.checked) {
+                    runComparison().catch((error) => {
+                        console.warn('Automatické porovnání selhalo:', error);
+                    });
+                }
+            }, delay);
+        }
+
+        function initializeComparisonUI() {
+            comparisonDiffMode = loadStoredComparisonDiffMode();
+            updateComparisonDiffToggleState();
+            const runBtn = document.getElementById('comparison-run');
+            if (runBtn) {
+                runBtn.addEventListener('click', () => {
+                    runComparison().catch((error) => {
+                        console.warn('Porovnání selhalo:', error);
+                    });
+                });
+            }
+            const autoCheckbox = document.getElementById('comparison-auto-run');
+            if (autoCheckbox) {
+                autoCheckbox.checked = loadComparisonAutoFlag();
+                autoCheckbox.addEventListener('change', () => {
+                    persistComparisonAutoFlag(autoCheckbox.checked);
+                    if (autoCheckbox.checked) {
+                        scheduleComparisonAutoRun(200);
+                    }
+                });
+            }
+            const diffControls = document.getElementById('comparison-diff-mode-controls');
+            if (diffControls) {
+                diffControls.addEventListener('click', handleComparisonDiffToggle);
+            }
+        }
+
+        // --- Secondary comparison (processed ALTO Python vs OCR) ---
+        function setComparison2Status(message, state) {
+            const statusEl = document.getElementById('comparison2-status');
+            if (!statusEl) {
+                return;
+            }
+            statusEl.classList.remove('is-error', 'is-pending');
+            if (!message) {
+                statusEl.textContent = '';
+                statusEl.style.display = 'none';
+                return;
+            }
+            statusEl.textContent = message;
+            statusEl.style.display = 'block';
+            if (state === 'error') {
+                statusEl.classList.add('is-error');
+            } else if (state === 'pending') {
+                statusEl.classList.add('is-pending');
+            }
+        }
+
+        function setComparison2RunButtonState(isRunning) {
+            const runBtn = document.getElementById('comparison2-run');
+            if (!runBtn) {
+                return;
+            }
+            if (isRunning) {
+                runBtn.disabled = true;
+                runBtn.textContent = 'Porovnávám...';
+            } else {
+                runBtn.disabled = false;
+                runBtn.textContent = 'Porovnej';
+            }
+        }
+
+        function resetComparison2Results() {
+            const container = document.getElementById('comparison2-results');
+            const leftEl = document.getElementById('comparison2-result-left');
+            const rightEl = document.getElementById('comparison2-result-right');
+            if (container) {
+                container.style.display = 'none';
+            }
+            if (leftEl) leftEl.innerHTML = '';
+            if (rightEl) rightEl.innerHTML = '';
+            setComparison2DiffControlsVisible(false);
+            comparison2Outputs.leftHtml = '';
+            comparison2Outputs.leftIsHtml = false;
+            comparison2Outputs.leftDisplay = '';
+            comparison2Outputs.rightHtml = '';
+            comparison2Outputs.rightIsHtml = false;
+            comparison2Outputs.rightDisplay = '';
+            comparison2Outputs.diffCache.word = null;
+            comparison2Outputs.diffCache.char = null;
+            comparison2DiffRequestToken += 1;
+        }
+
+        function setComparison2DiffControlsVisible(visible) {
+            const controls = document.getElementById('comparison2-diff-mode-controls');
+            if (controls) controls.style.display = visible ? 'inline-flex' : 'none';
+        }
+
+        function updateComparison2DiffToggleState() {
+            const container = document.getElementById('comparison2-diff-mode-controls');
+            if (!container) return;
+            const buttons = container.querySelectorAll('.agent-diff-toggle');
+            buttons.forEach((button) => {
+                if (!(button instanceof HTMLElement)) return;
+                const mode = button.getAttribute('data-mode');
+                const isActive = mode === comparison2DiffMode;
+                button.classList.toggle('is-active', Boolean(isActive));
+                button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+            });
+        }
+
+        function updateComparison2ResultPanels(originalContent, originalIsHtml, readerContent, readerIsHtml) {
+            const container = document.getElementById('comparison2-results');
+            const leftEl = document.getElementById('comparison2-result-left');
+            const rightEl = document.getElementById('comparison2-result-right');
+            if (!container || !leftEl || !rightEl) return;
+            if (!originalContent && !readerContent) {
+                container.style.display = 'none';
+                leftEl.innerHTML = '';
+                rightEl.innerHTML = '';
+                return;
+            }
+            container.style.display = 'grid';
+            const leftDisplay = originalContent ? buildPreMarkup(originalContent, originalIsHtml) : '';
+            const rightDisplay = readerContent ? buildPreMarkup(readerContent, readerIsHtml) : '';
+            leftEl.innerHTML = originalContent ? `<pre>${leftDisplay}</pre>` : '<div class="muted">Žádná data.</div>';
+            rightEl.innerHTML = readerContent ? `<pre>${rightDisplay}</pre>` : '<div class="muted">Žádná data.</div>';
+            comparison2Outputs.leftHtml = normalizeContentForDiff(originalContent, originalIsHtml);
+            comparison2Outputs.leftIsHtml = Boolean(originalIsHtml);
+            comparison2Outputs.leftDisplay = leftDisplay;
+            comparison2Outputs.rightHtml = normalizeContentForDiff(readerContent, readerIsHtml);
+            comparison2Outputs.rightIsHtml = Boolean(readerIsHtml);
+            comparison2Outputs.rightDisplay = rightDisplay;
+            comparison2Outputs.diffCache.word = null;
+            comparison2Outputs.diffCache.char = null;
+            comparison2DiffRequestToken += 1;
+            setComparison2DiffControlsVisible(false);
+        }
+
+        async function fetchComparison2DiffData(mode) {
+            const payload = {
+                python: comparison2Outputs.leftHtml || '',
+                typescript: comparison2Outputs.rightHtml || '',
+                mode: mode === COMPARISON_DIFF_MODES.CHAR ? 'char' : 'word',
+            };
+            const response = await fetch('/diff', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || !data || data.ok === false) {
+                throw new Error((data && data.error) || 'Diff request selhal');
+            }
+            const diff = data.diff || {};
+            return {
+                original: diff.python || null,
+                corrected: diff.typescript || null,
+            };
+        }
+
+        function applyComparison2DiffMarkup(diff) {
+            const leftPre = document.querySelector('#comparison2-result-left pre');
+            const rightPre = document.querySelector('#comparison2-result-right pre');
+            if (!diff || !leftPre || !rightPre) {
+                if (leftPre) {
+                    leftPre.innerHTML = comparison2Outputs.leftDisplay || buildPreMarkup(comparison2Outputs.leftHtml, comparison2Outputs.leftIsHtml);
+                }
+                if (rightPre) {
+                    rightPre.innerHTML = comparison2Outputs.rightDisplay || buildPreMarkup(comparison2Outputs.rightHtml, comparison2Outputs.rightIsHtml);
+                }
+                setComparison2DiffControlsVisible(false);
+                return;
+            }
+            if (diff.original && leftPre) leftPre.innerHTML = diff.original;
+            if (diff.corrected && rightPre) rightPre.innerHTML = diff.corrected;
+            setComparison2DiffControlsVisible(true);
+        }
+
+        async function refreshComparison2Diff() {
+            if (!(comparison2Outputs.leftHtml && comparison2Outputs.rightHtml)) {
+                applyComparison2DiffMarkup(null);
+                return;
+            }
+            const cached = comparison2Outputs.diffCache[comparison2DiffMode];
+            if (cached) {
+                applyComparison2DiffMarkup(cached);
+                updateComparison2DiffToggleState();
+                return;
+            }
+            const token = ++comparison2DiffRequestToken;
+            setComparison2Status('Počítám rozdíly...', 'pending');
+            try {
+                const diff = await fetchComparison2DiffData(comparison2DiffMode);
+                if (token !== comparison2DiffRequestToken) return;
+                comparison2Outputs.diffCache[comparison2DiffMode] = diff;
+                applyComparison2DiffMarkup(diff);
+                updateComparison2DiffToggleState();
+                setComparison2Status('');
+            } catch (error) {
+                if (token === comparison2DiffRequestToken) {
+                    applyComparison2DiffMarkup(null);
+                    setComparison2Status('Porovnání se nepodařilo.', 'error');
+                }
+            }
+        }
+
+        function setComparison2DiffMode(mode) {
+            if (mode !== COMPARISON_DIFF_MODES.WORD && mode !== COMPARISON_DIFF_MODES.CHAR) return;
+            if (comparison2DiffMode === mode) return;
+            comparison2DiffMode = mode;
+            try { if (mode === COMPARISON_DIFF_MODES.WORD || mode === COMPARISON_DIFF_MODES.CHAR) localStorage.setItem(COMPARISON2_DIFF_MODE_STORAGE_KEY, mode); } catch (e) {}
+            comparison2Outputs.diffCache[mode] = comparison2Outputs.diffCache[mode] || null;
+            comparison2DiffRequestToken += 1;
+            updateComparison2DiffToggleState();
+            refreshComparison2Diff().catch((error) => {
+                console.warn('Porovnání diffu (2) selhalo:', error);
+            });
+        }
+
+        const COMPARISON2_AUTO_STORAGE_KEY = 'altoComparison2AutoRun_v1';
+        function loadComparison2AutoFlag() { try { return localStorage.getItem(COMPARISON2_AUTO_STORAGE_KEY) === '1'; } catch (e) { return false; } }
+        function persistComparison2AutoFlag(value) { try { localStorage.setItem(COMPARISON2_AUTO_STORAGE_KEY, value ? '1' : '0'); } catch (e) {} }
+
+        function scheduleComparison2AutoRun(delay = 350) {
+            const checkbox = document.getElementById('comparison2-auto-run');
+            if (!checkbox || !checkbox.checked) {
+                comparison2State.autoRunScheduled = false;
+                return;
+            }
+            if (comparison2State.autoRunScheduled || comparison2State.running) return;
+            comparison2State.autoRunScheduled = true;
+            window.setTimeout(() => {
+                comparison2State.autoRunScheduled = false;
+                if (checkbox.checked) {
+                    runComparison2().catch((error) => { console.warn('Automatické porovnání (2) selhalo:', error); });
+                }
+            }, delay);
+        }
+
+        async function runComparison2() {
+            if (comparison2State.running) {
+                setComparison2Status('Porovnání již probíhá...', 'pending');
+                setComparison2RunButtonState(true);
+                return;
+            }
+            comparison2State.running = true;
+            setComparison2RunButtonState(true);
+            setComparison2Status('Připravuji porovnání...', 'pending');
+            comparison2DiffRequestToken += 1;
+            try {
+                // left: processed ALTO (python), right: reader (OCR)
+                const pythonHtml = currentResults.python || '';
+                const leftIsHtml = typeof pythonHtml === 'string' && /<[^>]+>/.test(pythonHtml);
+                const readerResult = await ensureReaderResult();
+                updateComparison2ResultPanels(
+                    pythonHtml || '',
+                    Boolean(leftIsHtml),
+                    readerResult && readerResult.html ? readerResult.html : '',
+                    Boolean(readerResult && readerResult.isHtml)
+                );
+                setComparison2Status('Počítám rozdíly...', 'pending');
+                comparison2Outputs.diffCache.word = null;
+                comparison2Outputs.diffCache.char = null;
+                await refreshComparison2Diff();
+                setComparison2Status('');
+            } catch (error) {
+                const message = error && error.message ? error.message : 'Porovnání se nepodařilo.';
+                setComparison2Status(message, 'error');
+            } finally {
+                comparison2State.running = false;
+                setComparison2RunButtonState(false);
+            }
+        }
+
+        function handleComparison2DiffToggle(event) {
+            const target = event.target;
+            if (!target || !(target instanceof HTMLElement) || !target.matches('.agent-diff-toggle')) return;
+            const requestedMode = target.getAttribute('data-mode');
+            if (!requestedMode) return;
+            setComparison2DiffMode(requestedMode);
+        }
+
+        function initializeComparison2UI() {
+            try {
+                const stored = localStorage.getItem(COMPARISON2_DIFF_MODE_STORAGE_KEY);
+                if (stored === COMPARISON_DIFF_MODES.WORD || stored === COMPARISON_DIFF_MODES.CHAR) comparison2DiffMode = stored;
+            } catch (e) {}
+            updateComparison2DiffToggleState();
+            const runBtn = document.getElementById('comparison2-run');
+            if (runBtn) {
+                runBtn.addEventListener('click', () => { runComparison2().catch((error) => { console.warn('Porovnání (2) selhalo:', error); }); });
+            }
+            const autoCheckbox = document.getElementById('comparison2-auto-run');
+            if (autoCheckbox) {
+                autoCheckbox.checked = loadComparison2AutoFlag();
+                autoCheckbox.addEventListener('change', () => { persistComparison2AutoFlag(autoCheckbox.checked); if (autoCheckbox.checked) scheduleComparison2AutoRun(200); });
+            }
+            const diffControls = document.getElementById('comparison2-diff-mode-controls');
+            if (diffControls) diffControls.addEventListener('click', handleComparison2DiffToggle);
         }
 
         function loadStoredAgentDiffMode() {
@@ -5435,6 +6528,28 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 }
             } catch (error) {
                 console.warn('Nelze uložit režim agent diffu:', error);
+            }
+        }
+
+        function loadStoredComparisonDiffMode() {
+            try {
+                const stored = localStorage.getItem(COMPARISON_DIFF_MODE_STORAGE_KEY);
+                if (stored === COMPARISON_DIFF_MODES.WORD || stored === COMPARISON_DIFF_MODES.CHAR) {
+                    return stored;
+                }
+            } catch (error) {
+                console.warn('Nelze načíst režim porovnání:', error);
+            }
+            return COMPARISON_DIFF_MODES.WORD;
+        }
+
+        function persistComparisonDiffMode(mode) {
+            try {
+                if (mode === COMPARISON_DIFF_MODES.WORD || mode === COMPARISON_DIFF_MODES.CHAR) {
+                    localStorage.setItem(COMPARISON_DIFF_MODE_STORAGE_KEY, mode);
+                }
+            } catch (error) {
+                console.warn('Nelze uložit režim porovnání:', error);
             }
         }
 
@@ -5487,6 +6602,38 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 controls.style.display = 'inline-flex';
             }
             scheduleThumbnailDrawerHeightSync();
+        }
+
+        function resolveComparisonWaiters(type, payload) {
+            const waiters = comparisonResultWaiters[type];
+            if (!waiters || !waiters.length) {
+                comparisonResultWaiters[type] = [];
+                return;
+            }
+            comparisonResultWaiters[type] = [];
+            waiters.forEach(({ resolve }) => {
+                try {
+                    resolve(payload);
+                } catch (error) {
+                    console.warn('Comparison waiter resolve chyba:', error);
+                }
+            });
+        }
+
+        function rejectComparisonWaiters(type, error) {
+            const waiters = comparisonResultWaiters[type];
+            if (!waiters || !waiters.length) {
+                comparisonResultWaiters[type] = [];
+                return;
+            }
+            comparisonResultWaiters[type] = [];
+            waiters.forEach(({ reject }) => {
+                try {
+                    reject(error);
+                } catch (err) {
+                    console.warn('Comparison waiter reject chyba:', err);
+                }
+            });
         }
 
         async function fetchAgentDiff(originalHtml, correctedHtml, mode) {
@@ -6420,6 +7567,97 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             if (!thumbnailDrawerCollapsed) {
                 scheduleThumbnailDrawerHeightSync(true);
             }
+            schedulePreviewDrawerPositionUpdate();
+        }
+
+        function setPreviewDrawerCollapsed(collapsed) {
+            const desiredState = Boolean(collapsed);
+            previewDrawerCollapsed = desiredState;
+            const body = document.body;
+            if (body) {
+                body.classList.toggle('preview-drawer-collapsed', previewDrawerCollapsed);
+                body.classList.toggle('right-preview-visible', !previewDrawerCollapsed);
+            }
+            const toggle = document.getElementById('preview-drawer-toggle');
+            if (toggle) {
+                toggle.textContent = previewDrawerCollapsed ? '>' : '<';
+                toggle.setAttribute('aria-expanded', (!previewDrawerCollapsed).toString());
+                toggle.setAttribute('aria-label', previewDrawerCollapsed ? 'Zobrazit pevný náhled' : 'Skrýt pevný náhled');
+            }
+            const drawer = document.getElementById('preview-drawer');
+            if (drawer) {
+                drawer.setAttribute('aria-hidden', previewDrawerCollapsed ? 'true' : 'false');
+            }
+            schedulePreviewDrawerPositionUpdate();
+        }
+
+        function updatePreviewDrawerPosition() {
+            previewDrawerPositionFrame = null;
+            const drawer = document.getElementById('preview-drawer');
+            const toggle = document.getElementById('preview-drawer-toggle');
+            const container = document.querySelector('.container');
+            const anchor = container || document.querySelector('.page-shell');
+            if (!drawer || !anchor) {
+                return;
+            }
+            const rect = anchor.getBoundingClientRect();
+            const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+            const drawerWidth = drawer.getBoundingClientRect().width || parseFloat(getComputedStyle(drawer).width) || 0;
+            const gapValue = getComputedStyle(document.documentElement).getPropertyValue('--preview-drawer-gap');
+            const requestedGap = Number.parseFloat(gapValue);
+            const baseGap = Number.isFinite(requestedGap) ? Math.max(0, requestedGap) : 0;
+            const viewportPadding = Math.max(baseGap, 12);
+            const minDrawerLeft = rect.right + baseGap;
+            let drawerLeft = minDrawerLeft;
+            if (drawerWidth && viewportWidth) {
+                const maxLeft = Math.max(minDrawerLeft, viewportWidth - drawerWidth - viewportPadding);
+                drawerLeft = Math.min(Math.max(minDrawerLeft, drawerLeft), maxLeft);
+            }
+            const drawerTop = Math.max(20, rect.top);
+            drawer.style.left = `${drawerLeft}px`;
+            drawer.style.top = `${drawerTop}px`;
+            drawer.style.right = 'auto';
+            if (toggle) {
+                const toggleWidth = toggle.getBoundingClientRect().width || parseFloat(getComputedStyle(toggle).width) || 0;
+                const toggleGap = Math.max(8, baseGap / 2);
+                let toggleLeft = drawerLeft - toggleWidth - toggleGap;
+                const minToggleLeft = rect.right + 4;
+                if (!Number.isFinite(toggleLeft) || toggleLeft < minToggleLeft) {
+                    toggleLeft = minToggleLeft;
+                }
+                if (toggleWidth && viewportWidth) {
+                    const maxToggleLeft = viewportWidth - toggleWidth - viewportPadding;
+                    toggleLeft = Math.min(toggleLeft, maxToggleLeft);
+                }
+                const toggleTop = Math.max(38, drawerTop + 18);
+                toggle.style.left = `${toggleLeft}px`;
+                toggle.style.top = `${toggleTop}px`;
+                toggle.style.right = 'auto';
+            }
+        }
+
+        function schedulePreviewDrawerPositionUpdate() {
+            if (previewDrawerPositionFrame) {
+                return;
+            }
+            previewDrawerPositionFrame = window.requestAnimationFrame(() => {
+                updatePreviewDrawerPosition();
+            });
+        }
+
+        function initializePreviewDrawer() {
+            const drawer = document.getElementById('preview-drawer');
+            const toggle = document.getElementById('preview-drawer-toggle');
+            if (!drawer || !toggle) {
+                previewDrawerCollapsed = true;
+                return;
+            }
+            toggle.addEventListener('click', () => {
+                setPreviewDrawerCollapsed(!previewDrawerCollapsed);
+            });
+            window.addEventListener('resize', schedulePreviewDrawerPositionUpdate);
+            window.addEventListener('scroll', schedulePreviewDrawerPositionUpdate, { passive: true });
+            setPreviewDrawerCollapsed(false);
         }
 
         function navigateToUuid(targetUuid) {
@@ -6883,6 +8121,9 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             if (loading) {
                 loading.setAttribute('aria-hidden', isActive ? 'false' : 'true');
             }
+            if (document && document.body) {
+                document.body.classList.toggle('page-is-loading', isActive);
+            }
             if (!isActive) {
                 scheduleThumbnailDrawerHeightSync();
             }
@@ -6906,6 +8147,30 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             }
 
             largeBox.setAttribute("aria-hidden", isActive ? "false" : "true");
+        }
+
+        function updatePinnedPreviewImage(src) {
+            const pinnedImage = document.getElementById("preview-pinned-image");
+            const placeholder = document.getElementById("preview-pinned-placeholder");
+            if (!pinnedImage || !placeholder) {
+                return;
+            }
+            const hasSource = Boolean(src);
+            if (hasSource) {
+                if (pinnedImage.src !== src) {
+                    pinnedImage.src = src;
+                }
+                pinnedImage.style.display = "block";
+                pinnedImage.setAttribute("aria-hidden", "false");
+                placeholder.style.display = "none";
+                placeholder.setAttribute("aria-hidden", "true");
+            } else {
+                pinnedImage.removeAttribute("src");
+                pinnedImage.style.display = "none";
+                pinnedImage.setAttribute("aria-hidden", "true");
+                placeholder.style.display = "";
+                placeholder.setAttribute("aria-hidden", "false");
+            }
         }
 
         function resetPreview() {
@@ -6951,6 +8216,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 largeBox.style.maxWidth = "";
                 largeBox.style.height = "";
             }
+            updatePinnedPreviewImage("");
 
             if (container) {
                 container.style.display = "none";
@@ -7150,6 +8416,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             largeImg.src = previewObjectUrl;
 
             applyLargePreviewSizing(largeImg, largeBox);
+            updatePinnedPreviewImage(previewObjectUrl);
 
             if (largeImg.complete && largeImg.naturalWidth > 0) {
                 applyLargePreviewSizing(largeImg, largeBox);
@@ -7273,6 +8540,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 largeImg.src = previewObjectUrl;
 
                 applyLargePreviewSizing(largeImg, largeBox);
+                updatePinnedPreviewImage(previewObjectUrl);
 
                 handleLoad = () => {
                     thumb.style.opacity = "1";
@@ -7839,6 +9107,13 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 joinerCtx.autoRunScheduled = false;
             });
 
+            const comparisonAuto = document.getElementById('comparison-auto-run');
+            if (comparisonAuto && comparisonAuto.checked) {
+                scheduleComparisonAutoRun(400);
+            } else {
+                comparisonState.autoRunScheduled = false;
+            }
+
             updateCacheWindow(currentPage ? currentPage.uuid : uuid, data.navigation || null);
             schedulePrefetch(data.navigation || null);
         }
@@ -8199,12 +9474,15 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
 
             setupPageNumberJump();
             initializeThumbnailDrawer();
+            initializePreviewDrawer();
             initializeDiffControls();
             initializeAgentUI(agentContexts.correctors);
             initializeAgentUI(agentContexts.readers);
             initializeAgentUI(agentContexts.joiners);
             initializeStitchingUI();
             initializeAgentDiffControls();
+            initializeComparisonUI();
+            initializeComparison2UI();
 
             const previewContainer = document.getElementById("page-preview");
             const largeBox = document.getElementById("preview-large");

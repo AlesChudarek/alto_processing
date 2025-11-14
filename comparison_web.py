@@ -1134,6 +1134,14 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             --thumbnail-toggle-size: 32px;
             --primary-max-width: 1200px;
             --preview-drawer-gap: 12px;
+            --left-drawer-space: var(--thumbnail-drawer-width);
+            --right-drawer-space: var(--thumbnail-drawer-width);
+        }
+        body.thumbnail-drawer-collapsed {
+            --left-drawer-space: 0px;
+        }
+        body.preview-drawer-collapsed {
+            --right-drawer-space: 0px;
         }
         body {
             font-family: Arial, sans-serif;
@@ -1145,6 +1153,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             position: relative;
             z-index: 50;
             max-width: var(--primary-max-width);
+            width: 100%;
             margin: 0 auto;
             padding-left: 0;
             overflow: visible;
@@ -1166,15 +1175,12 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             margin: 0 auto;
         }
         @media (min-width: 1101px) {
-            body:not(.thumbnail-drawer-collapsed) .page-shell,
-            body:not(.thumbnail-drawer-collapsed) .container,
-            body:not(.thumbnail-drawer-collapsed) .main-content,
-            body.right-preview-visible .page-shell,
-            body.right-preview-visible .container,
-            body.right-preview-visible .main-content {
+            .page-shell,
+            .container,
+            .main-content {
                 width: min(
                     var(--primary-max-width),
-                    max(360px, calc(100vw - 2 * var(--thumbnail-drawer-width) - 32px))
+                    max(360px, calc(100vw - var(--left-drawer-space) - var(--right-drawer-space) - 32px))
                 );
             }
         }
@@ -1245,11 +1251,14 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             width: var(--thumbnail-drawer-width);
             max-width: var(--thumbnail-drawer-width);
             left: auto;
-            right: 20px;
+            right: auto;
             z-index: 5; /* keep behind .container (20) */
             transition: opacity 0.3s ease;
             transform: none; /* avoid creating new stacking context on the host */
             pointer-events: auto;
+        }
+        body.preview-drawer-collapsed #preview-drawer {
+            pointer-events: none;
         }
         #preview-drawer .preview-drawer-panel {
             background: white;
@@ -1286,7 +1295,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             position: fixed;
             top: 38px;
             left: auto;
-            right: calc(var(--thumbnail-drawer-width) + 28px);
+            right: 20px;
             width: var(--thumbnail-toggle-size);
             height: var(--thumbnail-toggle-size);
             display: flex;
@@ -1307,8 +1316,11 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             color: #ffffff;
             box-shadow: none;
         }
-        /* Collapse only affects inner panel so the fixed host doesn't create new stacking context
-           and the panel can slide under the main container. */
+        body.page-is-loading .preview-drawer-toggle {
+            z-index: 5;
+            pointer-events: none;
+            opacity: 0;
+        }
         body.preview-drawer-collapsed #preview-drawer .preview-drawer-panel {
             transform: translateX(calc(-100% - var(--preview-drawer-gap)));
             opacity: 0;
@@ -1451,9 +1463,6 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             :root {
                 --thumbnail-drawer-width: clamp(220px, 38vw, 300px);
             }
-            body:not(.thumbnail-drawer-collapsed) {
-                --primary-max-width: 1020px;
-            }
         }
         @media (max-width: 1100px) {
             body {
@@ -1494,6 +1503,24 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 position: static;
                 margin-left: auto;
                 box-shadow: none;
+            }
+            #preview-drawer {
+                position: static;
+                width: 100%;
+                max-width: none;
+                transform: none;
+                margin-top: 12px;
+            }
+            body.preview-drawer-collapsed #preview-drawer {
+                transform: none;
+                opacity: 0;
+                pointer-events: none;
+            }
+            .preview-drawer-toggle {
+                position: static;
+                transform: none;
+                margin-left: auto;
+                margin-top: 8px;
             }
             body.thumbnail-drawer-collapsed #thumbnail-scroll {
                 visibility: visible;
@@ -2300,7 +2327,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
         <div class="container">
             <div class="main-content">
                 <h1>ALTO Processing Comparison</h1>
-                <p>Porovnání původního TypeScript a nového Python zpracování ALTO XML</p>
+                <p>Ukázka způsobů zpracování formátovaného textu ze stránek knih.</p>
 
                 <div class="form-group uuid-group">
                     <label for="uuid">UUID stránky nebo dokumentu:</label>
@@ -2440,11 +2467,11 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     </div>
                     <div id="agent-results" class="results" style="display:none;margin-top:16px;">
                         <div class="result-box">
-                            <h3>Agent – původní Python</h3>
+                            <h3>Nový přístup zpracování ALTO</h3>
                             <div id="agent-result-original" class="result-rendered"></div>
                         </div>
                         <div class="result-box">
-                            <h3>Agent – opravený náhled</h3>
+                            <h3>Zpracování ALTO - LLM</h3>
                             <div id="agent-result-corrected" class="result-rendered"></div>
                         </div>
                     </div>
@@ -2511,7 +2538,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                             </div>
                         </div>
                         <div class="result-box">
-                            <h3>Formátovaný text</h3>
+                            <h3>Nové OCR</h3>
                             <div id="reader-result-text" class="result-rendered">
                                 <div class="muted">Výsledek se zobrazí po spuštění „Vyčti“.</div>
                             </div>
@@ -2520,7 +2547,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 </div>
                 <!-- Additional comparison: processed ALTO (Python) vs new OCR -->
                 <div id="comparison2-row" class="info-section" style="margin-top:18px;">
-                    <h2 style="margin-bottom:12px;">Porovnání: Zpracované ALTO x nové OCR</h2>
+                    <h2 style="margin-bottom:12px;">Porovnání: Zpracované ALTO x Nové OCR</h2>
                     <div style="display:flex;align-items:center;gap:8px;">
                         <div style="margin-left:auto;display:flex;align-items:center;gap:8px;">
                             <label style="display:inline-flex;align-items:center;gap:6px;">
@@ -2533,11 +2560,11 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     <div id="comparison2-status" class="comparison-status muted" aria-live="polite"></div>
                     <div id="comparison2-results" class="results" style="display:none;margin-top:16px;">
                         <div class="result-box">
-                            <h3>Agent – původní Python</h3>
+                            <h3>Nový přístup zpracování ALTO</h3>
                             <div id="comparison2-result-left" class="result-rendered"></div>
                         </div>
                         <div class="result-box">
-                            <h3>Formátovaný text (OCR)</h3>
+                            <h3>Nové OCR</h3>
                             <div id="comparison2-result-right" class="result-rendered"></div>
                         </div>
                     </div>
@@ -2549,7 +2576,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     </div>
                 </div>
                 <div id="comparison-row" class="info-section" style="margin-top:18px;">
-                    <h2 style="margin-bottom:12px;">Porovnání: LLM opravené zpracování ALTO x nové OCR</h2>
+                    <h2 style="margin-bottom:12px;">Porovnání: LLM opravené zpracování ALTO x Nové OCR</h2>
                     <div style="display:flex;align-items:center;gap:8px;">
                         <div style="margin-left:auto;display:flex;align-items:center;gap:8px;">
                             <label style="display:inline-flex;align-items:center;gap:6px;">
@@ -2562,11 +2589,11 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                     <div id="comparison-status" class="comparison-status muted" aria-live="polite"></div>
                     <div id="comparison-results" class="results" style="display:none;margin-top:16px;">
                         <div class="result-box">
-                            <h3>Agent – opravený náhled</h3>
+                            <h3>Zpracování ALTO - LLM</h3>
                             <div id="comparison-result-left" class="result-rendered"></div>
                         </div>
                         <div class="result-box">
-                            <h3>Formátovaný text (OCR)</h3>
+                            <h3>Nové OCR</h3>
                             <div id="comparison-result-right" class="result-rendered"></div>
                         </div>
                     </div>
@@ -2689,7 +2716,6 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                         </section>
                     </div>
                 </div>
-        </div>
         <button id="preview-drawer-toggle" class="preview-drawer-toggle" type="button" aria-expanded="true" aria-controls="preview-drawer-panel" aria-label="Skrýt pevný náhled">&lt;</button>
         <aside id="preview-drawer" class="preview-drawer" aria-label="Pevný náhled aktuální stránky" aria-hidden="false">
             <div id="preview-drawer-panel" class="preview-drawer-panel">
@@ -2697,6 +2723,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 <img id="preview-pinned-image" class="preview-drawer-image" alt="Stálý náhled aktuální stránky" aria-hidden="true">
             </div>
         </aside>
+        </div>
         <div id="loading" class="loading" aria-live="polite" aria-hidden="true">
             <div class="loading-content">
                 <div class="loading-spinner" role="presentation"></div>
@@ -5952,6 +5979,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             comparisonOutputs.diffCache.char = null;
             comparisonDiffRequestToken += 1;
             setComparisonDiffControlsVisible(false);
+            scheduleThumbnailDrawerHeightSync();
         }
 
         function applyComparisonDiffMarkup(diff) {
@@ -5974,6 +6002,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 rightPre.innerHTML = diff.corrected;
             }
             setComparisonDiffControlsVisible(true);
+            scheduleThumbnailDrawerHeightSync();
         }
 
         function ensureCorrectorResult() {
@@ -6344,6 +6373,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             comparison2Outputs.diffCache.char = null;
             comparison2DiffRequestToken += 1;
             setComparison2DiffControlsVisible(false);
+            scheduleThumbnailDrawerHeightSync();
         }
 
         async function fetchComparison2DiffData(mode) {
@@ -6384,6 +6414,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             if (diff.original && leftPre) leftPre.innerHTML = diff.original;
             if (diff.corrected && rightPre) rightPre.innerHTML = diff.corrected;
             setComparison2DiffControlsVisible(true);
+            scheduleThumbnailDrawerHeightSync();
         }
 
         async function refreshComparison2Diff() {
@@ -7576,7 +7607,6 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             const body = document.body;
             if (body) {
                 body.classList.toggle('preview-drawer-collapsed', previewDrawerCollapsed);
-                body.classList.toggle('right-preview-visible', !previewDrawerCollapsed);
             }
             const toggle = document.getElementById('preview-drawer-toggle');
             if (toggle) {
@@ -7595,9 +7625,22 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             previewDrawerPositionFrame = null;
             const drawer = document.getElementById('preview-drawer');
             const toggle = document.getElementById('preview-drawer-toggle');
+            if (!drawer || !toggle) {
+                return;
+            }
+            const isMobileLayout = window.matchMedia('(max-width: 1100px)').matches;
+            if (isMobileLayout) {
+                drawer.style.left = '';
+                drawer.style.top = '';
+                drawer.style.right = '';
+                toggle.style.left = '';
+                toggle.style.top = '';
+                toggle.style.right = '';
+                return;
+            }
             const container = document.querySelector('.container');
             const anchor = container || document.querySelector('.page-shell');
-            if (!drawer || !anchor) {
+            if (!anchor) {
                 return;
             }
             const rect = anchor.getBoundingClientRect();
@@ -7607,33 +7650,27 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             const requestedGap = Number.parseFloat(gapValue);
             const baseGap = Number.isFinite(requestedGap) ? Math.max(0, requestedGap) : 0;
             const viewportPadding = Math.max(baseGap, 12);
-            const minDrawerLeft = rect.right + baseGap;
-            let drawerLeft = minDrawerLeft;
+            let drawerLeft = rect.right + baseGap;
             if (drawerWidth && viewportWidth) {
-                const maxLeft = Math.max(minDrawerLeft, viewportWidth - drawerWidth - viewportPadding);
-                drawerLeft = Math.min(Math.max(minDrawerLeft, drawerLeft), maxLeft);
+                const maxLeft = Math.max(0, viewportWidth - drawerWidth - viewportPadding);
+                drawerLeft = Math.min(drawerLeft, maxLeft);
             }
             const drawerTop = Math.max(20, rect.top);
             drawer.style.left = `${drawerLeft}px`;
             drawer.style.top = `${drawerTop}px`;
             drawer.style.right = 'auto';
-            if (toggle) {
-                const toggleWidth = toggle.getBoundingClientRect().width || parseFloat(getComputedStyle(toggle).width) || 0;
-                const toggleGap = Math.max(8, baseGap / 2);
-                let toggleLeft = drawerLeft - toggleWidth - toggleGap;
-                const minToggleLeft = rect.right + 4;
-                if (!Number.isFinite(toggleLeft) || toggleLeft < minToggleLeft) {
-                    toggleLeft = minToggleLeft;
-                }
-                if (toggleWidth && viewportWidth) {
-                    const maxToggleLeft = viewportWidth - toggleWidth - viewportPadding;
-                    toggleLeft = Math.min(toggleLeft, maxToggleLeft);
-                }
-                const toggleTop = Math.max(38, drawerTop + 18);
-                toggle.style.left = `${toggleLeft}px`;
-                toggle.style.top = `${toggleTop}px`;
-                toggle.style.right = 'auto';
+
+            const toggleWidth = toggle.getBoundingClientRect().width || parseFloat(getComputedStyle(toggle).width) || 0;
+            const toggleGap = Math.max(8, baseGap / 2);
+            let toggleLeft = rect.right + toggleGap;
+            if (toggleWidth && viewportWidth) {
+                const maxToggleLeft = viewportWidth - toggleWidth - viewportPadding;
+                toggleLeft = Math.min(toggleLeft, maxToggleLeft);
             }
+            const toggleTop = Math.max(38, rect.top + 18);
+            toggle.style.left = `${toggleLeft}px`;
+            toggle.style.top = `${toggleTop}px`;
+            toggle.style.right = 'auto';
         }
 
         function schedulePreviewDrawerPositionUpdate() {
@@ -7658,6 +7695,7 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
             window.addEventListener('resize', schedulePreviewDrawerPositionUpdate);
             window.addEventListener('scroll', schedulePreviewDrawerPositionUpdate, { passive: true });
             setPreviewDrawerCollapsed(false);
+            schedulePreviewDrawerPositionUpdate();
         }
 
         function navigateToUuid(targetUuid) {
@@ -7801,21 +7839,41 @@ class ComparisonHandler(http.server.BaseHTTPRequestHandler):
                 return;
             }
             const rect = container.getBoundingClientRect();
-            const height = rect && Number.isFinite(rect.height) ? rect.height : container.offsetHeight;
-            if (!Number.isFinite(height) || height <= 0) {
+            const containerHeight = rect && Number.isFinite(rect.height) ? rect.height : container.offsetHeight;
+            if (!Number.isFinite(containerHeight) || containerHeight <= 0) {
                 return;
             }
-            drawer.style.height = `${height}px`;
+
+            let targetHeight = containerHeight;
+
             if (panel) {
                 const styles = window.getComputedStyle(panel);
                 const paddingTop = parseFloat(styles.paddingTop) || 0;
                 const paddingBottom = parseFloat(styles.paddingBottom) || 0;
                 const borderTop = parseFloat(styles.borderTopWidth) || 0;
                 const borderBottom = parseFloat(styles.borderBottomWidth) || 0;
-                const innerHeight = Math.max(height - paddingTop - paddingBottom - borderTop - borderBottom, 0);
+                const chromeHeight = paddingTop + paddingBottom + borderTop + borderBottom;
+
+                const previousHeight = panel.style.height;
+                const previousMaxHeight = panel.style.maxHeight;
+                panel.style.height = 'auto';
+                panel.style.maxHeight = 'none';
+                const naturalContentHeight = panel.scrollHeight || 0;
+                const naturalPanelHeight = naturalContentHeight + chromeHeight;
+
+                targetHeight = Math.min(containerHeight, naturalPanelHeight || containerHeight);
+                const innerHeight = Math.max(targetHeight - chromeHeight, 0);
+
                 panel.style.height = `${innerHeight}px`;
                 panel.style.maxHeight = `${innerHeight}px`;
+
+                if (!innerHeight && (previousHeight || previousMaxHeight)) {
+                    panel.style.height = previousHeight;
+                    panel.style.maxHeight = previousMaxHeight;
+                }
             }
+
+            drawer.style.height = `${targetHeight}px`;
         }
 
         function resetThumbnailObserver() {

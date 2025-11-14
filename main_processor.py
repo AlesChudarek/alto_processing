@@ -22,7 +22,7 @@ import json
 VERTICAL_GAP_MULTIPLIER = 2.5   # Kolikrát musí být mezera mezi řádky větší než typická mezera, aby vznikl nový blok.
 VERTICAL_HEIGHT_RATIO = 0.85    # Poměr k mediánu výšky řádku, přispívá k prahu pro rozdělení bloku.
 VERTICAL_MAX_FACTOR = 3         # Horní limit pro vertikální práh v násobcích mediánu výšky řádku.
-HORIZONTAL_WIDTH_RATIO = 0.04  # Kandidát prahu = medián šířek řádků * tato hodnota (nižší = citlivější). [<0.041]
+HORIZONTAL_WIDTH_RATIO = 0.03  # Kandidát prahu = medián šířek řádků * tato hodnota (nižší = citlivější). [<0.041]
 HORIZONTAL_SHIFT_MULTIPLIER = 0.85  # Kandidát prahu = medián kladných posunů * tato hodnota.
 HORIZONTAL_MIN_THRESHOLD = 12   # Minimální povolený práh pro horizontální dělení (v ALTO jednotkách).
 NEGATIVE_SHIFT_MULTIPLIER = 0.95  # Negativní hranice = horizontální práh * tato hodnota (víc citlivá než pozitivní).

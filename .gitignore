@@ -65,3 +65,4 @@ dist/
 *.tsbuildinfo
 
 .env
+web_service/

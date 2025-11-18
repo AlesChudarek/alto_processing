@@ -1,0 +1,166 @@
+Babička
+673320dd-0071-4a03-bf82-243ee206bc0b
+
+Čítanka 4
+0f7d662c-56c7-4d62-aaa0-e6743158e8d5
+- všechno bald
+- vysoke dpi
+- nadpisy i text
+- spousta fontů
+- báseň
+
+Čítanka 6
+93707620-270c-11e5-855a-5ef3fc9ae867
+- nadpis h3
+
+Čítanka 6
+92c2a9f0-270c-11e5-855a-5ef3fc9ae867
+- nadpis h3
+- odstavce
+
+Čítanka 6
+93373db0-270c-11e5-855a-5ef3fc9ae867
+- chyba ocr - velmi dlouhé číslo stránky
+
+Čítanak 6
+9201caf0-270c-11e5-855a-5ef3fc9ae867
+- ocr chyba - číslo strany chybí -> odmaže se jiný řádek
+
+Čítanka 6
+90fbf3b0-270c-11e5-855a-5ef3fc9ae867
+- pain
+
+Čítanka 6
+93373db0-270c-11e5-855a-5ef3fc9ae867
+- špatně detekované číslo
+- odstavce
+- ocr chyba - rozdelený řádek
+- ocr chyba - přidány symboly na začátku řádku ( • - )
+
+Čítanka 6
+8e76f680-270c-11e5-855a-5ef3fc9ae867
+- chyba ocr - špatné bloky, rozdělený text
+- Nalezeno milion špatných page number
+- page number neni v note
+
+Nové království
+78b41d40-e9c8-4158-81eb-e6135d6aec12
+- jednořádkový odstavec
+- všechno bald
+- jednoslovný jednořádkový all bald řádek je h1
+
+Nové království
+dcbff727-d3cd-4e8b-9309-9a8647ddaba5
+- jednořádkový odstavec
+- všechno bald
+- chyba ocr - diakritika jako novy radek
+
+Mladý kouzelník
+b7d10789-f161-4d0b-a2b4-2856903efc6b
+- vsechno h3
+- náhled je thumb?
+- hledá číslo zbytecně
+
+Mladý kouzelník
+8cc10323-f018-49f6-b95e-91cce6e6d005
+- všechno vycentrované
+
+Čítanka 5
+15b3b1a1-1573-4ad5-aceb-b899c7b20bc9
+- špatně h3
+
+Babička
+d0a09dd1-c0fd-4f2a-9bb5-6ba64353c0c1
+- hledá číslo, co na stránce být nemá
+
+Babička
+adaf8f52-c67c-46d8-a4ba-74a25e3948a9
+- nedetekován malý text
+
+Babička
+11405c16-a61a-46ca-aff0-4268fbb47b8a
+- divné napojení dvou odstavců
+
+Babička
+1e7c645a-67f2-4915-8316-a9578a36ec93
+528663d1-eb7b-4b4b-a229-6db688eba2ee
+60b8133d-9b0a-4ed7-9685-625ed65a53ba
+1be6a7b2-990c-4360-9aa4-0684c2d0bf99
+797fce9d-773e-48bb-90a3-2286721aa284
+d9a59f04-4a06-4669-bf36-d465e132b0b9
+fd570717-4a76-46fe-b679-9dad13dc587a
+- false positive na malý text
+
+Babička
+85dda08b-23f0-4047-b013-7f138d81211b
+047f6b40-64e7-45e1-bf25-8869e5a1b843
+- VELKÝ problém s malým textem	!!!
+
+Babička
+65d396d1-dc8b-4fc8-8a97-ee3101f86a5d
+- nedetekován malý text
+
+Babička
+175fbd02-31f0-4788-af3b-e618f1becdad
+- odebrané číslo kapitoly
+
+Babička
+0ccb4f5a-560d-4f83-9c9b-01bd20331737
+- čtení šumu z obrázku
+
+Babička
+908b6a1a-0b20-433d-bd92-cdab3a2cb9e2
+- chyba ocr - špatné číslo strany
+
+Dvanáct pohádek
+45208a80-79cb-11e4-964c-5ef3fc9bb22f
+- nadpis na dva řádky
+- chyba v katalogizaci - špatně označené číslo strany
+
+Dvanáct pohádek
+46703c00-79cb-11e4-964c-5ef3fc9bb22f
+- chyba ocr - špatně page number
+- spousta návrhů na page number
+
+Dvanáct pohádek
+438e51c0-79cb-11e4-964c-5ef3fc9bb22f
+43b47760-79cb-11e4-964c-5ef3fc9bb22f
+- chyba ocr - špatné page number
+
+Dvanáct pohádek
+450672d0-79cb-11e4-964c-5ef3fc9bb22f
+- poznámka 6*
+
+Nové království
+78b41d40-e9c8-4158-81eb-e6135d6aec12
+- jednoradkovy h2
+
+Babička
+11405c16-a61a-46ca-aff0-4268fbb47b8a
+ae57bb0d-8336-48c0-b77a-28d666ec4f40
+- chyba v katalogizaci - špatně označené číslo strany
+
+Svatý Augustin
+377e11f1-f1a6-4bd0-b347-3d8237fd438b
+7a4016bf-ca70-4805-a85a-0419e5495374
+- Nadpis přepsán vycentrováním
+
+Eine Orientreise
+42e9b283-c0fa-4246-883a-a6c329ffa64f
+- všechno tučně
+
+
+
+
+
+jestli failne nalazeni cisla strany, tak zkusim opravdu hledat i v dlouhych radcich
+
+vertikalni odsazeni na H
+
+logika h3 - bald muze byt okolo, ale ja jsem jeden radek, zacatek textblocku nebo neco...
+
+nahledy na leve strane na preklikavani stranek
+
+spojene h2 po sobe muzou obsahovat odstavce?
+
+

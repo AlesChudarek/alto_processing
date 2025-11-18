@@ -81,7 +81,7 @@ vysvětluje, jak se liší od původního přístupu (`kramerius_alto_service.ts
   výčtů.
 - **Negativní split (odsazení)** – když se další řádek vrátí hodně doleva,
   rozdělíme předchozí řádky na samostatné bloky a označíme je `split_reason =
-  'horizontal_indent'`, aby se s nimi později zacházelo opatrněji.
+  'horizontal_indent'`, aby se s nimi později zacházelo opatrněji. 
 - **Centrované skupiny** – už při průchodu řádků tvoříme podskupiny se
   samostatným centered flagem. Při splitu se centered status přenáší na nový
   blok jen tehdy, pokud to dává smysl (subgroup má centered True).

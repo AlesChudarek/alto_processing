@@ -382,9 +382,6 @@
                 max-height: calc(100vh - 120px);
             }
         }
-        .form-group {
-            margin-bottom: 15px;
-        }
         label {
             display: block;
             margin-bottom: 5px;
@@ -426,15 +423,100 @@
             background-color: #9aa0a6;
             cursor: not-allowed;
         }
+        .section-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-bottom: 12px;
+        }
+        .section-header h2 {
+            margin: 0;
+        }
+        .section-actions {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        .section-download-button {
+            height: 36px;
+            width: 36px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border: 1px solid #cfd4dc;
+            border-radius: 8px;
+            background: #fff;
+            color: #1f2933;
+            cursor: pointer;
+            transition: background 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
+        }
+        .section-download-button:hover {
+            background: #1f78ff;
+            color: #ffffff;
+            box-shadow: 0 6px 16px rgba(15, 23, 42, 0.15);
+        }
+        .download-modal-backdrop {
+            position: fixed;
+            inset: 0;
+            background: rgba(15, 23, 42, 0.55);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 9999;
+        }
+        .download-modal-backdrop.is-visible {
+            display: flex;
+        }
+        .download-modal {
+            width: min(560px, 90vw);
+            background: #fff;
+            border-radius: 16px;
+            box-shadow: 0 20px 50px rgba(15, 23, 42, 0.25);
+            padding: 24px;
+        }
+        .download-modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+        .download-modal-header h3 {
+            margin: 0;
+        }
+        .download-modal-body {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+        .download-option-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .download-option-group label {
+            font-weight: 600;
+        }
+        .range-options {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .download-modal-footer {
+            margin-top: 20px;
+            display: flex;
+            justify-content: flex-end;
+            gap: 12px;
+        }
         #algorithmic-section {
             margin-top: 20px;
             display: none;
             flex-direction: column;
-            gap: 16px;
         }
         .algorithmic-header {
             display: flex;
-            flex-direction: column;
             gap: 12px;
         }
         .algorithmic-header h2 {
@@ -455,7 +537,7 @@
             gap: 12px;
         }
         .results.algorithmic-results {
-            margin-top: 0;
+            margin-top: 12px;
         }
         .result-headline {
             margin-bottom: 12px;
@@ -545,6 +627,7 @@
             border-radius: 999px;
             overflow: hidden;
             background: #f8f9fc;
+            margin-top: 8px;
         }
         .agent-diff-toggle {
             border: none;
@@ -754,13 +837,14 @@
             display: none;
         }
         .diff-section {
-            margin-top: 28px;
+            margin-top: 0;
             display: none;
             flex-direction: column;
             gap: 18px;
         }
         .diff-section.is-visible {
             display: flex;
+            margin-top: 28px;
         }
         .diff-header {
             display: flex;
@@ -1220,20 +1304,20 @@
                     <h1>ALTO Processing Comparison</h1>
                     <p>Ukázka způsobů zpracování formátovaného textu ze stránek knih.</p>
 
-                    <div class="form-group uuid-group"></div>
-                    <label for="uuid">UUID stránky nebo dokumentu:</label>
-                    
-                    <div class="uuid-input-group">
-                        <input type="text" id="uuid" placeholder="Zadejte UUID (např. 49c6424a-c820-4224-9475-4aa0d8a9d844)" value="49c6424a-c820-4224-9475-4aa0d8a9d844" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false">
-                        <span class="inline-tooltip-anchor">
-                            <button type="button" id="uuid-copy" title="Zkopírovat UUID" aria-label="Zkopírovat UUID">📋</button>
-                            <div id="uuid-copy-tooltip" class="inline-tooltip" role="status" aria-live="polite"></div>
-                        </span>
-                        <span class="inline-tooltip-anchor">
-                            <button type="button" id="uuid-paste" title="Vložit UUID ze schránky" aria-label="Vložit UUID ze schránky">📥</button>
-                            <div id="uuid-paste-tooltip" class="inline-tooltip" role="status" aria-live="polite"></div>
-                        </span>
-                        <button type="button" id="uuid-clear" title="Vymazat UUID" aria-label="Vymazat UUID">✕</button>
+                    <div class="form-group uuid-group">
+                        <label for="uuid">UUID stránky nebo dokumentu:</label>
+                        <div class="uuid-input-group">
+                            <input type="text" id="uuid" placeholder="Zadejte UUID (např. 49c6424a-c820-4224-9475-4aa0d8a9d844)" value="49c6424a-c820-4224-9475-4aa0d8a9d844" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false">
+                            <span class="inline-tooltip-anchor">
+                                <button type="button" id="uuid-copy" title="Zkopírovat UUID" aria-label="Zkopírovat UUID">📋</button>
+                                <div id="uuid-copy-tooltip" class="inline-tooltip" role="status" aria-live="polite"></div>
+                            </span>
+                            <span class="inline-tooltip-anchor">
+                                <button type="button" id="uuid-paste" title="Vložit UUID ze schránky" aria-label="Vložit UUID ze schránky">📥</button>
+                                <div id="uuid-paste-tooltip" class="inline-tooltip" role="status" aria-live="polite"></div>
+                            </span>
+                            <button type="button" id="uuid-clear" title="Vymazat UUID" aria-label="Vymazat UUID">✕</button>
+                        </div>
                     </div>
                     <div class="action-row">
                         <button id="load-button" type="button" onclick="handleLoadClick()">Načíst stránku</button>
@@ -1281,15 +1365,16 @@
                     </div>
                 </div>
                 <div id="algorithmic-section" class="info-section">
-                    <div class="algorithmic-header">
+                    <div class="algorithmic-header section-header">
                         <h2>Algoritmický přístup</h2>
-                        <div class="algorithmic-actions">
-                            <label class="inline-checkbox">
-                                <input type="checkbox" id="algorithmic-auto">
-                                <span>Automaticky převádět</span>
-                            </label>
-                            <button id="algorithmic-convert" type="button" style="height:36px;display:inline-flex;align-items:center;justify-content:center;padding:6px 12px;">Převeď</button>
-                        </div>
+                        <button class="section-download-button" type="button" data-download-source="algorithmic" title="Stáhnout výsledky algoritmického přístupu" aria-label="Stáhnout výsledky algoritmického přístupu">💾</button>
+                    </div>
+                    <div class="algorithmic-actions section-actions">
+                        <label class="inline-checkbox">
+                            <input type="checkbox" id="algorithmic-auto">
+                            <span>Automaticky převádět</span>
+                        </label>
+                        <button id="algorithmic-convert" type="button" style="height:36px;display:inline-flex;align-items:center;justify-content:center;padding:6px 12px;">Převeď</button>
                     </div>
                     <div id="results" class="results algorithmic-results" style="display:none;">
                         <div class="result-box">
@@ -1327,8 +1412,11 @@
                 </section>
 
                 <!-- LLM agent settings UI -->
-                <div id="agent-row" class="info-section" style="margin-top:18px;">
-                    <h2 style="margin-bottom:12px;">Oprava zpracovaného textu pomocí LLM</h2>
+                <div id="agent-row" class="info-section">
+                    <div class="section-header">
+                        <h2>Oprava zpracovaného textu pomocí LLM</h2>
+                        <button class="section-download-button" type="button" data-download-source="llm" title="Stáhnout výsledky LLM korekcí" aria-label="Stáhnout výsledky LLM korekcí">💾</button>
+                    </div>
                     <div style="display:flex;align-items:center;gap:8px;">
                         <label for="agent-select" style="margin:0;font-weight:600;">Agent:</label>
                         <select id="agent-select" aria-label="Vyberte agenta"></select>
@@ -1372,7 +1460,7 @@
                     </div>
                     <div id="agent-output" style="display:none;margin-top:12px;">
                         <div id="agent-output-status" class="muted" style="margin-bottom:6px;"></div>
-                        <pre id="agent-output-text" style="white-space:pre-wrap;"></pre>
+                        <pre id="agent-output-text" style="white-space:pre-wrap;display: none;"></pre>
                     </div>
                     <div id="agent-results" class="results" style="display:none;margin-top:16px;">
                         <div class="result-box">
@@ -1384,15 +1472,18 @@
                             <div id="agent-result-corrected" class="result-rendered"></div>
                         </div>
                     </div>
-                    <div style="margin-top:8px;display:flex;justify-content:flex-end;">
+                    <div style="display:flex;justify-content:flex-end;">
                         <div id="agent-diff-mode-controls" class="agent-diff-controls" role="group" aria-label="Režim zvýraznění agent diffu" style="display:none;">
                             <button type="button" class="agent-diff-toggle" data-diff-mode="word">Slova</button>
                             <button type="button" class="agent-diff-toggle" data-diff-mode="char">Znaky</button>
                         </div>
                     </div>
                 </div>
-                <div id="reader-row" class="info-section" style="margin-top:18px;">
-                    <h2 style="margin-bottom:12px;">Čtení přímo ze skenu (OCR)</h2>
+                <div id="reader-row" class="info-section">
+                    <div class="section-header">
+                        <h2>Čtení přímo ze skenu (OCR)</h2>
+                        <button class="section-download-button" type="button" data-download-source="ocr" title="Stáhnout výsledky OCR" aria-label="Stáhnout výsledky OCR">💾</button>
+                    </div>
                     <div style="display:flex;align-items:center;gap:8px;">
                         <label for="reader-agent-select" style="margin:0;font-weight:600;">Agent:</label>
                         <select id="reader-agent-select" aria-label="Vyberte agenta pro čtení"></select>
@@ -1436,7 +1527,7 @@
                     </div>
                     <div id="reader-agent-output" style="display:none;margin-top:12px;">
                         <div id="reader-agent-output-status" class="muted" style="margin-bottom:6px;"></div>
-                        <pre id="reader-agent-output-text" style="white-space:pre-wrap;"></pre>
+                        <pre id="reader-agent-output-text" style="white-space:pre-wrap;display: none;"></pre>
                     </div>
                     <div id="reader-results" class="results" style="display:none;margin-top:16px;">
                         <div class="result-box">
@@ -1455,7 +1546,7 @@
                     </div>
                 </div>
                 <!-- Additional comparison: processed ALTO (Python) vs new OCR -->
-                <div id="comparison2-row" class="info-section" style="margin-top:18px;">
+                <div id="comparison2-row" class="info-section">
                     <h2 style="margin-bottom:12px;">Porovnání: Zpracované ALTO x Nové OCR</h2>
                     <div style="display:flex;align-items:center;gap:8px;">
                         <div style="margin-left:auto;display:flex;align-items:center;gap:8px;">
@@ -1477,14 +1568,14 @@
                             <div id="comparison2-result-right" class="result-rendered"></div>
                         </div>
                     </div>
-                    <div style="margin-top:8px;display:flex;justify-content:flex-end;">
+                    <div style="display:flex;justify-content:flex-end;">
                         <div id="comparison2-diff-mode-controls" class="agent-diff-controls" role="group" aria-label="Režim zvýraznění porovnání" style="display:none;">
                             <button type="button" class="agent-diff-toggle" data-mode="word">Slova</button>
                             <button type="button" class="agent-diff-toggle" data-mode="char">Znaky</button>
                         </div>
                     </div>
                 </div>
-                <div id="comparison-row" class="info-section" style="margin-top:18px;">
+                <div id="comparison-row" class="info-section">
                     <h2 style="margin-bottom:12px;">Porovnání: LLM opravené zpracování ALTO x Nové OCR</h2>
                     <div style="display:flex;align-items:center;gap:8px;">
                         <div style="margin-left:auto;display:flex;align-items:center;gap:8px;">
@@ -1506,14 +1597,14 @@
                             <div id="comparison-result-right" class="result-rendered"></div>
                         </div>
                     </div>
-                    <div style="margin-top:8px;display:flex;justify-content:flex-end;">
+                    <div style="display:flex;justify-content:flex-end;">
                         <div id="comparison-diff-mode-controls" class="agent-diff-controls" role="group" aria-label="Režim zvýraznění porovnání" style="display:none;">
                             <button type="button" class="agent-diff-toggle" data-mode="word">Slova</button>
                             <button type="button" class="agent-diff-toggle" data-mode="char">Znaky</button>
                         </div>
                     </div>
                 </div>
-                <div id="stitch-row" class="info-section" style="margin-top:18px;">
+                <div id="stitch-row" class="info-section">
                     <h2 style="margin-bottom:12px;">Napojení stran</h2>
                     <div style="display:flex;align-items:center;gap:8px;">
                         <label for="stitch-agent-select" style="margin:0;font-weight:600;">Agent:</label>
@@ -1559,7 +1650,7 @@
 
                     <div id="stitch-agent-output" style="display:none;margin-top:12px;">
                         <div id="stitch-agent-output-status" class="muted" style="margin-bottom:6px;"></div>
-                        <pre id="stitch-agent-output-text" style="white-space:pre-wrap;"></pre>
+                        <pre id="stitch-agent-output-text" style="white-space:pre-wrap;display: none;"></pre>
                     </div>
 
                     <div id="stitch-preview-row" class="stitch-preview-row" style="display:none;margin-top:16px;">
@@ -6624,6 +6715,60 @@
             schedulePreviewDrawerPositionUpdate();
         }
 
+        function initializeDownloadUI() {
+            const triggers = document.querySelectorAll('[data-download-source]');
+            triggers.forEach((button) => {
+                button.addEventListener('click', () => {
+                    const source = button.getAttribute('data-download-source') || 'algorithmic';
+                    openDownloadModal(source);
+                });
+            });
+            const backdrop = document.getElementById('download-modal-backdrop');
+            const closeBtn = document.getElementById('download-modal-close');
+            const cancelBtn = document.getElementById('download-modal-cancel');
+            const confirmBtn = document.getElementById('download-modal-confirm');
+            const customInput = document.getElementById('download-range-custom');
+            const joinerDisable = document.getElementById('download-joiner-disable');
+            document.querySelectorAll('input[name="download-range"]').forEach((radio) => {
+                radio.addEventListener('change', () => {
+                    if (customInput) {
+                        customInput.disabled = radio.value !== 'custom';
+                        if (customInput.disabled) {
+                            customInput.value = '';
+                        } else {
+                            customInput.focus();
+                        }
+                    }
+                });
+            });
+            if (joinerDisable) {
+                joinerDisable.addEventListener('change', () => {
+                    const select = document.getElementById('download-joiner-select');
+                    if (select) {
+                        select.disabled = joinerDisable.checked;
+                    }
+                });
+            }
+            if (closeBtn) {
+                closeBtn.addEventListener('click', () => closeDownloadModal());
+            }
+            if (cancelBtn) {
+                cancelBtn.addEventListener('click', () => closeDownloadModal());
+            }
+            if (confirmBtn) {
+                confirmBtn.addEventListener('click', () => {
+                    alert('Export bude doplněn v další iteraci.');
+                });
+            }
+            if (backdrop) {
+                backdrop.addEventListener('click', (event) => {
+                    if (event.target === backdrop) {
+                        closeDownloadModal();
+                    }
+                });
+            }
+        }
+
         function navigateToUuid(targetUuid) {
             if (!targetUuid) {
                 return;
@@ -6665,6 +6810,88 @@
             if (rightToggle) {
                 rightToggle.style.left = `${rect.right}px`;
             }
+        }
+
+        const downloadModalState = {
+            source: null,
+        };
+
+        function getDownloadSourceLabel(source) {
+            switch (source) {
+                case 'algorithmic':
+                    return 'Algoritmický přístup';
+                case 'llm':
+                    return 'Oprava zpracovaného textu pomocí LLM';
+                case 'ocr':
+                    return 'Čtení přímo ze skenu (OCR)';
+                default:
+                    return 'Export';
+            }
+        }
+
+        function syncDownloadJoinerOptions() {
+            const downloadSelect = document.getElementById('download-joiner-select');
+            const sourceSelect = document.getElementById('stitch-agent-select');
+            if (!downloadSelect) {
+                return;
+            }
+            downloadSelect.innerHTML = '';
+            if (!sourceSelect || !sourceSelect.options.length) {
+                const placeholder = document.createElement('option');
+                placeholder.value = '';
+                placeholder.textContent = 'Žádní joiner agenti';
+                downloadSelect.appendChild(placeholder);
+                downloadSelect.disabled = true;
+                return;
+            }
+            downloadSelect.disabled = false;
+            sourceSelect.querySelectorAll('option').forEach((option) => {
+                const clone = option.cloneNode(true);
+                downloadSelect.appendChild(clone);
+            });
+            downloadSelect.value = sourceSelect.value || '';
+        }
+
+        function openDownloadModal(source) {
+            const backdrop = document.getElementById('download-modal-backdrop');
+            const title = document.getElementById('download-modal-title');
+            const summary = document.getElementById('download-summary');
+            const customInput = document.getElementById('download-range-custom');
+            const disableJoiner = document.getElementById('download-joiner-disable');
+            if (!backdrop || !title || !summary) {
+                return;
+            }
+            downloadModalState.source = source;
+            title.textContent = `Stáhnout – ${getDownloadSourceLabel(source)}`;
+            summary.textContent = 'Zvolte formát, rozsah a napojování. Funkcionalita stažení bude doplněna.';
+            syncDownloadJoinerOptions();
+            if (customInput) {
+                customInput.value = '';
+                customInput.disabled = true;
+            }
+            if (disableJoiner) {
+                disableJoiner.checked = false;
+            }
+            const joinerSelect = document.getElementById('download-joiner-select');
+            if (joinerSelect) {
+                joinerSelect.disabled = Boolean(disableJoiner && disableJoiner.checked);
+            }
+            const confirmBtn = document.getElementById('download-modal-confirm');
+            if (confirmBtn) {
+                confirmBtn.disabled = true;
+            }
+            backdrop.classList.add('is-visible');
+            backdrop.setAttribute('aria-hidden', 'false');
+        }
+
+        function closeDownloadModal() {
+            const backdrop = document.getElementById('download-modal-backdrop');
+            if (!backdrop) {
+                return;
+            }
+            backdrop.classList.remove('is-visible');
+            backdrop.setAttribute('aria-hidden', 'true');
+            downloadModalState.source = null;
         }
 
         function normalizePages(pages) {
@@ -8579,6 +8806,8 @@
             initializeAgentDiffControls();
             initializeComparisonUI();
             initializeComparison2UI();
+            initializeDownloadUI();
+            updateDrawerTogglePositions();
 
             const previewContainer = document.getElementById("page-preview");
             const largeBox = document.getElementById("preview-large");
@@ -8678,6 +8907,49 @@
             updateDrawerTogglePositions();
         });
     </script>
+    <div id="download-modal-backdrop" class="download-modal-backdrop" aria-hidden="true">
+        <div class="download-modal" role="dialog" aria-modal="true" aria-labelledby="download-modal-title">
+            <div class="download-modal-header">
+                <h3 id="download-modal-title">Stáhnout výsledky</h3>
+                <button id="download-modal-close" type="button" class="section-download-button" aria-label="Zavřít nastavení stažení">✕</button>
+            </div>
+            <div class="download-modal-body">
+                <div class="download-option-group">
+                    <label for="download-format">Formát souboru</label>
+                    <select id="download-format">
+                        <option value="html">HTML</option>
+                        <option value="txt">Text (.txt)</option>
+                        <option value="md">Markdown (.md)</option>
+                    </select>
+                </div>
+                <div class="download-option-group">
+                    <label>Rozsah stránek</label>
+                    <div class="range-options">
+                        <label><input type="radio" name="download-range" value="all" checked> Všechny stránky</label>
+                        <label><input type="radio" name="download-range" value="current"> Jen aktuální stránka</label>
+                        <label><input type="radio" name="download-range" value="custom"> Vlastní výběr</label>
+                        <input type="text" id="download-range-custom" placeholder="např. 2-3,5,7-" disabled>
+                    </div>
+                </div>
+                <div class="download-option-group">
+                    <label>Napojování stran</label>
+                    <label style="display:flex;align-items:center;gap:6px;">
+                        <input type="checkbox" id="download-joiner-disable">
+                        <span>Nenapojovat</span>
+                    </label>
+                    <select id="download-joiner-select"></select>
+                </div>
+                <div class="download-option-group">
+                    <label>Souhrn exportu</label>
+                    <div id="download-summary" class="muted">Vyberte formát a rozsah, poté potvrďte stažení.</div>
+                </div>
+            </div>
+            <div class="download-modal-footer">
+                <button type="button" id="download-modal-cancel">Zrušit</button>
+                <button type="button" id="download-modal-confirm" disabled>Stáhnout</button>
+            </div>
+        </div>
+    </div>
     <div id="alto-modal" class="modal" tabindex="-1">
         <div class="modal-content">
             <div class="modal-header">

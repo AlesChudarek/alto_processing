@@ -6,11 +6,18 @@
     <title>ALTO Processing Comparison</title>
     <style>
 :root {
-            --drawer-width: clamp(260px, 32vw, 420px);
-            --thumbnail-drawer-width: var(--drawer-width);
+            --thumbnail-drawer-width: clamp(260px, 35vw, 460px);
             --thumbnail-toggle-size: 32px;
             --primary-max-width: 1200px;
             --preview-drawer-gap: 12px;
+            --left-drawer-space: var(--thumbnail-drawer-width);
+            --right-drawer-space: var(--thumbnail-drawer-width);
+        }
+        body.thumbnail-drawer-collapsed {
+            --left-drawer-space: 0px;
+        }
+        body.preview-drawer-collapsed {
+            --right-drawer-space: 0px;
         }
         body {
             font-family: Arial, sans-serif;
@@ -18,101 +25,133 @@
             padding: 20px;
             background-color: #f5f5f5;
         }
-        .app-grid {
-            display: grid;
-            grid-template-columns: var(--drawer-width) minmax(360px, var(--primary-max-width)) var(--drawer-width);
-            gap: 0;
-            justify-content: center;
-            align-items: stretch;
-            min-height: 100vh;
-            width: min(100%, calc(var(--primary-max-width) + (2 * var(--drawer-width))));
-            margin: 0 auto;
-        }
-        body.thumbnail-drawer-collapsed.preview-drawer-collapsed {
-            --drawer-width: 0px;
-        }
         .page-shell {
             position: relative;
-            z-index: 20;
-            width: min(100%, var(--primary-max-width));
+            z-index: 50;
             max-width: var(--primary-max-width);
-            justify-self: stretch;
+            width: 100%;
+            margin: 0 auto;
+            padding-left: 0;
+            overflow: visible;
         }
         .container {
             background: white;
-            padding: 24px;
-            border-radius: 16px;
-            box-shadow: 0 12px 35px rgba(15, 23, 42, 0.08);
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             margin-bottom: 20px;
             position: relative;
-            margin-left: 3px;
+            max-width: var(--primary-max-width);
+            margin-left: auto;
+            margin-right: auto;
+            z-index: 20;
         }
         .main-content {
             max-width: var(--primary-max-width);
             margin: 0 auto;
         }
-        .drawer-area {
-            position: relative;
-            min-height: 100%;
-            padding: 0;
-            display: flex;
-            justify-content: center;
-            overflow: visible;
-            width: var(--drawer-width);
+        @media (min-width: 1101px) {
+            .page-shell,
+            .container,
+            .main-content {
+                width: min(
+                    var(--primary-max-width),
+                    max(360px, calc(100vw - var(--left-drawer-space) - var(--right-drawer-space) - 32px))
+                );
+            }
         }
-        .drawer-area-left {
-            padding-left: 0;
-        }
-        .drawer-area-right {
-            padding-right: 0;
-        }
-        .drawer-panel {
-            background: white;
-            border-radius: 16px;
-            border: 1px solid #dbe4f0;
-            box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
-            overflow: hidden;
-            min-height: 120px;
-            transition: transform 0.35s ease, opacity 0.35s ease;
-            position: relative;
-            z-index: 5;
-            width: 100%;
-        }
-        #thumbnail-drawer,
-        #preview-drawer {
-            width: 100%;
-            height: auto;
+        #thumbnail-drawer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: var(--thumbnail-drawer-width);
+            transform: translateX(-100%);
+            transition: transform 0.3s ease, opacity 0.3s ease;
             pointer-events: auto;
         }
-        #thumbnail-drawer .drawer-panel,
-        #preview-drawer .preview-panel {
-            border-radius: 16px;
-        }
-        body.thumbnail-drawer-collapsed #thumbnail-drawer .drawer-panel {
-            transform: translateX(calc(100% - 20px));
-            opacity: 0;
-            pointer-events: none;
-        }
-        body.preview-drawer-collapsed .drawer-area-right .drawer-panel {
-            transform: translateX(calc(-100% + 20px));
-            opacity: 0;
-            pointer-events: none;
-        }
-        .drawer-area-right .drawer-panel {
-            position: sticky;
-            top: 20px;
-        }
-        #preview-drawer .preview-panel {
+        .thumbnail-panel {
             background: white;
-            border-radius: 16px;
             border: 1px solid #dbe4f0;
-            box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+            border-right: none;
+            border-radius: 8px 0 0 8px;
+            box-shadow: none;
+            padding: 16px 16px 16px 18px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            height: 100%;
+            max-height: none;
+            overflow: hidden;
+        }
+        body.thumbnail-drawer-collapsed #thumbnail-drawer {
+            transform: translateX(0);
+            opacity: 0;
+            pointer-events: none;
+        }
+        body.thumbnail-drawer-collapsed .thumbnail-panel {
+            pointer-events: none;
+        }
+        .thumbnail-toggle {
+            position: absolute;
+            top: 18px;
+            left: 0;
+            transform: translateX(-50%);
+            width: var(--thumbnail-toggle-size);
+            height: var(--thumbnail-toggle-size);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: white;
+            color: #1f2933;
+            font-weight: 600;
+            border: 1px solid #d0d7e2;
+            border-radius: 10px;
+            box-shadow: none;
+            cursor: pointer;
+            transition: background 0.2s ease, color 0.2s ease, box-shadow 0.25s ease;
+            z-index: 21;
+        }
+        body.page-is-loading .thumbnail-toggle {
+            z-index: 5;
+            pointer-events: none;
+            opacity: 0;
+        }
+        .thumbnail-toggle:hover {
+            background: #1f78ff;
+            color: #ffffff;
+            box-shadow: none;
+        }
+        #preview-drawer {
+            position: fixed;
+            top: 20px;
+            width: var(--thumbnail-drawer-width);
+            max-width: var(--thumbnail-drawer-width);
+            left: auto;
+            right: auto;
+            z-index: 5; /* keep behind .container (20) */
+            transition: opacity 0.3s ease;
+            transform: none; /* avoid creating new stacking context on the host */
+            pointer-events: auto;
+        }
+        body.preview-drawer-collapsed #preview-drawer {
+            pointer-events: none;
+        }
+        #preview-drawer .preview-drawer-panel {
+            background: white;
+            border: 1px solid #dbe4f0;
+            border-left: none;
+            border-radius: 0 8px 8px 0;
+            box-shadow: none; /* remove elevation so it visually sits behind primary */
+            z-index: auto;
             padding: 16px;
             display: flex;
             flex-direction: column;
             gap: 12px;
-            max-height: calc(100vh - 80px);
+            max-height: calc(100vh - 40px);
             overflow: auto;
+            pointer-events: auto;
+            transition: transform 0.3s ease, opacity 0.3s ease;
+            transform: none;
         }
         .preview-drawer-image {
             width: 100%;
@@ -128,11 +167,11 @@
             text-align: center;
             padding: 20px 8px;
         }
-        .drawer-toggle,
-        .thumbnail-toggle,
         .preview-drawer-toggle {
             position: fixed;
-            top: 45px;
+            top: 38px;
+            left: auto;
+            right: 20px;
             width: var(--thumbnail-toggle-size);
             height: var(--thumbnail-toggle-size);
             display: flex;
@@ -143,43 +182,26 @@
             font-weight: 600;
             border: 1px solid #d0d7e2;
             border-radius: 10px;
-            box-shadow: 0 8px 16px rgba(15, 23, 42, 0.12);
+            box-shadow: none;
             cursor: pointer;
             transition: background 0.2s ease, color 0.2s ease, box-shadow 0.25s ease;
-            z-index: 200;
-            transform: translateX(-50%);
+            z-index: 120;
         }
-        .drawer-toggle:hover,
-        .thumbnail-toggle:hover,
         .preview-drawer-toggle:hover {
             background: #1f78ff;
             color: #ffffff;
+            box-shadow: none;
         }
-        .drawer-toggle--left {
-            left: 0;
-        }
-        .drawer-toggle--right {
-            left: 0;
-        }
-        body.page-is-loading .drawer-toggle,
-        body.page-is-loading .thumbnail-toggle,
         body.page-is-loading .preview-drawer-toggle {
+            z-index: 5;
             pointer-events: none;
-            opacity: 0.4;
+            opacity: 0;
         }
-        .thumbnail-panel {
-            background: white;
-            border: none;
-            border-radius: 16px;
-            padding: 16px 20px 20px 20px;
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-            height: 100%;
-            max-height: none;
-            overflow: hidden;
+        body.preview-drawer-collapsed #preview-drawer .preview-drawer-panel {
+            transform: translateX(calc(-100% - var(--preview-drawer-gap)));
+            opacity: 0;
+            pointer-events: none;
         }
-
         .page-jump {
             display: flex;
             align-items: center;
@@ -307,8 +329,7 @@
         }
         @media (max-width: 2150px) {
             :root {
-                --drawer-width: clamp(220px, 32vw, 340px);
-                --thumbnail-drawer-width: var(--drawer-width);
+                --thumbnail-drawer-width: clamp(220px, 32vw, 340px);
             }
             .thumbnail-grid {
                 grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -316,17 +337,13 @@
         }
         @media (max-width: 1880px) {
             :root {
-                --drawer-width: clamp(220px, 38vw, 300px);
-                --thumbnail-drawer-width: var(--drawer-width);
+                --thumbnail-drawer-width: clamp(220px, 38vw, 300px);
             }
         }
         @media (max-width: 1100px) {
             body {
-                padding: 0px;
-                --primary-max-width: 80%;
-            }
-            .app-grid {
-                grid-template-columns: minmax(0, 1fr);
+                padding: 12px;
+                --primary-max-width: 100%;
             }
             .page-shell {
                 max-width: none;
@@ -336,27 +353,20 @@
                 padding-top: 20px;
                 padding-bottom: 20px;
             }
-            .drawer-area {
-                display: block;
-                padding: 0;
-                margin-bottom: 12px;
+            #thumbnail-drawer {
+                position: static;
                 width: 100%;
+                transform: none;
+                margin-bottom: 12px;
             }
-            .drawer-panel,
-            #preview-drawer .preview-panel {
-                transform: none !important;
-                opacity: 1 !important;
-                pointer-events: auto !important;
-            }
-            body.preview-drawer-collapsed .drawer-area-right .drawer-panel,
-            body.thumbnail-drawer-collapsed #thumbnail-drawer .drawer-panel {
-                opacity: 0.4;
+            body.thumbnail-drawer-collapsed #thumbnail-drawer {
+                transform: none;
             }
             .thumbnail-panel {
                 max-height: none;
                 width: 100%;
-                border: 1px solid #dbe4f0;
-                border-radius: 12px;
+                border-right: 1px solid #dbe4f0;
+                border-radius: 8px;
                 pointer-events: auto;
             }
             .thumbnail-scroll {
@@ -365,16 +375,31 @@
             .thumbnail-grid {
                 grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
             }
-            .drawer-toggle,
-            .thumbnail-toggle,
-            .preview-drawer-toggle {
+            .thumbnail-toggle {
                 position: static;
                 margin-left: auto;
-                margin-right: 0;
-                margin-top: 8px;
                 box-shadow: none;
-                top: auto;
+            }
+            #preview-drawer {
+                position: static;
+                width: 100%;
+                max-width: none;
                 transform: none;
+                margin-top: 12px;
+            }
+            body.preview-drawer-collapsed #preview-drawer {
+                transform: none;
+                opacity: 0;
+                pointer-events: none;
+            }
+            .preview-drawer-toggle {
+                position: static;
+                transform: none;
+                margin-left: auto;
+                margin-top: 8px;
+            }
+            body.thumbnail-drawer-collapsed #thumbnail-scroll {
+                visibility: visible;
             }
         }
         @media (max-height: 700px) {
@@ -425,40 +450,6 @@
         button:not(.page-thumbnail):not(.thumbnail-toggle):not(.diff-toggle):not(.agent-diff-toggle):not(.preview-drawer-toggle):disabled {
             background-color: #9aa0a6;
             cursor: not-allowed;
-        }
-        #algorithmic-section {
-            margin-top: 20px;
-            display: none;
-            flex-direction: column;
-            gap: 16px;
-        }
-        .algorithmic-header {
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-        }
-        .algorithmic-header h2 {
-            margin: 0;
-        }
-        .inline-checkbox {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            font-size: 13px;
-            color: #1f2933;
-        }
-        .algorithmic-actions {
-            display: flex;
-            align-items: center;
-            justify-content: flex-end;
-            flex-wrap: wrap;
-            gap: 12px;
-        }
-        .results.algorithmic-results {
-            margin-top: 0;
-        }
-        .result-headline {
-            margin-bottom: 12px;
         }
         .form-group.uuid-group {
             width: 100%;
@@ -579,7 +570,6 @@
             justify-content: flex-end;
             gap: 20px;
             flex-wrap: wrap;
-            padding-top: 5px;
         }
         #load-button {
             min-width: calc(3 * 40px + 16px);
@@ -1194,35 +1184,29 @@
     </style>
 </head>
 <body>
-    <div class="app-grid">
-        <div class="drawer-area drawer-area-left">
-            <aside id="thumbnail-drawer" aria-label="Náhledy stránek">
-                <div class="drawer-panel">
-                    <div class="thumbnail-panel">
-                        <div class="page-jump">
-                            <label for="page-number-input">Strana</label>
-                            <input type="number" id="page-number-input" min="1" step="1" inputmode="numeric" aria-label="Zadat číslo strany">
-                            <span id="page-number-total" class="page-jump-total"></span>
-                        </div>
-                        <div id="thumbnail-scroll" class="thumbnail-scroll">
-                            <div id="thumbnail-grid" class="thumbnail-grid">
-                                <div class="thumbnail-empty">Náhledy budou k dispozici po načtení knihy.</div>
-                            </div>
-                        </div>
+    <div class="page-shell">
+        <aside id="thumbnail-drawer" aria-label="Náhledy stránek">
+            <div class="thumbnail-panel">
+                <div class="page-jump">
+                    <label for="page-number-input">Strana</label>
+                    <input type="number" id="page-number-input" min="1" step="1" inputmode="numeric" aria-label="Zadat číslo strany">
+                    <span id="page-number-total" class="page-jump-total"></span>
+                </div>
+                <div id="thumbnail-scroll" class="thumbnail-scroll">
+                    <div id="thumbnail-grid" class="thumbnail-grid">
+                        <div class="thumbnail-empty">Náhledy budou k dispozici po načtení knihy.</div>
                     </div>
                 </div>
-            </aside>
-            <button id="thumbnail-toggle" class="drawer-toggle drawer-toggle--left thumbnail-toggle" type="button" aria-expanded="true" aria-controls="thumbnail-grid" aria-label="Skrýt náhledy">&gt;</button>
-        </div>
-        <div class="page-shell">
-            <div class="container">
-                <div class="main-content">
-                    <h1>ALTO Processing Comparison</h1>
-                    <p>Ukázka způsobů zpracování formátovaného textu ze stránek knih.</p>
+            </div>
+        </aside>
+        <button id="thumbnail-toggle" class="thumbnail-toggle" type="button" aria-expanded="true" aria-controls="thumbnail-grid" aria-label="Skrýt náhledy">&gt;</button>
+        <div class="container">
+            <div class="main-content">
+                <h1>ALTO Processing Comparison</h1>
+                <p>Ukázka způsobů zpracování formátovaného textu ze stránek knih.</p>
 
-                    <div class="form-group uuid-group"></div>
+                <div class="form-group uuid-group">
                     <label for="uuid">UUID stránky nebo dokumentu:</label>
-                    
                     <div class="uuid-input-group">
                         <input type="text" id="uuid" placeholder="Zadejte UUID (např. 49c6424a-c820-4224-9475-4aa0d8a9d844)" value="49c6424a-c820-4224-9475-4aa0d8a9d844" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false">
                         <span class="inline-tooltip-anchor">
@@ -1235,12 +1219,11 @@
                         </span>
                         <button type="button" id="uuid-clear" title="Vymazat UUID" aria-label="Vymazat UUID">✕</button>
                     </div>
-                    <div class="action-row">
-                        <button id="load-button" type="button" onclick="handleLoadClick()">Načíst stránku</button>
-                    </div>
                 </div>
 
-
+                <div class="action-row">
+                    <button id="load-button" type="button" onclick="handleLoadClick()">Načíst stránku</button>
+                </div>
 
                 <div id="book-info" class="info-section" style="display: none;">
                     <h2 id="book-title">Informace o knize</h2>
@@ -1280,30 +1263,14 @@
                         <button id="next-page" type="button" aria-label="Další stránka">▶</button>
                     </div>
                 </div>
-                <div id="algorithmic-section" class="info-section">
-                    <div class="algorithmic-header">
-                        <h2>Algoritmický přístup</h2>
-                        <div class="algorithmic-actions">
-                            <label class="inline-checkbox">
-                                <input type="checkbox" id="algorithmic-auto">
-                                <span>Automaticky převádět</span>
-                            </label>
-                            <button id="algorithmic-convert" type="button" style="height:36px;display:inline-flex;align-items:center;justify-content:center;padding:6px 12px;">Převeď</button>
-                        </div>
+                <div id="results" class="results" style="display: none;">
+                    <div class="result-box">
+                        <h3>Aktuálně nasazené zpracování ALTO</h3>
+                        <div id="typescript-result" class="result-rendered"></div>
                     </div>
-                    <div id="results" class="results algorithmic-results" style="display:none;">
-                        <div class="result-box">
-                            <div class="result-headline">
-                                <h3>Aktuálně nasazené zpracování ALTO</h3>
-                            </div>
-                            <div id="typescript-result" class="result-rendered"></div>
-                        </div>
-                        <div class="result-box">
-                            <div class="result-headline">
-                                <h3>Nový přístup zpracování ALTO</h3>
-                            </div>
-                            <div id="python-result" class="result-rendered"></div>
-                        </div>
+                    <div class="result-box">
+                        <h3>Nový přístup zpracování ALTO</h3>
+                        <div id="python-result" class="result-rendered"></div>
                     </div>
                 </div>
                 <section id="diff-section" class="diff-section">
@@ -1625,24 +1592,20 @@
                         </section>
                     </div>
                 </div>
-                <div id="loading" class="loading" aria-live="polite" aria-hidden="true">
-                    <div class="loading-content">
-                        <div class="loading-spinner" role="presentation"></div>
-                        <p>Zpracovávám ALTO data...</p>
-                    </div>
-                </div>
-            </div>
-        </div>
-        <div class="drawer-area drawer-area-right">
+        <button id="preview-drawer-toggle" class="preview-drawer-toggle" type="button" aria-expanded="true" aria-controls="preview-drawer-panel" aria-label="Skrýt pevný náhled">&lt;</button>
             <aside id="preview-drawer" class="preview-drawer" aria-label="Pevný náhled aktuální stránky" aria-hidden="false">
-                <div class="drawer-panel">
-                    <div id="preview-drawer-panel" class="thumbnail-panel preview-panel">
-                        <div id="preview-pinned-placeholder" class="preview-drawer-empty">Náhled bude k dispozici po načtení.</div>
-                        <img id="preview-pinned-image" class="preview-drawer-image" alt="Stálý náhled aktuální stránky" aria-hidden="true">
-                    </div>
+                <div id="preview-drawer-panel" class="preview-drawer-panel">
+                    <div id="preview-pinned-placeholder" class="preview-drawer-empty">Náhled bude k dispozici po načtení.</div>
+                    <img id="preview-pinned-image" class="preview-drawer-image" alt="Stálý náhled aktuální stránky" aria-hidden="true">
                 </div>
             </aside>
-            <button id="preview-drawer-toggle" class="drawer-toggle drawer-toggle--right preview-drawer-toggle" type="button" aria-expanded="true" aria-controls="preview-drawer-panel" aria-label="Skrýt pevný náhled">&lt;</button>
+        </div>
+        <div id="loading" class="loading" aria-live="polite" aria-hidden="true">
+            <div class="loading-content">
+                <div class="loading-spinner" role="presentation"></div>
+                <p>Zpracovávám ALTO data...</p>
+            </div>
+            </div>
         </div>
     </div>
 
@@ -1753,8 +1716,6 @@
             typescript: "",
             baseKey: "",
         };
-        let pendingAlgorithmicResults = null;
-        let algorithmicResultVisible = false;
         const tooltipTimers = new Map();
         const NOTE_STYLE_ATTR = ' style=\"display:block;font-size:0.82em;color:#1e5aa8;font-weight:bold;\"';
         // --- LLM agent management ---
@@ -2605,6 +2566,7 @@
         async function refreshStitchUI(options = {}) {
             const previewRow = document.getElementById('stitch-preview-row');
             const mergeContainer = document.getElementById('stitch-merge-container');
+            const runBtn = getContextElement(agentContexts.joiners, 'runButtonId');
             const reveal = Boolean(options && options.reveal);
             const keepVisible = Boolean(options && options.keepVisible);
             const keepMerged = Boolean(options && options.keepMerged);
@@ -2624,6 +2586,7 @@
             if (!context) {
                 if (previewRow) previewRow.style.display = 'none';
                 if (!keepVisible && mergeContainer) mergeContainer.style.display = 'none';
+                if (runBtn) runBtn.disabled = true;
                 return null;
             }
 
@@ -2638,6 +2601,12 @@
                 mergeContainer.style.display = 'flex';
             } else if (!keepVisible && mergeContainer) {
                 mergeContainer.style.display = 'none';
+            }
+
+            const hasStart = Boolean(context.sections.start.previous && context.sections.start.current);
+            const hasEnd = Boolean(context.sections.end.current && context.sections.end.next);
+            if (runBtn) {
+                runBtn.disabled = !hasStart && !hasEnd;
             }
 
             scheduleThumbnailDrawerHeightSync();
@@ -5075,10 +5044,6 @@
                 setComparisonRunButtonState(true);
                 return;
             }
-            if (!ensureAlgorithmicResultForAction()) {
-                setComparisonStatus('Nejprve načtěte stránku a spusťte algoritmické převedení.', 'error');
-                return;
-            }
             comparisonState.running = true;
              setComparisonRunButtonState(true);
             setComparisonStatus('Připravuji porovnání...', 'pending');
@@ -5393,10 +5358,6 @@
             if (comparison2State.running) {
                 setComparison2Status('Porovnání již probíhá...', 'pending');
                 setComparison2RunButtonState(true);
-                return;
-            }
-            if (!ensureAlgorithmicResultForAction()) {
-                setComparison2Status('Nejprve načtěte stránku a spusťte algoritmické převedení.', 'error');
                 return;
             }
             comparison2State.running = true;
@@ -6037,9 +5998,6 @@
             if (ctx.requiresPythonHtml === false) {
                 return Boolean(currentPage && currentPage.uuid);
             }
-            if (!algorithmicResultVisible && pendingAlgorithmicResults) {
-                runAlgorithmicConversion();
-            }
             return Boolean(currentResults && typeof currentResults.python === 'string' && currentResults.python.trim().length > 0);
         }
 
@@ -6517,7 +6475,6 @@
                 scheduleThumbnailDrawerHeightSync(true);
             }
             schedulePreviewDrawerPositionUpdate();
-            updateDrawerTogglePositions();
         }
 
         function setPreviewDrawerCollapsed(collapsed) {
@@ -6538,7 +6495,6 @@
                 drawer.setAttribute('aria-hidden', previewDrawerCollapsed ? 'true' : 'false');
             }
             schedulePreviewDrawerPositionUpdate();
-            updateDrawerTogglePositions();
         }
 
         function updatePreviewDrawerPosition() {
@@ -6546,12 +6502,6 @@
             const drawer = document.getElementById('preview-drawer');
             const toggle = document.getElementById('preview-drawer-toggle');
             if (!drawer || !toggle) {
-                return;
-            }
-            if (drawer.closest('.drawer-area-right')) {
-                drawer.style.left = '';
-                drawer.style.top = '';
-                drawer.style.right = '';
                 return;
             }
             const isMobileLayout = window.matchMedia('(max-width: 1100px)').matches;
@@ -6648,22 +6598,6 @@
                 placeholder.className = "thumbnail-empty";
                 placeholder.textContent = message;
                 grid.appendChild(placeholder);
-            }
-        }
-
-        function updateDrawerTogglePositions() {
-            const container = document.querySelector('.container');
-            const leftToggle = document.getElementById('thumbnail-toggle');
-            const rightToggle = document.getElementById('preview-drawer-toggle');
-            if (!container) {
-                return;
-            }
-            const rect = container.getBoundingClientRect();
-            if (leftToggle) {
-                leftToggle.style.left = `${rect.left}px`;
-            }
-            if (rightToggle) {
-                rightToggle.style.left = `${rect.right}px`;
             }
         }
 
@@ -7110,89 +7044,6 @@
             }
         }
 
-        function setAlgorithmicControlsDisabled(disabled) {
-            const convertButton = document.getElementById("algorithmic-convert");
-            if (convertButton) {
-                convertButton.disabled = Boolean(disabled);
-            }
-        }
-
-        function ensureAlgorithmicSectionVisible() {
-            const section = document.getElementById("algorithmic-section");
-            if (section && section.style.display !== "flex") {
-                section.style.display = "flex";
-            }
-        }
-
-        function hideAlgorithmicResults() {
-            const results = document.getElementById("results");
-            if (results) {
-                results.style.display = "none";
-            }
-            algorithmicResultVisible = false;
-        }
-
-        function shouldAutoRunAlgorithmic() {
-            const checkbox = document.getElementById("algorithmic-auto");
-            return checkbox ? checkbox.checked : false;
-        }
-
-        function primeAlgorithmicResults(data, fallbackUuid) {
-            const targetUuid = (currentPage && currentPage.uuid) || fallbackUuid || "";
-            pendingAlgorithmicResults = {
-                python: data.python || "",
-                typescript: data.typescript || "",
-                baseKey: buildResultCacheKey(data.python || "", data.typescript || "", targetUuid),
-            };
-            currentResults = {
-                python: "",
-                typescript: "",
-                baseKey: "",
-            };
-            hideAlgorithmicResults();
-            setAlgorithmicControlsDisabled(false);
-            if (shouldAutoRunAlgorithmic()) {
-                window.requestAnimationFrame(() => runAlgorithmicConversion());
-            }
-        }
-
-        function runAlgorithmicConversion() {
-            if (!pendingAlgorithmicResults) {
-                alert("Není připraven žádný výsledek k zobrazení.");
-                return;
-            }
-            currentResults = {
-                python: pendingAlgorithmicResults.python || "",
-                typescript: pendingAlgorithmicResults.typescript || "",
-                baseKey: pendingAlgorithmicResults.baseKey || buildResultCacheKey(
-                    pendingAlgorithmicResults.python || "",
-                    pendingAlgorithmicResults.typescript || "",
-                    currentPage && currentPage.uuid ? currentPage.uuid : ""
-                ),
-            };
-            algorithmicResultVisible = true;
-            const results = document.getElementById("results");
-            if (results) {
-                results.style.display = "grid";
-            }
-            renderComparisonResults();
-            updateDiffToggleState();
-        }
-
-        function ensureAlgorithmicResultForAction(options = {}) {
-            if (algorithmicResultVisible) {
-                return true;
-            }
-            if (pendingAlgorithmicResults) {
-                runAlgorithmicConversion();
-                return true;
-            }
-            if (!(options && options.silent)) {
-                alert("Nejprve načtěte stránku a spusťte algoritmický převod.");
-            }
-            return false;
-        }
-
         function setLoadingState(active) {
             const container = document.querySelector('.container');
             const loading = document.getElementById('loading');
@@ -7207,7 +7058,6 @@
             if (document && document.body) {
                 document.body.classList.toggle('page-is-loading', isActive);
             }
-            setAlgorithmicControlsDisabled(isActive || !pendingAlgorithmicResults);
             if (!isActive) {
                 scheduleThumbnailDrawerHeightSync();
             }
@@ -8129,12 +7979,21 @@
                 resetPreview();
             }
 
-            ensureAlgorithmicSectionVisible();
-            primeAlgorithmicResults(data, currentPage && currentPage.uuid ? currentPage.uuid : uuid);
+            currentResults = {
+                python: data.python || "",
+                typescript: data.typescript || "",
+                baseKey: buildResultCacheKey(data.python || "", data.typescript || "", currentPage && currentPage.uuid ? currentPage.uuid : uuid),
+            };
             diffRequestToken += 1;
             diffCache.clear();
             clearAgentOutput();
+            renderComparisonResults();
             const stitchRefreshPromise = refreshStitchUI();
+
+            const results = document.getElementById("results");
+            if (results) {
+                results.style.display = "grid";
+            }
 
             updateDiffToggleState();
 
@@ -8459,9 +8318,6 @@
             const previousScrollY = window.pageYOffset || window.scrollY || 0;
             const toolsElement = document.getElementById("page-tools");
             const shouldShowLoading = !pageCache.has(uuid);
-            pendingAlgorithmicResults = null;
-            hideAlgorithmicResults();
-            setAlgorithmicControlsDisabled(true);
 
             if (shouldShowLoading) {
                 setLoadingState(true);
@@ -8482,9 +8338,6 @@
                 console.error("Chyba při zpracování:", error);
                 const message = error && error.message ? error.message : String(error);
                 alert("Chyba při zpracování: " + message);
-                pendingAlgorithmicResults = null;
-                hideAlgorithmicResults();
-                setAlgorithmicControlsDisabled(true);
                 window.requestAnimationFrame(() => {
                     window.scrollTo(0, previousScrollY);
                 });
@@ -8552,21 +8405,6 @@
                 uuidClearBtn.addEventListener("click", clearUuidInput);
             }
             setUuidButtonsState();
-
-            hideAlgorithmicResults();
-            setAlgorithmicControlsDisabled(true);
-            const algorithmicConvertBtn = document.getElementById("algorithmic-convert");
-            if (algorithmicConvertBtn) {
-                algorithmicConvertBtn.addEventListener("click", () => runAlgorithmicConversion());
-            }
-            const algorithmicAutoCheckbox = document.getElementById("algorithmic-auto");
-            if (algorithmicAutoCheckbox) {
-                algorithmicAutoCheckbox.addEventListener("change", () => {
-                    if (algorithmicAutoCheckbox.checked && pendingAlgorithmicResults && !algorithmicResultVisible) {
-                        runAlgorithmicConversion();
-                    }
-                });
-            }
 
             setupPageNumberJump();
             initializeThumbnailDrawer();
@@ -8668,14 +8506,12 @@
             });
 
             processAlto();
-            updateDrawerTogglePositions();
         };
 
         window.addEventListener("resize", () => {
             refreshLargePreviewSizing();
             setLargePreviewActive();
             scheduleThumbnailDrawerHeightSync(true);
-            updateDrawerTogglePositions();
         });
     </script>
     <div id="alto-modal" class="modal" tabindex="-1">

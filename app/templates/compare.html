@@ -439,6 +439,7 @@
             align-items: center;
             gap: 12px;
             flex-wrap: wrap;
+            margin-bottom: 12px;
         }
         .section-download-button {
             height: 36px;
@@ -476,6 +477,11 @@
             border-radius: 16px;
             box-shadow: 0 20px 50px rgba(15, 23, 42, 0.25);
             padding: 24px;
+            position: relative;
+        }
+        .download-modal[data-mode="progress"] #download-modal-form,
+        .download-modal[data-mode="progress"] #download-modal-footer {
+            display: none;
         }
         .download-modal-header {
             display: flex;
@@ -491,10 +497,42 @@
             flex-direction: column;
             gap: 16px;
         }
+        .download-modal-progress {
+            display: none;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .download-modal[data-mode="progress"] #download-modal-progress {
+            display: flex;
+        }
+        .download-progress-message {
+            margin: 0;
+            font-weight: 600;
+            color: #1f2933;
+        }
+        .download-progress-bar {
+            width: 100%;
+            height: 12px;
+            border-radius: 999px;
+            background: #e3e8f0;
+            overflow: hidden;
+        }
+        .download-progress-bar-fill {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #2f6feb, #5b9dff);
+            transition: width 0.25s ease;
+        }
+        .download-progress-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 12px;
+        }
         .download-option-group {
             display: flex;
             flex-direction: column;
             gap: 8px;
+            margin-bottom: 16px;
         }
         .download-option-group label {
             font-weight: 600;
@@ -506,6 +544,44 @@
         }
         .download-modal-footer {
             margin-top: 20px;
+            display: flex;
+            justify-content: flex-end;
+            gap: 12px;
+        }
+        .download-error-dialog {
+            position: fixed;
+            inset: 0;
+            background: rgba(15, 23, 42, 0.45);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 12000;
+            backdrop-filter: blur(1px);
+        }
+        .download-error-dialog.is-visible {
+            display: flex;
+        }
+        .download-error-content {
+            background: #fff;
+            border-radius: 16px;
+            box-shadow: 0 18px 40px rgba(15, 23, 42, 0.3);
+            padding: 24px 28px;
+            width: min(90vw, 520px);
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+        .download-error-content h4 {
+            margin: 0;
+            font-size: 18px;
+            color: #0f172a;
+        }
+        .download-error-message {
+            font-size: 15px;
+            color: #1f2933;
+            white-space: pre-wrap;
+        }
+        .download-error-actions {
             display: flex;
             justify-content: flex-end;
             gap: 12px;
@@ -1846,6 +1922,7 @@
         };
         let pendingAlgorithmicResults = null;
         let algorithmicResultVisible = false;
+        let algorithmicReadyPromise = null;
         const tooltipTimers = new Map();
         const NOTE_STYLE_ATTR = ' style=\"display:block;font-size:0.82em;color:#1e5aa8;font-weight:bold;\"';
         // --- LLM agent management ---
@@ -2330,10 +2407,7 @@
             if (mergeContainer && mergeContainer.style.display === 'none') {
                 mergeContainer.style.display = 'flex';
             }
-            const focusTarget = document.getElementById('stitch-merge-start');
-            if (focusTarget && typeof focusTarget.scrollIntoView === 'function') {
-                focusTarget.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            }
+            // Časté posouvání stránky bylo rušivé, proto přeskakování na merge sekci vypínáme.
             scheduleThumbnailDrawerHeightSync();
             ctx.lastJoinerResult = {
                 rawText,
@@ -5834,12 +5908,20 @@
                 return;
             }
             const isAutoInvocation = Boolean(options && options.autoTriggered);
-            const pythonHtml = currentResults && currentResults.python ? String(currentResults.python) : '';
-            const hasInputData = contextHasInputData(ctx);
+            let pythonHtml = currentResults && currentResults.python ? String(currentResults.python) : '';
+            let hasInputData = contextHasInputData(ctx);
+            if (!hasInputData) {
+                hasInputData = await ensureContextInputReady(ctx);
+            }
             if (!hasInputData) {
                 alert(ctx.requiresPythonHtml !== false
                     ? 'Python výstup je prázdný – nejprve načtěte stránku.'
                     : 'Nejprve načtěte stránku se skenem.');
+                return;
+            }
+            pythonHtml = currentResults && currentResults.python ? String(currentResults.python) : '';
+            if (ctx.requiresPythonHtml !== false && (!pythonHtml || !pythonHtml.trim())) {
+                alert('Python výstup je prázdný – nejprve načtěte stránku.');
                 return;
             }
             const autoCheckbox = getContextElement(ctx, 'autoCheckboxId');
@@ -6132,6 +6214,61 @@
                 runAlgorithmicConversion();
             }
             return Boolean(currentResults && typeof currentResults.python === 'string' && currentResults.python.trim().length > 0);
+        }
+
+        function isAlgorithmicResultReady() {
+            return Boolean(currentResults && typeof currentResults.python === 'string' && currentResults.python.trim().length > 0);
+        }
+
+        function waitForAlgorithmicResult(timeout = 4000) {
+            if (isAlgorithmicResultReady()) {
+                return Promise.resolve(true);
+            }
+            if (algorithmicReadyPromise) {
+                return algorithmicReadyPromise;
+            }
+            algorithmicReadyPromise = new Promise((resolve) => {
+                const hasPerf = typeof performance !== 'undefined' && typeof performance.now === 'function';
+                const deadline = (hasPerf ? performance.now() : Date.now()) + timeout;
+                const check = () => {
+                    if (isAlgorithmicResultReady()) {
+                        algorithmicReadyPromise = null;
+                        resolve(true);
+                        return;
+                    }
+                    if (pendingAlgorithmicResults && !algorithmicResultVisible) {
+                        runAlgorithmicConversion();
+                        if (isAlgorithmicResultReady()) {
+                            algorithmicReadyPromise = null;
+                            resolve(true);
+                            return;
+                        }
+                    }
+                    const now = hasPerf ? performance.now() : Date.now();
+                    if (now >= deadline) {
+                        algorithmicReadyPromise = null;
+                        resolve(isAlgorithmicResultReady());
+                        return;
+                    }
+                    window.setTimeout(check, 60);
+                };
+                check();
+            });
+            return algorithmicReadyPromise;
+        }
+
+        async function ensureContextInputReady(ctx) {
+            if (!ctx) {
+                return false;
+            }
+            if (ctx.requiresPythonHtml === false) {
+                return Boolean(currentPage && currentPage.uuid);
+            }
+            if (contextHasInputData(ctx)) {
+                return true;
+            }
+            const ready = await waitForAlgorithmicResult();
+            return ready;
         }
 
         function scheduleAutoAgentRun(ctx, attemptsRemaining = 5) {
@@ -6727,8 +6864,16 @@
             const closeBtn = document.getElementById('download-modal-close');
             const cancelBtn = document.getElementById('download-modal-cancel');
             const confirmBtn = document.getElementById('download-modal-confirm');
+            const abortBtn = document.getElementById('download-modal-abort');
             const customInput = document.getElementById('download-range-custom');
             const joinerDisable = document.getElementById('download-joiner-disable');
+            const formatSelect = document.getElementById('download-format');
+            const stripSmall = document.getElementById('download-strip-small');
+            const stripNote = document.getElementById('download-strip-note');
+            const errorCloseBtn = document.getElementById('download-error-close');
+            const errorDialog = document.getElementById('download-error-dialog');
+            const llmModalSelect = document.getElementById('download-agent-select-llm');
+            const ocrModalSelect = document.getElementById('download-agent-select-ocr');
             document.querySelectorAll('input[name="download-range"]').forEach((radio) => {
                 radio.addEventListener('change', () => {
                     if (customInput) {
@@ -6739,14 +6884,58 @@
                             customInput.focus();
                         }
                     }
+                    updateDownloadSummary();
+                    updateDownloadConfirmState();
                 });
             });
+            if (customInput) {
+                customInput.addEventListener('input', () => {
+                    updateDownloadSummary();
+                    updateDownloadConfirmState();
+                });
+            }
+            if (formatSelect) {
+                formatSelect.addEventListener('change', () => {
+                    updateDownloadSummary();
+                });
+            }
             if (joinerDisable) {
                 joinerDisable.addEventListener('change', () => {
                     const select = document.getElementById('download-joiner-select');
                     if (select) {
                         select.disabled = joinerDisable.checked;
                     }
+                    updateDownloadSummary();
+                });
+            }
+            const joinerSelect = document.getElementById('download-joiner-select');
+            if (joinerSelect) {
+                joinerSelect.addEventListener('change', () => {
+                    updateDownloadSummary();
+                });
+            }
+            if (stripSmall) {
+                stripSmall.addEventListener('change', () => {
+                    updateDownloadSummary();
+                });
+            }
+            if (stripNote) {
+                stripNote.addEventListener('change', () => {
+                    updateDownloadSummary();
+                });
+            }
+            if (llmModalSelect) {
+                llmModalSelect.addEventListener('change', () => {
+                    applyDownloadAgentSelection('llm').finally(() => {
+                        updateDownloadConfirmState();
+                    });
+                });
+            }
+            if (ocrModalSelect) {
+                ocrModalSelect.addEventListener('change', () => {
+                    applyDownloadAgentSelection('ocr').finally(() => {
+                        updateDownloadConfirmState();
+                    });
                 });
             }
             if (closeBtn) {
@@ -6756,15 +6945,32 @@
                 cancelBtn.addEventListener('click', () => closeDownloadModal());
             }
             if (confirmBtn) {
-                confirmBtn.addEventListener('click', () => {
-                    alert('Export bude doplněn v další iteraci.');
+                confirmBtn.addEventListener('click', () => startDownloadJob());
+            }
+            if (abortBtn) {
+                abortBtn.addEventListener('click', () => abortDownloadJob());
+            }
+            if (errorCloseBtn) {
+                errorCloseBtn.addEventListener('click', () => hideDownloadError());
+            }
+            if (errorDialog) {
+                errorDialog.addEventListener('click', (event) => {
+                    if (event.target === errorDialog) {
+                        hideDownloadError();
+                    }
                 });
             }
             if (backdrop) {
                 backdrop.addEventListener('click', (event) => {
-                    if (event.target === backdrop) {
-                        closeDownloadModal();
+                    if (event.target !== backdrop) {
+                        return;
                     }
+                    const isJobRunning = Boolean(downloadModalState.jobId);
+                    if (isJobRunning) {
+                        // Ignoruj klik mimo modal během probíhajícího stahování
+                        return;
+                    }
+                    closeDownloadModal();
                 });
             }
         }
@@ -6814,6 +7020,11 @@
 
         const downloadModalState = {
             source: null,
+            jobId: null,
+            pollTimer: null,
+            downloadUrl: null,
+            filename: null,
+            mode: 'form',
         };
 
         function getDownloadSourceLabel(source) {
@@ -6826,6 +7037,414 @@
                     return 'Čtení přímo ze skenu (OCR)';
                 default:
                     return 'Export';
+            }
+        }
+
+        function getSelectedDownloadRange() {
+            const selected = document.querySelector('input[name="download-range"]:checked');
+            return selected ? selected.value : 'all';
+        }
+
+        function isDownloadRangeValid() {
+            const rangeMode = getSelectedDownloadRange();
+            if (rangeMode !== 'custom') {
+                return true;
+            }
+            const customInput = document.getElementById('download-range-custom');
+            return Boolean(customInput && customInput.value.trim().length);
+        }
+
+        function updateDownloadSummary() {
+            const summary = document.getElementById('download-summary');
+            if (!summary) {
+                return;
+            }
+            if (!downloadModalState.source || !currentBook || !Array.isArray(bookPages) || !bookPages.length) {
+                summary.textContent = 'Vyberte formát a rozsah, poté potvrďte stažení.';
+                return;
+            }
+            const formatSelect = document.getElementById('download-format');
+            const formatLabel = formatSelect ? formatSelect.options[formatSelect.selectedIndex].textContent : 'Formát';
+            const rangeMode = getSelectedDownloadRange();
+            const customInput = document.getElementById('download-range-custom');
+            let rangeLabel = '';
+            if (rangeMode === 'all') {
+                rangeLabel = `Všechny stránky (${bookPages.length})`;
+            } else if (rangeMode === 'current') {
+                const label = currentPage && currentPage.pageNumber ? `strana ${currentPage.pageNumber}` : 'aktuální strana';
+                rangeLabel = `Pouze ${label}`;
+            } else {
+                const value = customInput && customInput.value ? customInput.value.trim() : '';
+                rangeLabel = value ? `Výběr: ${value}` : 'Vlastní výběr';
+            }
+            const stripSmall = document.getElementById('download-strip-small');
+            const stripNote = document.getElementById('download-strip-note');
+            const options = [];
+            if (stripSmall && stripSmall.checked) {
+                options.push('bez small');
+            }
+            if (stripNote && stripNote.checked) {
+                options.push('bez note');
+            }
+            const optionsLabel = options.length ? ` · ${options.join(', ')}` : '';
+            summary.textContent = `${getDownloadSourceLabel(downloadModalState.source)} · ${formatLabel} · ${rangeLabel}${optionsLabel}`;
+        }
+
+        function updateDownloadConfirmState() {
+            const confirmBtn = document.getElementById('download-modal-confirm');
+            if (!confirmBtn) {
+                return;
+            }
+            const hasBook = currentBook && Array.isArray(bookPages) && bookPages.length;
+            const hasSource = Boolean(downloadModalState.source);
+            const rangeValid = isDownloadRangeValid();
+            let allow = hasBook && hasSource && rangeValid;
+            if (allow && downloadModalState.source === 'llm') {
+                const select = getContextElement(agentContexts.correctors, 'selectId');
+                allow = Boolean(select && select.value);
+            } else if (allow && downloadModalState.source === 'ocr') {
+                const select = getContextElement(agentContexts.readers, 'selectId');
+                allow = Boolean(select && select.value);
+            }
+            confirmBtn.disabled = !allow;
+        }
+
+        function setDownloadModalMode(mode) {
+            const backdrop = document.getElementById('download-modal-backdrop');
+            const modal = backdrop ? backdrop.querySelector('.download-modal') : null;
+            const form = document.getElementById('download-modal-form');
+            const progress = document.getElementById('download-modal-progress');
+            const footer = document.getElementById('download-modal-footer');
+            downloadModalState.mode = mode;
+            if (modal) {
+                modal.setAttribute('data-mode', mode);
+            }
+            const showForm = mode === 'form';
+            if (form) {
+                form.style.display = showForm ? 'block' : 'none';
+                form.setAttribute('aria-hidden', showForm ? 'false' : 'true');
+            }
+            if (progress) {
+                progress.style.display = showForm ? 'none' : 'block';
+                progress.setAttribute('aria-hidden', showForm ? 'true' : 'false');
+            }
+            if (footer) {
+                footer.style.display = showForm ? 'flex' : 'none';
+            }
+        }
+
+        function resetDownloadProgressUI(message = 'Připravuji export…') {
+            const textEl = document.getElementById('download-progress-message');
+            const barFill = document.querySelector('.download-progress-bar-fill');
+            const etaEl = document.getElementById('download-progress-eta');
+            if (textEl) {
+                textEl.textContent = message;
+            }
+            if (barFill) {
+                barFill.style.width = '0%';
+            }
+            if (etaEl) {
+                etaEl.textContent = '';
+            }
+        }
+
+        function updateDownloadProgressUI(progress) {
+            const messageEl = document.getElementById('download-progress-message');
+            const etaEl = document.getElementById('download-progress-eta');
+            const barFill = document.querySelector('.download-progress-bar-fill');
+            if (progress && typeof progress.percent === 'number' && barFill) {
+                barFill.style.width = `${Math.max(0, Math.min(100, progress.percent))}%`;
+            }
+            if (messageEl) {
+                messageEl.textContent = progress && progress.message ? progress.message : 'Zpracovávám export…';
+            }
+            if (etaEl) {
+                if (progress && typeof progress.eta_seconds === 'number') {
+                    const seconds = Math.max(0, Math.round(progress.eta_seconds));
+                    const minutes = Math.floor(seconds / 60);
+                    const remainder = seconds % 60;
+                    etaEl.textContent = `Odhad dokončení za ${minutes ? `${minutes} min ` : ''}${remainder} s`;
+                } else {
+                    etaEl.textContent = '';
+                }
+            }
+        }
+
+        function clearDownloadPollTimer() {
+            if (downloadModalState.pollTimer) {
+                window.clearTimeout(downloadModalState.pollTimer);
+                downloadModalState.pollTimer = null;
+            }
+        }
+
+        function scheduleDownloadPoll(delay = 1500) {
+            clearDownloadPollTimer();
+            downloadModalState.pollTimer = window.setTimeout(() => pollDownloadJob(), delay);
+        }
+
+        function getAgentDownloadConfig(ctx) {
+            if (!ctx) {
+                return null;
+            }
+            const select = getContextElement(ctx, 'selectId');
+            const name = select && select.value ? select.value : '';
+            if (!name) {
+                return null;
+            }
+            let draft = ctx.currentAgentDraft ? deepCloneAgent(ctx.currentAgentDraft) : null;
+            if (!draft && ctx.agentsCache && ctx.agentsCache[name]) {
+                draft = deepCloneAgent(ctx.agentsCache[name]);
+            }
+            if (!draft) {
+                return null;
+            }
+            ensureAgentDraftStructure(draft);
+            ensureAgentDraftModelSettings(draft, draft.model || DEFAULT_AGENT_MODEL);
+            const snapshot = buildAgentSavePayload(ctx, draft);
+            const modelId = snapshot.model || draft.model || DEFAULT_AGENT_MODEL;
+            const effective = getEffectiveModelSettings(draft, modelId) || {};
+            return {
+                name,
+                snapshot,
+                model: modelId,
+                temperature: effective.temperature,
+                top_p: effective.top_p,
+                reasoning_effort: effective.reasoning_effort,
+                response_format: effective.response_format,
+                manual: Boolean(draft.manual),
+            };
+        }
+
+        function buildAgentDownloadPayload(ctx) {
+            const config = getAgentDownloadConfig(ctx);
+            if (!config) {
+                return {};
+            }
+            const payload = {
+                name: config.name,
+                snapshot: config.snapshot,
+                model: config.model,
+            };
+            if (typeof config.temperature === 'number') payload.temperature = config.temperature;
+            if (typeof config.top_p === 'number') payload.top_p = config.top_p;
+            if (typeof config.reasoning_effort === 'string' && config.reasoning_effort) payload.reasoning_effort = config.reasoning_effort;
+            if (config.response_format) payload.response_format = config.response_format;
+            if (config.manual) payload.manual = true;
+            return payload;
+        }
+
+        function buildJoinerDownloadPayload() {
+            const payload = buildAgentDownloadPayload(agentContexts.joiners);
+            const disableJoiner = document.getElementById('download-joiner-disable');
+            payload.disabled = Boolean(disableJoiner && disableJoiner.checked);
+            return payload;
+        }
+
+        function buildExportPagesPayload() {
+            if (!Array.isArray(bookPages)) {
+                return [];
+            }
+            return bookPages.map((page) => {
+                const normalized = Object.assign({}, page || {});
+                if (page && page.uuid && pageCache.has(page.uuid)) {
+                    const cacheEntry = pageCache.get(page.uuid);
+                    const payload = cacheEntry && cacheEntry.payload ? cacheEntry.payload : null;
+                    if (payload && typeof payload.python === 'string' && payload.python.trim().length) {
+                        normalized.cachedPython = payload.python;
+                    }
+                }
+                return normalized;
+            });
+        }
+
+        function prepareDownloadRequestPayload() {
+            if (!downloadModalState.source || !currentBook) {
+                return null;
+            }
+            const formatSelect = document.getElementById('download-format');
+            const rangeMode = getSelectedDownloadRange();
+            const customInput = document.getElementById('download-range-custom');
+            const rangeValue = rangeMode === 'custom' && customInput ? customInput.value.trim() : null;
+            const stripSmall = document.getElementById('download-strip-small');
+            const stripNote = document.getElementById('download-strip-note');
+            const apiBase = (currentLibrary && currentLibrary.api_base)
+                || (currentBook.library && currentBook.library.api_base)
+                || '';
+            return {
+                source: downloadModalState.source,
+                format: formatSelect ? formatSelect.value : 'html',
+                rangeMode,
+                rangeValue,
+                bookUuid: currentBook.uuid,
+                bookTitle: currentBook.title || '',
+                currentPageUuid: currentPage && currentPage.uuid ? currentPage.uuid : '',
+                apiBase,
+                pages: buildExportPagesPayload(),
+                joiner: buildJoinerDownloadPayload(),
+                llmAgent: buildAgentDownloadPayload(agentContexts.correctors),
+                ocrAgent: buildAgentDownloadPayload(agentContexts.readers),
+                languageHint: DEFAULT_LANGUAGE_HINT,
+                stripSmallText: Boolean(stripSmall && stripSmall.checked),
+                stripNoteText: Boolean(stripNote && stripNote.checked),
+            };
+        }
+
+        async function startDownloadJob() {
+            const confirmBtn = document.getElementById('download-modal-confirm');
+            if (confirmBtn) {
+                confirmBtn.disabled = true;
+            }
+            const requestPayload = prepareDownloadRequestPayload();
+            if (!requestPayload) {
+                alert('Chybí data pro export.');
+                if (confirmBtn) {
+                    confirmBtn.disabled = false;
+                }
+                return;
+            }
+            setDownloadModalMode('progress');
+            resetDownloadProgressUI();
+            downloadModalState.jobId = null;
+            downloadModalState.downloadUrl = null;
+            downloadModalState.filename = null;
+            clearDownloadPollTimer();
+            try {
+                const response = await fetch('/exports', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(requestPayload),
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || !data || !data.job_id) {
+                    const message = data && data.error ? data.error : response.statusText || 'Nepodařilo se vytvořit export.';
+                    throw new Error(message);
+                }
+                handleDownloadJobUpdate(data);
+            } catch (error) {
+                renderDownloadError(error ? error.message : 'Neznámá chyba.');
+                setDownloadModalMode('form');
+                if (confirmBtn) {
+                    confirmBtn.disabled = false;
+                }
+            }
+        }
+
+        function renderDownloadError(message) {
+            const etaEl = document.getElementById('download-progress-eta');
+            if (etaEl) {
+                etaEl.textContent = '';
+            }
+            showDownloadError(message || 'Export se nezdařil.');
+        }
+
+        function showDownloadError(message) {
+            const dialog = document.getElementById('download-error-dialog');
+            const textEl = document.getElementById('download-error-message');
+            if (!dialog || !textEl) {
+                return;
+            }
+            textEl.textContent = message || 'Došlo k chybě.';
+            dialog.classList.add('is-visible');
+            dialog.setAttribute('aria-hidden', 'false');
+        }
+
+        function hideDownloadError(options = {}) {
+            const dialog = document.getElementById('download-error-dialog');
+            if (!dialog) {
+                return;
+            }
+            dialog.classList.remove('is-visible');
+            dialog.setAttribute('aria-hidden', 'true');
+            if (!(options && options.skipReset)) {
+                setDownloadModalMode('form');
+                updateDownloadConfirmState();
+            }
+        }
+
+        function handleDownloadJobUpdate(data) {
+            downloadModalState.jobId = data.job_id;
+            downloadModalState.downloadUrl = data.download_url || null;
+            downloadModalState.filename = data.filename || null;
+            updateDownloadProgressUI(data.progress || {});
+            const state = data.state;
+            if (state === 'completed') {
+                finalizeDownloadJob();
+                return;
+            }
+            if (state === 'failed' || state === 'aborted') {
+                const message = data.error || (state === 'aborted' ? 'Stažení bylo zrušeno.' : 'Export se nezdařil.');
+                renderDownloadError(message);
+                downloadModalState.jobId = null;
+                // ponecháme progress zobrazený kvůli chybové zprávě
+                setDownloadModalMode('progress');
+                return;
+            }
+            scheduleDownloadPoll();
+        }
+
+        function finalizeDownloadJob() {
+            const url = downloadModalState.downloadUrl || (downloadModalState.jobId ? `/exports/${downloadModalState.jobId}/download` : null);
+            const filename = downloadModalState.filename || '';
+            if (url) {
+                triggerFileDownload(url, filename);
+            }
+            downloadModalState.jobId = null;
+            clearDownloadPollTimer();
+            window.setTimeout(() => {
+                setDownloadModalMode('form');
+                closeDownloadModal();
+            }, 600);
+        }
+
+        async function pollDownloadJob() {
+            const jobId = downloadModalState.jobId;
+            if (!jobId) {
+                clearDownloadPollTimer();
+                return;
+            }
+            try {
+                const response = await fetch(`/exports/${jobId}`, { cache: 'no-store' });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || !data || !data.job_id) {
+                    throw new Error(data && data.error ? data.error : response.statusText || 'Nepodařilo se zjistit stav exportu.');
+                }
+                handleDownloadJobUpdate(data);
+            } catch (error) {
+                renderDownloadError(error ? error.message : 'Chyba dotazu na stav exportu.');
+                scheduleDownloadPoll(2500);
+            }
+        }
+
+        async function abortDownloadJob(options = {}) {
+            clearDownloadPollTimer();
+            const jobId = downloadModalState.jobId;
+            if (!jobId) {
+                return;
+            }
+            downloadModalState.jobId = null;
+            try {
+                await fetch(`/exports/${jobId}`, { method: 'DELETE' });
+            } catch (error) {
+                if (!(options && options.silent)) {
+                    alert('Stažení se nepodařilo zrušit.');
+                }
+            }
+            resetDownloadProgressUI('Stažení bylo zrušeno.');
+        }
+
+        function triggerFileDownload(url, filename) {
+            try {
+                const link = document.createElement('a');
+                link.href = url;
+                if (filename) {
+                    link.download = filename;
+                }
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            } catch (error) {
+                console.warn('Nepodařilo se stáhnout soubor automaticky:', error);
+                window.open(url, '_blank');
             }
         }
 
@@ -6852,6 +7471,71 @@
             downloadSelect.value = sourceSelect.value || '';
         }
 
+        function syncDownloadAgentOptions(source) {
+            const isLlm = source === 'llm';
+            const downloadSelect = document.getElementById(isLlm ? 'download-agent-select-llm' : 'download-agent-select-ocr');
+            if (!downloadSelect) {
+                return;
+            }
+            const ctx = isLlm ? agentContexts.correctors : agentContexts.readers;
+            const sourceSelect = ctx ? getContextElement(ctx, 'selectId') : null;
+            downloadSelect.innerHTML = '';
+            if (!sourceSelect || !sourceSelect.options.length) {
+                const placeholder = document.createElement('option');
+                placeholder.value = '';
+                placeholder.textContent = 'Žádní dostupní agenti';
+                downloadSelect.appendChild(placeholder);
+                downloadSelect.disabled = true;
+                return;
+            }
+            downloadSelect.disabled = false;
+            Array.from(sourceSelect.options).forEach((option) => {
+                downloadSelect.appendChild(option.cloneNode(true));
+            });
+            downloadSelect.value = sourceSelect.value || '';
+        }
+
+        function updateDownloadAgentGroups(source) {
+            const llmGroup = document.getElementById('download-agent-group-llm');
+            const ocrGroup = document.getElementById('download-agent-group-ocr');
+            if (llmGroup) {
+                llmGroup.style.display = source === 'llm' ? 'flex' : 'none';
+            }
+            if (ocrGroup) {
+                ocrGroup.style.display = source === 'ocr' ? 'flex' : 'none';
+            }
+            if (source === 'llm') {
+                syncDownloadAgentOptions('llm');
+            } else if (source === 'ocr') {
+                syncDownloadAgentOptions('ocr');
+            }
+        }
+
+        async function applyDownloadAgentSelection(source) {
+            const isLlm = source === 'llm';
+            const modalSelect = document.getElementById(isLlm ? 'download-agent-select-llm' : 'download-agent-select-ocr');
+            if (!modalSelect) {
+                return;
+            }
+            const ctx = isLlm ? agentContexts.correctors : agentContexts.readers;
+            if (!ctx) {
+                return;
+            }
+            const targetSelect = getContextElement(ctx, 'selectId');
+            if (!targetSelect) {
+                return;
+            }
+            if (targetSelect.value === modalSelect.value) {
+                return;
+            }
+            targetSelect.value = modalSelect.value || '';
+            try {
+                await updateAgentUIFromSelection(ctx);
+            } catch (error) {
+                console.warn('Nepodařilo se načíst agenta pro stažení:', error);
+            }
+        }
+
         function openDownloadModal(source) {
             const backdrop = document.getElementById('download-modal-backdrop');
             const title = document.getElementById('download-modal-title');
@@ -6863,11 +7547,24 @@
             }
             downloadModalState.source = source;
             title.textContent = `Stáhnout – ${getDownloadSourceLabel(source)}`;
-            summary.textContent = 'Zvolte formát, rozsah a napojování. Funkcionalita stažení bude doplněna.';
+            downloadModalState.jobId = null;
+            downloadModalState.downloadUrl = null;
+            downloadModalState.filename = null;
+            clearDownloadPollTimer();
+            setDownloadModalMode('form');
+            resetDownloadProgressUI();
             syncDownloadJoinerOptions();
+            updateDownloadAgentGroups(source);
+            const rangeMode = getSelectedDownloadRange();
             if (customInput) {
-                customInput.value = '';
-                customInput.disabled = true;
+                const isCustom = rangeMode === 'custom';
+                if (!isCustom) {
+                    customInput.value = '';
+                }
+                customInput.disabled = !isCustom;
+                if (isCustom) {
+                    customInput.focus();
+                }
             }
             if (disableJoiner) {
                 disableJoiner.checked = false;
@@ -6882,6 +7579,8 @@
             }
             backdrop.classList.add('is-visible');
             backdrop.setAttribute('aria-hidden', 'false');
+            updateDownloadSummary();
+            updateDownloadConfirmState();
         }
 
         function closeDownloadModal() {
@@ -6889,6 +7588,10 @@
             if (!backdrop) {
                 return;
             }
+            hideDownloadError({ skipReset: true });
+            abortDownloadJob({ silent: true }).catch(() => {});
+            clearDownloadPollTimer();
+            downloadModalState.jobId = null;
             backdrop.classList.remove('is-visible');
             backdrop.setAttribute('aria-hidden', 'true');
             downloadModalState.source = null;
@@ -6959,19 +7662,7 @@
                 }
             });
 
-            const shouldScroll = uuid && uuid !== lastActiveThumbnailUuid && !thumbnailDrawerCollapsed;
-            if (activeButton && shouldScroll) {
-                const scrollContainer = document.getElementById('thumbnail-scroll');
-                if (scrollContainer) {
-                    const containerRect = scrollContainer.getBoundingClientRect();
-                    const buttonRect = activeButton.getBoundingClientRect();
-                    if (buttonRect.top < containerRect.top || buttonRect.bottom > containerRect.bottom) {
-                        activeButton.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
-                    }
-                } else {
-                    activeButton.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
-                }
-            }
+            // Automatické scrollování je vypnuté, aby se stránka při klikání neposouvala.
 
             lastActiveThumbnailUuid = uuid || null;
         }
@@ -7376,6 +8067,7 @@
                 typescript: "",
                 baseKey: "",
             };
+            algorithmicReadyPromise = null;
             hideAlgorithmicResults();
             setAlgorithmicControlsDisabled(false);
             if (shouldAutoRunAlgorithmic()) {
@@ -7404,6 +8096,7 @@
             }
             renderComparisonResults();
             updateDiffToggleState();
+            scheduleThumbnailDrawerHeightSync();
         }
 
         function ensureAlgorithmicResultForAction(options = {}) {
@@ -8908,12 +9601,12 @@
         });
     </script>
     <div id="download-modal-backdrop" class="download-modal-backdrop" aria-hidden="true">
-        <div class="download-modal" role="dialog" aria-modal="true" aria-labelledby="download-modal-title">
+        <div class="download-modal" role="dialog" aria-modal="true" aria-labelledby="download-modal-title" data-mode="form">
             <div class="download-modal-header">
                 <h3 id="download-modal-title">Stáhnout výsledky</h3>
                 <button id="download-modal-close" type="button" class="section-download-button" aria-label="Zavřít nastavení stažení">✕</button>
             </div>
-            <div class="download-modal-body">
+            <div class="download-modal-body" id="download-modal-form">
                 <div class="download-option-group">
                     <label for="download-format">Formát souboru</label>
                     <select id="download-format">
@@ -8939,14 +9632,52 @@
                     </label>
                     <select id="download-joiner-select"></select>
                 </div>
+                <div class="download-option-group" id="download-agent-group-llm" style="display:none;">
+                    <label for="download-agent-select-llm">Agent pro LLM korekci</label>
+                    <select id="download-agent-select-llm"></select>
+                </div>
+                <div class="download-option-group" id="download-agent-group-ocr" style="display:none;">
+                    <label for="download-agent-select-ocr">Agent pro OCR čtení</label>
+                    <select id="download-agent-select-ocr"></select>
+                </div>
+                <div class="download-option-group">
+                    <label>Možnosti obsahu</label>
+                    <label style="display:flex;align-items:center;gap:6px;">
+                        <input type="checkbox" id="download-strip-small" checked>
+                        <span>Odebrat malé texty (&lt;small&gt;)</span>
+                    </label>
+                    <label style="display:flex;align-items:center;gap:6px;">
+                        <input type="checkbox" id="download-strip-note" checked>
+                        <span>Odebrat poznámky (&lt;note&gt;)</span>
+                    </label>
+                </div>
                 <div class="download-option-group">
                     <label>Souhrn exportu</label>
                     <div id="download-summary" class="muted">Vyberte formát a rozsah, poté potvrďte stažení.</div>
                 </div>
             </div>
-            <div class="download-modal-footer">
+            <div id="download-modal-progress" class="download-modal-progress" aria-live="polite" aria-hidden="true">
+                <p id="download-progress-message" class="download-progress-message">Připravuji export…</p>
+                <div class="download-progress-bar">
+                    <div class="download-progress-bar-fill" style="width:0%;"></div>
+                </div>
+                <p id="download-progress-eta" class="muted"></p>
+                <div class="download-progress-actions">
+                    <button type="button" id="download-modal-abort">Zrušit stažení</button>
+                </div>
+            </div>
+            <div class="download-modal-footer" id="download-modal-footer">
                 <button type="button" id="download-modal-cancel">Zrušit</button>
                 <button type="button" id="download-modal-confirm" disabled>Stáhnout</button>
+            </div>
+        </div>
+    </div>
+    <div id="download-error-dialog" class="download-error-dialog" aria-hidden="true">
+        <div class="download-error-content" role="alertdialog" aria-labelledby="download-error-title" aria-describedby="download-error-message">
+            <h4 id="download-error-title">Stažení se nezdařilo</h4>
+            <div id="download-error-message" class="download-error-message">Došlo k chybě.</div>
+            <div class="download-error-actions">
+                <button type="button" id="download-error-close">Zavřít</button>
             </div>
         </div>
     </div>

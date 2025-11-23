@@ -1044,6 +1044,20 @@ def _log_diff_warning(payload: Dict[str, Any], message: str) -> None:
     print(f"[AgentDiff] {message} ({context})")
 
 
+def _log_raw_response(text: Any) -> None:
+    """Debug helper to show raw LLM response exactly as dorazila."""
+    try:
+        preview = text if isinstance(text, str) else json.dumps(text, ensure_ascii=False, indent=2)
+    except Exception:
+        preview = str(text)
+    print("===[RawResponse]===")
+    try:
+        print(preview)
+    except Exception:
+        print("[RawResponse] Nelze vypsat obsah.")
+    print("===[RawResponse End]===")
+
+
 def _apply_diff_to_document(
     document: Dict[str, Any],
     diff_payload: Dict[str, Any],
@@ -1436,6 +1450,7 @@ def run_agent(agent: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
         print("=== [AgentDebug] End Response ===\n")
 
         text = _extract_output_text(response)
+        raw_model_output = text
         stop_reason = _extract_stop_reason(response_dict)
         usage = _extract_usage(response_dict)
     else:
@@ -1463,6 +1478,7 @@ def run_agent(agent: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
                 print("[AgentDebug] Nelze zobrazit odpověď.")
         print("=== [AgentDebug] End Chat Response ===\n")
         text = _extract_chat_output_text(response)
+        raw_model_output = text
         stop_reason = None
         usage = response_dict.get("usage") if isinstance(response_dict, dict) else None
     diff_applied = False
@@ -1470,6 +1486,7 @@ def run_agent(agent: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
     output_document: Optional[Dict[str, Any]] = None
 
     parsed_output = _safe_json_loads(text)
+    _log_raw_response(raw_model_output)
     try:
         print("[LLMDebug] parsed text preview:\n", repr(str(text)[:1000]))
         print("[LLMDebug] parsed_output type:", type(parsed_output))
@@ -1496,6 +1513,13 @@ def run_agent(agent: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
                 applied_document = _apply_diff_to_document(document_payload, parsed_output)
             except AgentDiffApplicationError as exc:
                 _log_diff_warning(document_payload, f"Diff aplikace selhala: {exc}")
+                if parsed_output:
+                    try:
+                        print("=== [AgentDiff][RawResponse] ===")
+                        print(json.dumps(parsed_output, ensure_ascii=False, indent=2))
+                        print("=== [AgentDiff][RawResponse End] ===")
+                    except Exception:
+                        print("[AgentDiff] Nepodařilo se vypsat raw response.")
                 text = json.dumps(document_payload, ensure_ascii=False, indent=2)
             else:
                 text = json.dumps(applied_document, ensure_ascii=False, indent=2)

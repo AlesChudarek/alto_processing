@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, Optional
 
 import requests
 from fastapi import APIRouter, Body, HTTPException, Query, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel, Field
 from xml.dom import minidom
 
 from ..core.agent_runner import AgentRunnerError, run_agent as run_agent_via_responses
@@ -22,12 +24,64 @@ from ..core.comparison_legacy import (
     write_agent_file,
 )
 from ..core.main_processor import AltoProcessor, DEFAULT_API_BASES
+from ..core.export_jobs import ExportJobParams, ExportJobState, get_export_manager
+from ..services.export_builder import run_export_job
 
 router = APIRouter()
 
 
 def _json_error(message: str, status_code: int = 400) -> JSONResponse:
     return JSONResponse(status_code=status_code, content={"error": message})
+
+
+class ExportRequest(BaseModel):
+    source: str = Field(..., description="algorithmic|llm|ocr")
+    export_format: str = Field(..., alias="format", description="html|txt|md")
+    range_mode: str = Field(..., alias="rangeMode")
+    range_value: Optional[str] = Field(None, alias="rangeValue")
+    book_uuid: str = Field(..., alias="bookUuid")
+    book_title: Optional[str] = Field(None, alias="bookTitle")
+    current_page_uuid: str = Field(..., alias="currentPageUuid")
+    api_base: Optional[str] = Field(None, alias="apiBase")
+    pages: list[dict[str, Any]]
+    joiner: dict[str, Any] = Field(default_factory=dict)
+    llm_agent: dict[str, Any] = Field(default_factory=dict, alias="llmAgent")
+    ocr_agent: dict[str, Any] = Field(default_factory=dict, alias="ocrAgent")
+    language_hint: str = Field("cs", alias="languageHint")
+    strip_small_text: bool = Field(True, alias="stripSmallText")
+    strip_note_text: bool = Field(True, alias="stripNoteText")
+
+
+def _build_export_params(request: ExportRequest) -> ExportJobParams:
+    allowed_sources = {"algorithmic", "llm", "ocr"}
+    if request.source not in allowed_sources:
+        raise HTTPException(status_code=400, detail="Nepodporovaný typ exportu.")
+    allowed_formats = {"html", "txt", "md"}
+    if request.export_format not in allowed_formats:
+        raise HTTPException(status_code=400, detail="Nepodporovaný formát exportu.")
+    allowed_modes = {"all", "current", "custom"}
+    if request.range_mode not in allowed_modes:
+        raise HTTPException(status_code=400, detail="Nepodporovaný rozsah stránek.")
+    if not request.pages:
+        raise HTTPException(status_code=400, detail="Export neobsahuje žádné stránky.")
+    params = ExportJobParams(
+        source=request.source,
+        export_format=request.export_format,
+        range_mode=request.range_mode,
+        range_value=request.range_value,
+        book_uuid=request.book_uuid,
+        book_title=request.book_title,
+        current_page_uuid=request.current_page_uuid,
+        pages=request.pages,
+        api_base=request.api_base,
+        joiner=request.joiner,
+        llm_agent=request.llm_agent,
+        ocr_agent=request.ocr_agent,
+        language_hint=request.language_hint,
+        omit_small_text=request.strip_small_text,
+        omit_note_text=request.strip_note_text,
+    )
+    return params
 
 
 @router.get("/process")
@@ -237,6 +291,44 @@ def save_agent(payload: Dict[str, Any] = Body(...)) -> Response:
         "agent": data,
     }
     return JSONResponse(body)
+
+
+@router.post("/exports")
+def create_export_job(payload: ExportRequest) -> JSONResponse:
+    params = _build_export_params(payload)
+    manager = get_export_manager()
+    job = manager.create_job(params, run_export_job)
+    return JSONResponse(job.to_dict())
+
+
+@router.get("/exports/{job_id}")
+def get_export_job(job_id: str) -> JSONResponse:
+    manager = get_export_manager()
+    job = manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Export nenalezen.")
+    return JSONResponse(job.to_dict())
+
+
+@router.delete("/exports/{job_id}")
+def abort_export_job(job_id: str) -> JSONResponse:
+    manager = get_export_manager()
+    job = manager.abort_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Export nenalezen.")
+    return JSONResponse(job.to_dict())
+
+
+@router.get("/exports/{job_id}/download")
+def download_export_job(job_id: str) -> Response:
+    manager = get_export_manager()
+    job = manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Export nenalezen.")
+    if job.state != ExportJobState.completed or not job.result_path or not os.path.exists(job.result_path):
+        raise HTTPException(status_code=400, detail="Výsledek ještě není k dispozici.")
+    filename = job.result_filename or f"export-{job.id}.{job.params.export_format}"
+    return FileResponse(job.result_path, media_type="application/octet-stream", filename=filename)
 
 
 @router.post("/agents/delete")

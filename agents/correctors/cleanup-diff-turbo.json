@@ -56,53 +56,6 @@
       "openai/gpt-4o": {
         "temperature": 0.0,
         "top_p": 0.1
-      },
-      "openai/o3-mini": {
-        "reasoning_effort": "medium"
-      },
-      "meituan/longcat-flash-chat:free": {
-        "temperature": 0.2,
-        "top_p": 1.0
-      },
-      "qwen/qwen3-8b": {
-        "temperature": 0.2,
-        "top_p": 1.0,
-        "response_format": {
-        "type": "json_schema",
-        "json_schema": {
-          "name": "text_block_corrector",
-          "strict": true,
-            "schema": {
-              "type": "object",
-              "properties": {
-                "changes": {
-                  "type": "array",
-                  "items": {
-                    "type": "object",
-                    "properties": {
-                      "id": {
-                        "type": "string",
-                        "pattern": "^b\\d+$"
-                      },
-                      "text": {
-                        "type": "string"
-                      }
-                    },
-                    "required": [
-                      "id",
-                      "text"
-                    ],
-                    "additionalProperties": false
-                  }
-                }
-              },
-              "required": [
-                "changes"
-              ],
-              "additionalProperties": false
-            }
-          }
-        }
       }
     }
   },

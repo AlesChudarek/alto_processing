@@ -436,7 +436,7 @@ def _extract_chat_output_text(response: Any) -> str:
         choice = response.choices[0]
         try:
             content = getattr(choice.message, "content", None)
-            print("[LLMDebug][_extract_chat_output_text] content (attr) type:", type(content), "preview:", repr(str(content)[:500]))
+            print("[LLMDebug][_extract_chat_output_text] content (attr) type:", type(content), "preview:", repr(str(content)))
         except Exception as e:  # pragma: no cover - defensive
             print("[LLMDebug][_extract_chat_output_text] error accessing choice.message.content:", e)
             content = None
@@ -458,7 +458,7 @@ def _extract_chat_output_text(response: Any) -> str:
                 print("[LLMDebug][_extract_chat_output_text] first choice.message (dict) keys:", list(msg.keys()) if isinstance(msg, dict) else type(msg))
                 if isinstance(msg, dict):
                     content = msg.get("content")
-                    print("[LLMDebug][_extract_chat_output_text] content (dict) preview:", repr(str(content)[:500]))
+                    print("[LLMDebug][_extract_chat_output_text] content (dict) preview:", repr(str(content)))
     # Normalize content
     if isinstance(content, str):
         return content
@@ -1488,7 +1488,7 @@ def run_agent(agent: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
     parsed_output = _safe_json_loads(text)
     _log_raw_response(raw_model_output)
     try:
-        print("[LLMDebug] parsed text preview:\n", repr(str(text)[:1000]))
+        print("[LLMDebug] parsed text preview:\n", repr(str(text)))
         print("[LLMDebug] parsed_output type:", type(parsed_output))
     except Exception:
         pass

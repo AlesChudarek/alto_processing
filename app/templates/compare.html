@@ -1840,6 +1840,7 @@
         let previewDrawerCollapsed = false;
         let previewDrawerPositionFrame = null;
         let thumbnailObserver = null;
+        let thumbnailDrawerResizeObserver = null;
         const DIFF_MODES = {
             NONE: 'none',
             WORD: 'word',
@@ -7667,6 +7668,23 @@
             lastActiveThumbnailUuid = uuid || null;
         }
 
+        function ensureThumbnailDrawerResizeObserver() {
+            if (thumbnailDrawerResizeObserver || typeof ResizeObserver !== 'function') {
+                return;
+            }
+            const container = document.querySelector('.page-shell .container');
+            if (!container) {
+                return;
+            }
+            thumbnailDrawerResizeObserver = new ResizeObserver((entries) => {
+                if (!entries || !entries.length) {
+                    return;
+                }
+                scheduleThumbnailDrawerHeightSync();
+            });
+            thumbnailDrawerResizeObserver.observe(container);
+        }
+
         function scheduleThumbnailDrawerHeightSync(immediate = false) {
             if (immediate) {
                 thumbnailHeightSyncPending = false;
@@ -9501,6 +9519,7 @@
             initializeComparison2UI();
             initializeDownloadUI();
             updateDrawerTogglePositions();
+            ensureThumbnailDrawerResizeObserver();
 
             const previewContainer = document.getElementById("page-preview");
             const largeBox = document.getElementById("preview-large");

@@ -34,6 +34,14 @@ Tento repozitář obsahuje FastAPI verzi porovnávacího webu. UI je stejné jak
 
 Po spuštění otevřete http://localhost:8080. Endpoint `/healthz` vrací JSON `{"status": "ok", "environment": "<hodnota ALTO_WEB_ENVIRONMENT>"}`.
 
+## Struktura projektu
+
+- `app/` – FastAPI aplikace (`app/main.py`), šablony UI (`app/templates/compare.html`), aplikační logika v `app/core/`.
+- `static/` – statická aktiva UI.
+- `agents/`, `config/` – runtime data ukládaná při běhu; musí být uchovaná přes volume.
+- `dist/` – výsledný JS bundle (`run_original.js`) generovaný TypeScriptem.
+- `start.sh` – wrapper nad uvicornem, respektuje proměnné `HOST`, `PORT`, `WEB_CONCURRENCY`, `LOG_LEVEL`.
+
 ## Docker image
 
 `Dockerfile` v kořeni:
@@ -62,6 +70,18 @@ docker compose up --build -d
 ```
 
 Služba mapuje na hostiteli složky `./agents` a `./config`, aby uložené agenty a konfigurace zůstaly zachované i po restartu kontejneru. Pokud používáte čisté `docker run`, přidejte `-v $(pwd)/agents:/app/agents -v $(pwd)/config:/app/config`, jinak se úpravy agentů ztratí s kontejnerem. Port 8080 je zveřejněný navenek (`8080:8080`).
+
+### Nasazení s Nginx reverse proxy
+
+Aktuální Compose soubor vystavuje FastAPI kontejner přímo na port 80 (host) → 8080 (container). Pro produkční HTTPS provoz je doporučené přidat vstupní Nginx vrstvu:
+
+1. **Proxy kontejner** – doplňte Compose službu `nginx` (nebo Traefik/Caddy). Naslouchá na hostitelských portech 80 a 443, sdílí síť s `alto-web` a předává requesty na `http://alto-web:8080`.
+2. **TLS certifikáty** – používejte Let’s Encrypt (HTTP-01 challenge na portu 80). Certy ukládejte do bind mountu (např. `./certs:/etc/letsencrypt`). Nginx může používat `certbot` kontejner, případně cron na hostu.
+3. **DNS** – doména `alto-processing.trinera.cloud` už míří na server. Pokud přibudou subdomény (např. `api.alto-processing...`), vytvořte odpovídající DNS záznamy před generováním certifikátů.
+4. **Konfigurace** – doporučené je vytvořit složku `deploy/` s `nginx.conf` a případně `docker-compose.override.yml`, kde budou definované proxy služby, volume s certy a mapování portů. Aplikace nevyžaduje žádné změny kromě toho, že Nginx by měl posílat hlavičky `Host`, `X-Forwarded-For` a `X-Forwarded-Proto`. FastAPI zvládne obsluhovat více hostnames – pokud se rozhodnete oddělit například API na subdoménu (`api.alto-processing...`), stačí v proxy přidat další `server` blok s `proxy_pass` na stejný backend.
+5. **Testování** – po spuštění proxy ověřte `https://alto-processing.trinera.cloud/healthz`, UI na `/` a REST endpointy. Jakmile HTTPS funguje, zapněte redirect z HTTP na HTTPS (301) a případně HSTS.
+
+Dočasně může HTTP a HTTPS běžet souběžně (např. HTTP jen pro Let’s Encrypt challenge). Jakmile je reverse proxy stabilní, není nutné vystavovat port 8080/80 přímo z FastAPI kontejneru.
 
 ## Uživatelské API / UI
 

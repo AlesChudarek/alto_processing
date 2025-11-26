@@ -115,6 +115,16 @@
             gap: 12px;
             max-height: calc(100vh - 80px);
             overflow: auto;
+            cursor: default;
+            transition: box-shadow 0.2s ease;
+        }
+        #preview-drawer .preview-panel.is-clickable {
+            cursor: zoom-in;
+            box-shadow: 0 10px 28px rgba(15, 23, 42, 0.15);
+        }
+        #preview-drawer .preview-panel.is-clickable:focus-visible {
+            outline: 2px solid #1f78ff;
+            outline-offset: 4px;
         }
         .preview-drawer-image {
             width: 100%;
@@ -819,6 +829,47 @@
             gap: 16px;
             position: relative;
         }
+        .page-info-title-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-bottom: 8px;
+        }
+        .page-info-title-row h2 {
+            margin: 0;
+        }
+        .page-alto-btn {
+            display: flex;
+            align-items: flex-start;
+            justify-content: flex-end;
+            flex: 0 0 auto;
+            min-width: 120px;
+        }
+        .page-info-alto-trigger {
+            display: none;
+            color: #007bff;
+            cursor: pointer;
+            text-decoration: underline;
+            white-space: nowrap;
+        }
+        .page-info-alto-trigger.is-visible {
+            display: inline-flex;
+            padding-top: 4px;
+        }
+        .page-info-alto-trigger[aria-hidden="true"] {
+            pointer-events: none;
+        }
+        .page-info-collapsed-bar {
+            display: none;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        #page-info.section-collapsed .page-info-collapsed-bar {
+            display: flex;
+        }
         .page-details {
             flex: 1 1 auto;
             min-width: 0;
@@ -1395,6 +1446,25 @@
             text-decoration: none;
             cursor: pointer;
         }
+        .preview-image-modal .modal-content {
+            width: min(var(--primary-max-width), calc(100vw - 48px));
+            max-width: min(var(--primary-max-width), calc(100vw - 48px));
+            max-height: calc(100vh - 48px);
+            resize: both;
+            overflow: auto;
+        }
+        .preview-image-modal-body {
+            padding: 12px 16px 20px 16px;
+            background: #f8fafc;
+        }
+        .preview-image-modal-body img {
+            width: 100%;
+            height: auto;
+            display: block;
+            border-radius: 10px;
+            box-shadow: 0 8px 28px rgba(15, 23, 42, 0.25);
+            background: #000;
+        }
     </style>
 </head>
 <body>
@@ -1461,21 +1531,19 @@
                 </div>
 
                 <div id="page-info" class="info-section" style="display: none;">
-                    <div class="section-header">
-                        <div class="section-title">
-                            <h2>Informace o straně</h2>
-                            <button class="section-visibility-toggle" type="button" data-section-toggle="page-info" data-section-label="Informace o straně" aria-pressed="false" aria-label="Skrýt sekci Informace o straně" title="Skrýt sekci Informace o straně"></button>
-                        </div>
-                    </div>
                     <div class="page-info-layout">
                         <div class="page-details">
+                            <div class="page-info-title-row">
+                                <h2>Informace o straně</h2>
+                                <button class="section-visibility-toggle" type="button" data-section-toggle="page-info" data-section-label="Informace o straně" aria-pressed="false" aria-label="Skrýt sekci Informace o straně" title="Skrýt sekci Informace o straně"></button>
+                            </div>
                             <p id="page-summary" class="muted"></p>
                             <p id="page-side" class="muted"></p>
                             <p id="page-uuid" class="muted"></p>
                             <p id="page-handle" class="muted"></p>
                         </div>
                         <div class="page-alto-btn">
-                            <span id="alto-preview-btn" style="display: none;">Zobrazit ALTO</span>
+                            <span id="alto-preview-btn" class="page-info-alto-trigger" role="button" tabindex="-1" aria-hidden="true">Zobrazit ALTO</span>
                         </div>
                         <div id="page-preview" class="page-preview" tabindex="0">
                             <div id="preview-status" class="muted"></div>
@@ -1484,6 +1552,13 @@
                         <div id="preview-large" class="preview-large" aria-hidden="true">
                             <img id="preview-image-large" alt="Náhled stránky ve větší velikosti">
                         </div>
+                    </div>
+                    <div class="section-header page-info-collapsed-bar">
+                        <div class="section-title">
+                            <h2>Informace o straně</h2>
+                            <button class="section-visibility-toggle" type="button" data-section-toggle="page-info" data-section-label="Informace o straně" aria-pressed="false" aria-label="Skrýt sekci Informace o straně" title="Skrýt sekci Informace o straně"></button>
+                        </div>
+                        <span id="alto-preview-btn-collapsed" class="page-info-alto-trigger" role="button" tabindex="-1" aria-hidden="true">Zobrazit ALTO</span>
                     </div>
                 </div>
 
@@ -1881,7 +1956,7 @@
         <div class="drawer-area drawer-area-right">
             <aside id="preview-drawer" class="preview-drawer" aria-label="Pevný náhled aktuální stránky" aria-hidden="false">
                 <div class="drawer-panel">
-                    <div id="preview-drawer-panel" class="thumbnail-panel preview-panel">
+                    <div id="preview-drawer-panel" class="thumbnail-panel preview-panel" role="button" tabindex="0" aria-label="Zvětšit náhled" aria-disabled="true">
                         <div id="preview-pinned-placeholder" class="preview-drawer-empty">Náhled bude k dispozici po načtení.</div>
                         <img id="preview-pinned-image" class="preview-drawer-image" alt="Stálý náhled aktuální stránky" aria-hidden="true">
                     </div>
@@ -1896,6 +1971,7 @@
     <script type="application/json" id="default-agent-prompt-data">{{ default_agent_prompt | tojson | safe }}</script>
     <script>
         let previewObjectUrl = null;
+        let previewImageModalReturnFocus = null;
         let previewFetchToken = null;
         let previewImageUuid = null;
 
@@ -8185,10 +8261,13 @@
             }
             const shouldHide = Boolean(hidden);
             section.classList.toggle("section-collapsed", shouldHide);
-            const toggle = section.querySelector("[data-section-toggle]");
-            updateSectionToggleVisual(toggle, shouldHide);
+            const toggles = section.querySelectorAll("[data-section-toggle]");
+            toggles.forEach((toggle) => updateSectionToggleVisual(toggle, shouldHide));
             if (!options || options.persist !== false) {
                 persistSectionHiddenState(sectionId, shouldHide);
+            }
+            if (sectionId === "page-info") {
+                refreshPageInfoAltoButtons();
             }
         }
 
@@ -8337,6 +8416,88 @@
             largeBox.setAttribute("aria-hidden", isActive ? "false" : "true");
         }
 
+        function setPreviewPanelClickable(enabled) {
+            const panel = document.getElementById("preview-drawer-panel");
+            if (!panel) {
+                return;
+            }
+            const isEnabled = Boolean(enabled);
+            panel.classList.toggle("is-clickable", isEnabled);
+            panel.setAttribute("aria-disabled", isEnabled ? "false" : "true");
+            panel.tabIndex = isEnabled ? 0 : -1;
+        }
+
+        function applyAltoButtonState(button, show) {
+            if (!button) {
+                return;
+            }
+            const isVisible = Boolean(show);
+            button.classList.toggle("is-visible", isVisible);
+            button.setAttribute("aria-hidden", isVisible ? "false" : "true");
+            button.tabIndex = isVisible ? 0 : -1;
+        }
+
+        function refreshPageInfoAltoButtons() {
+            const section = document.getElementById("page-info");
+            const expandedBtn = document.getElementById("alto-preview-btn");
+            const collapsedBtn = document.getElementById("alto-preview-btn-collapsed");
+            const hasAlto = Boolean(currentAltoXml);
+            const isCollapsed = Boolean(section && section.classList.contains("section-collapsed"));
+            applyAltoButtonState(expandedBtn, hasAlto && !isCollapsed);
+            applyAltoButtonState(collapsedBtn, hasAlto && isCollapsed);
+        }
+
+        function openAltoModal() {
+            if (!currentAltoXml) {
+                return;
+            }
+            const modal = document.getElementById("alto-modal");
+            const content = document.getElementById("alto-content");
+            if (!modal || !content) {
+                return;
+            }
+            content.textContent = currentAltoXml;
+            modal.style.display = "block";
+            modal.setAttribute("aria-hidden", "false");
+            modal.focus();
+            const modalContent = modal.querySelector('.modal-content');
+            const modalHeader = modal.querySelector('.modal-header');
+            if (modalContent) {
+                modalContent.style.top = "";
+                modalContent.style.left = "";
+                modalContent.style.transform = 'translate(-50%, -50%)';
+                if (modalHeader) {
+                    makeDraggable(modalContent, modalHeader);
+                }
+            }
+        }
+
+        function setupAltoPreviewButtons() {
+            const buttons = document.querySelectorAll(".page-info-alto-trigger");
+            buttons.forEach((button) => {
+                if (!(button instanceof HTMLElement)) {
+                    return;
+                }
+                button.addEventListener("click", (event) => {
+                    event.preventDefault();
+                    openAltoModal();
+                });
+                button.addEventListener("keydown", (event) => {
+                    if (event.key === "Enter" || event.key === " " || event.key === "Spacebar") {
+                        event.preventDefault();
+                        openAltoModal();
+                    }
+                });
+            });
+            const toggles = document.querySelectorAll('#page-info [data-section-toggle="page-info"]');
+            toggles.forEach((toggle) => {
+                toggle.addEventListener("click", () => {
+                    window.requestAnimationFrame(() => refreshPageInfoAltoButtons());
+                });
+            });
+            refreshPageInfoAltoButtons();
+        }
+
         function updatePinnedPreviewImage(src) {
             const pinnedImage = document.getElementById("preview-pinned-image");
             const placeholder = document.getElementById("preview-pinned-placeholder");
@@ -8352,12 +8513,90 @@
                 pinnedImage.setAttribute("aria-hidden", "false");
                 placeholder.style.display = "none";
                 placeholder.setAttribute("aria-hidden", "true");
+                setPreviewPanelClickable(true);
             } else {
                 pinnedImage.removeAttribute("src");
                 pinnedImage.style.display = "none";
                 pinnedImage.setAttribute("aria-hidden", "true");
                 placeholder.style.display = "";
                 placeholder.setAttribute("aria-hidden", "false");
+                setPreviewPanelClickable(false);
+            }
+        }
+
+        function openPreviewImageModal() {
+            const modal = document.getElementById("preview-image-modal");
+            const modalImage = document.getElementById("preview-modal-image");
+            const sourceImage = document.getElementById("preview-pinned-image");
+            if (!modal || !modalImage || !sourceImage || !sourceImage.src) {
+                return;
+            }
+            previewImageModalReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+            modalImage.src = sourceImage.src;
+            const description = sourceImage.getAttribute("alt") || "Detail náhledu";
+            modalImage.alt = description;
+            modal.style.display = "block";
+            modal.setAttribute("aria-hidden", "false");
+            modal.focus();
+            const modalContent = modal.querySelector(".modal-content");
+            const modalHeader = modal.querySelector(".modal-header");
+            if (modalContent) {
+                modalContent.style.top = "";
+                modalContent.style.left = "";
+                modalContent.style.transform = "translate(-50%, -50%)";
+                if (modalHeader) {
+                    makeDraggable(modalContent, modalHeader);
+                }
+            }
+        }
+
+        function closePreviewImageModal() {
+            const modal = document.getElementById("preview-image-modal");
+            if (!modal) {
+                return;
+            }
+            modal.style.display = "none";
+            modal.setAttribute("aria-hidden", "true");
+            const modalImage = document.getElementById("preview-modal-image");
+            if (modalImage) {
+                modalImage.removeAttribute("src");
+            }
+            if (previewImageModalReturnFocus && typeof previewImageModalReturnFocus.focus === "function") {
+                previewImageModalReturnFocus.focus();
+            }
+            previewImageModalReturnFocus = null;
+        }
+
+        function initializePreviewImageModal() {
+            const panel = document.getElementById("preview-drawer-panel");
+            if (panel) {
+                const tryOpenModal = (event) => {
+                    if (!panel.classList.contains("is-clickable")) {
+                        return;
+                    }
+                    event.preventDefault();
+                    openPreviewImageModal();
+                };
+                panel.addEventListener("click", (event) => {
+                    if (event.target && event.target.closest(".preview-panel")) {
+                        tryOpenModal(event);
+                    }
+                });
+                panel.addEventListener("keydown", (event) => {
+                    if (event.key === "Enter" || event.key === " " || event.key === "Spacebar") {
+                        tryOpenModal(event);
+                    }
+                });
+                setPreviewPanelClickable(false);
+            }
+            const modal = document.getElementById("preview-image-modal");
+            if (modal) {
+                modal.addEventListener("keydown", (event) => {
+                    if (event.key === "Escape") {
+                        event.preventDefault();
+                        closePreviewImageModal();
+                    }
+                });
             }
         }
 
@@ -8975,6 +9214,8 @@
                 side.textContent = "";
                 uuidEl.textContent = "";
                 handleEl.textContent = "";
+                currentAltoXml = "";
+                refreshPageInfoAltoButtons();
                 resetPreview();
                 setToolsVisible(false);
                 refreshPagePosition();
@@ -9152,8 +9393,8 @@
         }
 
         function isModalActive() {
-            const modal = document.getElementById("alto-modal");
-            return Boolean(modal && modal.style.display === "block");
+            const modals = document.querySelectorAll(".modal");
+            return Array.from(modals).some((modal) => modal && modal.style.display === "block");
         }
 
         function handleLoadClick() {
@@ -9170,7 +9411,7 @@
                 const key = event.key;
                 const activeElement = document.activeElement;
                 const modalVisible = isModalActive();
-                const isWithinModal = modalVisible && activeElement && activeElement.closest("#alto-modal");
+                const isWithinModal = modalVisible && activeElement && activeElement.closest(".modal");
 
                 if (event.altKey || event.ctrlKey || event.metaKey) {
                     return;
@@ -9206,10 +9447,7 @@
             cacheProcessData(uuid, data);
 
             currentAltoXml = data.alto_xml || "";
-            const altoBtn = document.getElementById("alto-preview-btn");
-            if (altoBtn) {
-                altoBtn.style.display = currentAltoXml ? "block" : "none";
-            }
+            refreshPageInfoAltoButtons();
 
             currentBook = data.book || null;
             currentPage = data.currentPage || null;
@@ -9675,6 +9913,7 @@
             setupPageNumberJump();
             initializeThumbnailDrawer();
             initializePreviewDrawer();
+            initializePreviewImageModal();
             initializeDiffControls();
             initializeAgentUI(agentContexts.correctors);
             initializeAgentUI(agentContexts.readers);
@@ -9687,6 +9926,7 @@
             setupSectionVisibilityToggles();
             updateDrawerTogglePositions();
             ensureThumbnailDrawerResizeObserver();
+            setupAltoPreviewButtons();
 
             const previewContainer = document.getElementById("page-preview");
             const largeBox = document.getElementById("preview-large");
@@ -9713,41 +9953,20 @@
                 largeBox.addEventListener("focusout", handleLeave);
             }
 
-            const altoBtn = document.getElementById("alto-preview-btn");
-            if (altoBtn) {
-                altoBtn.style.color = "#007bff";
-                altoBtn.style.cursor = "pointer";
-                altoBtn.style.textDecoration = "underline";
-            altoBtn.addEventListener("click", () => {
-                const modal = document.getElementById("alto-modal");
-                const content = document.getElementById("alto-content");
-                if (modal && content) {
-                    content.textContent = currentAltoXml;
-                    modal.style.display = "block";
-                    modal.focus();
-                    const modalContent = modal.querySelector('.modal-content');
-                    const modalHeader = modal.querySelector('.modal-header');
-                    if (modalContent) {
-                        // Set initial position to center
-                        modalContent.style.top = "";
-                        modalContent.style.left = "";
-                        modalContent.style.transform = 'translate(-50%, -50%)';
-                        // Make draggable only on header
-                        if (modalHeader) {
-                            makeDraggable(modalContent, modalHeader);
-                        }
-                    }
-                }
-            });
-            }
-
-            const closeBtn = document.querySelector(".close");
-            if (closeBtn) {
+            document.querySelectorAll(".modal .close").forEach((closeBtn) => {
                 closeBtn.addEventListener("click", () => {
-                    const modal = document.getElementById("alto-modal");
-                    if (modal) modal.style.display = "none";
+                    const modal = closeBtn.closest(".modal");
+                    if (!modal) {
+                        return;
+                    }
+                    if (modal.id === "preview-image-modal") {
+                        closePreviewImageModal();
+                    } else if (modal.id === "alto-modal") {
+                        modal.style.display = "none";
+                        modal.setAttribute("aria-hidden", "true");
+                    }
                 });
-            }
+            });
 
             const modal = document.getElementById("alto-modal");
             if (modal) {
@@ -9769,9 +9988,14 @@
             setupKeyboardShortcuts();
 
             window.addEventListener("click", (event) => {
-                const modal = document.getElementById("alto-modal");
-                if (event.target == modal) {
-                    modal.style.display = "none";
+                const altoModal = document.getElementById("alto-modal");
+                if (altoModal && event.target === altoModal) {
+                    altoModal.style.display = "none";
+                    altoModal.setAttribute("aria-hidden", "true");
+                }
+                const previewModal = document.getElementById("preview-image-modal");
+                if (previewModal && event.target === previewModal) {
+                    closePreviewImageModal();
                 }
             });
 
@@ -9867,7 +10091,18 @@
             </div>
         </div>
     </div>
-    <div id="alto-modal" class="modal" tabindex="-1">
+    <div id="preview-image-modal" class="modal preview-image-modal" tabindex="-1" aria-hidden="true">
+        <div class="modal-content preview-image-modal-content">
+            <div class="modal-header">
+                <h2>Detail náhledu</h2>
+                <span class="close" id="preview-modal-close" aria-label="Zavřít detail náhledu">&times;</span>
+            </div>
+            <div class="preview-image-modal-body">
+                <img id="preview-modal-image" alt="Detail aktuálního náhledu">
+            </div>
+        </div>
+    </div>
+    <div id="alto-modal" class="modal" tabindex="-1" aria-hidden="true">
         <div class="modal-content">
             <div class="modal-header">
                 <h2>ALTO XML Obsah</h2>

@@ -2112,6 +2112,7 @@
                 supportsDiff: Boolean(config.supportsDiff),
                 requiresPythonHtml: config.requiresPythonHtml !== false,
                 runButtonLabel: config.runButtonLabel || 'Spustit',
+                defaultAgentName: config.defaultAgentName || '',
                 agentsCache: {},
                 agentFingerprintCache: new Map(),
                 agentResultCache: new Map(),
@@ -2151,6 +2152,7 @@
                 diffToggleSelector: '.agent-diff-toggle',
                 autoStorageKey: 'altoAgentAutoCorrect_v1',
                 selectedStorageKey: 'altoAgentSelected_v1',
+                defaultAgentName: 'cleanup-diff-generated-mid',
                 hasOutputPanel: true,
                 supportsDiff: true,
                 requiresPythonHtml: true,
@@ -2177,6 +2179,7 @@
                 outputTextId: 'reader-agent-output-text',
                 autoStorageKey: 'altoReaderAuto_v1',
                 selectedStorageKey: 'altoReaderSelected_v1',
+                defaultAgentName: 'default-reader',
                 hasOutputPanel: true,
                 supportsDiff: false,
                 requiresPythonHtml: false,
@@ -2203,6 +2206,7 @@
                 outputTextId: 'stitch-agent-output-text',
                 autoStorageKey: 'altoStitchAutoLink_v1',
                 selectedStorageKey: 'altoStitchSelected_v1',
+                defaultAgentName: 'manual-joiner',
                 hasOutputPanel: true,
                 supportsDiff: false,
                 requiresPythonHtml: true,
@@ -4356,8 +4360,15 @@
             if (selected && names.includes(selected)) {
                 select.value = selected;
             } else {
-                select.selectedIndex = 0;
-                persistContextSelectedAgent(ctx, select.value);
+                const fallback = ctx.defaultAgentName && names.includes(ctx.defaultAgentName)
+                    ? ctx.defaultAgentName
+                    : (names.length ? names[0] : '');
+                if (fallback) {
+                    select.value = fallback;
+                } else {
+                    select.selectedIndex = 0;
+                }
+                persistContextSelectedAgent(ctx, select.value || fallback || '');
             }
             if (spinnerWrapper) spinnerWrapper.style.display = 'none';
             // update the UI fields for the selected agent from cache (avoid extra fetch)

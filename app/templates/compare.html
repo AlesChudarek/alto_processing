@@ -11,6 +11,8 @@
             --thumbnail-toggle-size: 32px;
             --primary-max-width: 1200px;
             --preview-drawer-gap: 12px;
+            --section-visibility-icon-open: url("{{ url_for('static', path='icons/eye-open.svg') }}");
+            --section-visibility-icon-closed: url("{{ url_for('static', path='icons/eye-closed.svg') }}");
         }
         body {
             font-family: Arial, sans-serif;
@@ -407,7 +409,7 @@
             resize: none;
             overflow: hidden;
         }
-        button:not(.page-thumbnail):not(.thumbnail-toggle):not(.diff-toggle):not(.agent-diff-toggle):not(.preview-drawer-toggle) {
+        button:not(.page-thumbnail):not(.thumbnail-toggle):not(.diff-toggle):not(.agent-diff-toggle):not(.preview-drawer-toggle):not(.section-visibility-toggle) {
             background-color: #007bff;
             color: white;
             padding: 10px 20px;
@@ -416,10 +418,10 @@
             cursor: pointer;
             font-size: 14px;
         }
-        button:not(.page-thumbnail):not(.thumbnail-toggle):not(.diff-toggle):not(.agent-diff-toggle):not(.preview-drawer-toggle):hover {
+        button:not(.page-thumbnail):not(.thumbnail-toggle):not(.diff-toggle):not(.agent-diff-toggle):not(.preview-drawer-toggle):not(.section-visibility-toggle):hover {
             background-color: #0056b3;
         }
-        button:not(.page-thumbnail):not(.thumbnail-toggle):not(.diff-toggle):not(.agent-diff-toggle):not(.preview-drawer-toggle):disabled {
+        button:not(.page-thumbnail):not(.thumbnail-toggle):not(.diff-toggle):not(.agent-diff-toggle):not(.preview-drawer-toggle):not(.section-visibility-toggle):disabled {
             background-color: #9aa0a6;
             cursor: not-allowed;
         }
@@ -434,12 +436,54 @@
         .section-header h2 {
             margin: 0;
         }
+        .section-title {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .section-visibility-toggle {
+            border: none;
+            background: #eef2ff;
+            padding: 0;
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: background 0.2s ease, box-shadow 0.2s ease;
+        }
+        .section-visibility-toggle:hover {
+            background: #d4e0ff;
+            box-shadow: 0 4px 10px rgba(15, 23, 42, 0.12);
+        }
+        .section-visibility-toggle:focus-visible {
+            outline: 2px solid #1f78ff;
+            border-radius: 6px;
+        }
+        .section-visibility-toggle::before {
+            content: "";
+            width: 20px;
+            height: 20px;
+            background: center/contain no-repeat var(--section-visibility-icon-open);
+            display: inline-block;
+        }
+        .section-visibility-toggle.is-hidden::before {
+            background-image: var(--section-visibility-icon-closed);
+        }
         .section-actions {
             display: flex;
             align-items: center;
             gap: 12px;
             flex-wrap: wrap;
             margin-bottom: 12px;
+        }
+        .info-section.section-collapsed > :not(.section-header) {
+            display: none !important;
+        }
+        .info-section.section-collapsed {
+            padding-bottom: 12px;
         }
         .section-download-button {
             height: 36px;
@@ -1403,7 +1447,12 @@
 
 
                 <div id="book-info" class="info-section" style="display: none;">
-                    <h2 id="book-title">Informace o knize</h2>
+                    <div class="section-header">
+                        <div class="section-title">
+                            <h2 id="book-title">Informace o knize</h2>
+                            <button class="section-visibility-toggle" type="button" data-section-toggle="book-info" data-section-label="Informace o knize" aria-pressed="false" aria-label="Skrýt sekci Informace o knize" title="Skrýt sekci Informace o knize"></button>
+                        </div>
+                    </div>
                     <p id="book-handle" class="muted"></p>
                     <p id="book-library" class="muted"></p>
                     <div id="book-constants" class="book-summary-grid" style="display: none;"></div>
@@ -1412,9 +1461,14 @@
                 </div>
 
                 <div id="page-info" class="info-section" style="display: none;">
+                    <div class="section-header">
+                        <div class="section-title">
+                            <h2>Informace o straně</h2>
+                            <button class="section-visibility-toggle" type="button" data-section-toggle="page-info" data-section-label="Informace o straně" aria-pressed="false" aria-label="Skrýt sekci Informace o straně" title="Skrýt sekci Informace o straně"></button>
+                        </div>
+                    </div>
                     <div class="page-info-layout">
                         <div class="page-details">
-                            <h2>Informace o straně</h2>
                             <p id="page-summary" class="muted"></p>
                             <p id="page-side" class="muted"></p>
                             <p id="page-uuid" class="muted"></p>
@@ -1442,7 +1496,10 @@
                 </div>
                 <div id="algorithmic-section" class="info-section">
                     <div class="algorithmic-header section-header">
-                        <h2>Algoritmický přístup</h2>
+                        <div class="section-title">
+                            <h2>Algoritmický přístup</h2>
+                            <button class="section-visibility-toggle" type="button" data-section-toggle="algorithmic-section" data-section-label="Algoritmický přístup" aria-pressed="false" aria-label="Skrýt sekci Algoritmický přístup" title="Skrýt sekci Algoritmický přístup"></button>
+                        </div>
                         <button class="section-download-button" type="button" data-download-source="algorithmic" title="Stáhnout výsledky algoritmického přístupu" aria-label="Stáhnout výsledky algoritmického přístupu">💾</button>
                     </div>
                     <div class="algorithmic-actions section-actions">
@@ -1490,7 +1547,10 @@
                 <!-- LLM agent settings UI -->
                 <div id="agent-row" class="info-section">
                     <div class="section-header">
-                        <h2>Oprava zpracovaného textu pomocí LLM</h2>
+                        <div class="section-title">
+                            <h2>Oprava zpracovaného textu pomocí LLM</h2>
+                            <button class="section-visibility-toggle" type="button" data-section-toggle="agent-row" data-section-label="Oprava zpracovaného textu pomocí LLM" aria-pressed="false" aria-label="Skrýt sekci Oprava zpracovaného textu pomocí LLM" title="Skrýt sekci Oprava zpracovaného textu pomocí LLM"></button>
+                        </div>
                         <button class="section-download-button" type="button" data-download-source="llm" title="Stáhnout výsledky LLM korekcí" aria-label="Stáhnout výsledky LLM korekcí">💾</button>
                     </div>
                     <div style="display:flex;align-items:center;gap:8px;">
@@ -1557,7 +1617,10 @@
                 </div>
                 <div id="reader-row" class="info-section">
                     <div class="section-header">
-                        <h2>Čtení přímo ze skenu (OCR)</h2>
+                        <div class="section-title">
+                            <h2>Čtení přímo ze skenu (OCR)</h2>
+                            <button class="section-visibility-toggle" type="button" data-section-toggle="reader-row" data-section-label="Čtení přímo ze skenu (OCR)" aria-pressed="false" aria-label="Skrýt sekci Čtení přímo ze skenu (OCR)" title="Skrýt sekci Čtení přímo ze skenu (OCR)"></button>
+                        </div>
                         <button class="section-download-button" type="button" data-download-source="ocr" title="Stáhnout výsledky OCR" aria-label="Stáhnout výsledky OCR">💾</button>
                     </div>
                     <div style="display:flex;align-items:center;gap:8px;">
@@ -1623,7 +1686,12 @@
                 </div>
                 <!-- Additional comparison: processed ALTO (Python) vs new OCR -->
                 <div id="comparison2-row" class="info-section">
-                    <h2 style="margin-bottom:12px;">Porovnání: Zpracované ALTO x Nové OCR</h2>
+                    <div class="section-header">
+                        <div class="section-title">
+                            <h2>Porovnání: Zpracované ALTO x Nové OCR</h2>
+                            <button class="section-visibility-toggle" type="button" data-section-toggle="comparison2-row" data-section-label="Porovnání: Zpracované ALTO x Nové OCR" aria-pressed="false" aria-label="Skrýt sekci Porovnání: Zpracované ALTO x Nové OCR" title="Skrýt sekci Porovnání: Zpracované ALTO x Nové OCR"></button>
+                        </div>
+                    </div>
                     <div style="display:flex;align-items:center;gap:8px;">
                         <div style="margin-left:auto;display:flex;align-items:center;gap:8px;">
                             <label style="display:inline-flex;align-items:center;gap:6px;">
@@ -1652,7 +1720,12 @@
                     </div>
                 </div>
                 <div id="comparison-row" class="info-section">
-                    <h2 style="margin-bottom:12px;">Porovnání: LLM opravené zpracování ALTO x Nové OCR</h2>
+                    <div class="section-header">
+                        <div class="section-title">
+                            <h2>Porovnání: LLM opravené zpracování ALTO x Nové OCR</h2>
+                            <button class="section-visibility-toggle" type="button" data-section-toggle="comparison-row" data-section-label="Porovnání: LLM opravené zpracování ALTO x Nové OCR" aria-pressed="false" aria-label="Skrýt sekci Porovnání: LLM opravené zpracování ALTO x Nové OCR" title="Skrýt sekci Porovnání: LLM opravené zpracování ALTO x Nové OCR"></button>
+                        </div>
+                    </div>
                     <div style="display:flex;align-items:center;gap:8px;">
                         <div style="margin-left:auto;display:flex;align-items:center;gap:8px;">
                             <label style="display:inline-flex;align-items:center;gap:6px;">
@@ -1681,7 +1754,12 @@
                     </div>
                 </div>
                 <div id="stitch-row" class="info-section">
-                    <h2 style="margin-bottom:12px;">Napojení stran</h2>
+                    <div class="section-header">
+                        <div class="section-title">
+                            <h2>Napojení stran</h2>
+                            <button class="section-visibility-toggle" type="button" data-section-toggle="stitch-row" data-section-label="Napojení stran" aria-pressed="false" aria-label="Skrýt sekci Napojení stran" title="Skrýt sekci Napojení stran"></button>
+                        </div>
+                    </div>
                     <div style="display:flex;align-items:center;gap:8px;">
                         <label for="stitch-agent-select" style="margin:0;font-weight:600;">Agent:</label>
                         <select id="stitch-agent-select" aria-label="Vyberte agenta pro napojování"></select>
@@ -5092,7 +5170,7 @@
             return promise;
         }
 
-        function ensureReaderResult() {
+        function ensureReaderResult(options = {}) {
             if (lastReaderResultHtml && lastReaderResultHtml.trim()) {
                 return Promise.resolve({
                     html: lastReaderResultHtml,
@@ -5102,7 +5180,7 @@
             const promise = new Promise((resolve, reject) => {
                 comparisonResultWaiters.reader.push({ resolve, reject });
             });
-            triggerReaderRunIfIdle();
+            triggerReaderRunIfIdle(options);
             return promise;
         }
 
@@ -5136,26 +5214,40 @@
             });
         }
 
-        function triggerReaderRunIfIdle() {
+        function triggerReaderRunIfIdle(options = {}) {
             const ctx = agentContexts.readers;
+            const statusSetter = typeof options.setStatus === "function" ? options.setStatus : setComparisonStatus;
+            const messages = {
+                waiting: options.waitingMessage || "Čekám na dokončení čtení ze skenu...",
+                missingAgent: options.missingAgentMessage || "Vyberte agenta pro čtení ze skenu.",
+                missingConfig: options.missingConfigMessage || "Chybí konfigurace pro čtení ze skenu.",
+                starting: options.startingMessage || "Spouštím čtení ze skenu...",
+            };
+            const notifyStatus = (message, state) => {
+                if (typeof statusSetter === "function") {
+                    statusSetter(message, state);
+                }
+            };
             if (!ctx) {
-                rejectComparisonWaiters('reader', new Error('Chybí konfigurace pro čtení ze skenu.'));
+                const error = new Error(messages.missingConfig);
+                notifyStatus(error.message, 'error');
+                rejectComparisonWaiters('reader', error);
                 return;
             }
             const runBtn = getContextElement(ctx, 'runButtonId');
             if ((runBtn && runBtn.disabled) || comparisonState.readerRunPending) {
-                setComparisonStatus('Čekám na dokončení čtení ze skenu...', 'pending');
+                notifyStatus(messages.waiting, 'pending');
                 return;
             }
             const select = getContextElement(ctx, 'selectId');
             if (select && !select.value) {
-                const error = new Error('Vyberte agenta pro čtení ze skenu.');
-                setComparisonStatus(error.message, 'error');
+                const error = new Error(messages.missingAgent);
+                notifyStatus(error.message, 'error');
                 rejectComparisonWaiters('reader', error);
                 return;
             }
             comparisonState.readerRunPending = true;
-            setComparisonStatus('Spouštím čtení ze skenu...', 'pending');
+            notifyStatus(messages.starting, 'pending');
             runSelectedAgent(ctx, { autoTriggered: false }).catch((error) => {
                 rejectComparisonWaiters('reader', error instanceof Error ? error : new Error('Čtení ze skenu selhalo.'));
             }).finally(() => {
@@ -5573,7 +5665,7 @@
                 // left: processed ALTO (python), right: reader (OCR)
                 const pythonHtml = currentResults.python || '';
                 const leftIsHtml = typeof pythonHtml === 'string' && /<[^>]+>/.test(pythonHtml);
-                const readerResult = await ensureReaderResult();
+                const readerResult = await ensureReaderResult({ setStatus: setComparison2Status });
                 updateComparison2ResultPanels(
                     pythonHtml || '',
                     Boolean(leftIsHtml),
@@ -8046,6 +8138,80 @@
             }
         }
 
+        const SECTION_VISIBILITY_STORAGE_PREFIX = "altoSectionVisibility_v1";
+
+        function getSectionVisibilityStorageKey(sectionId) {
+            return `${SECTION_VISIBILITY_STORAGE_PREFIX}:${sectionId}`;
+        }
+
+        function loadSectionHiddenState(sectionId) {
+            const key = getSectionVisibilityStorageKey(sectionId);
+            try {
+                return localStorage.getItem(key) === "1";
+            } catch (error) {
+                return false;
+            }
+        }
+
+        function persistSectionHiddenState(sectionId, hidden) {
+            const key = getSectionVisibilityStorageKey(sectionId);
+            try {
+                localStorage.setItem(key, hidden ? "1" : "0");
+            } catch (error) {
+                // ignore storage issues
+            }
+        }
+
+        function updateSectionToggleVisual(toggle, hidden) {
+            if (!toggle) {
+                return;
+            }
+            const label = toggle.getAttribute("data-section-label")
+                || (toggle.closest(".section-header")?.querySelector("h2")?.textContent?.trim())
+                || "";
+            const isHidden = Boolean(hidden);
+            const action = isHidden ? "Zobrazit" : "Skrýt";
+            const message = label ? `${action} sekci ${label}` : `${action} sekci`;
+            toggle.classList.toggle("is-hidden", isHidden);
+            toggle.setAttribute("aria-pressed", isHidden ? "true" : "false");
+            toggle.setAttribute("aria-label", message);
+            toggle.setAttribute("title", message);
+        }
+
+        function setSectionHidden(sectionId, hidden, options = {}) {
+            const section = document.getElementById(sectionId);
+            if (!section) {
+                return;
+            }
+            const shouldHide = Boolean(hidden);
+            section.classList.toggle("section-collapsed", shouldHide);
+            const toggle = section.querySelector("[data-section-toggle]");
+            updateSectionToggleVisual(toggle, shouldHide);
+            if (!options || options.persist !== false) {
+                persistSectionHiddenState(sectionId, shouldHide);
+            }
+        }
+
+        function setupSectionVisibilityToggles() {
+            const toggles = document.querySelectorAll("[data-section-toggle]");
+            toggles.forEach((toggle) => {
+                const targetId = toggle.getAttribute("data-section-toggle");
+                if (!targetId) {
+                    return;
+                }
+                const section = document.getElementById(targetId);
+                if (!section) {
+                    return;
+                }
+                const storedHidden = loadSectionHiddenState(targetId);
+                setSectionHidden(targetId, storedHidden, { persist: false });
+                toggle.addEventListener("click", () => {
+                    const nextHidden = !section.classList.contains("section-collapsed");
+                    setSectionHidden(targetId, nextHidden);
+                });
+            });
+        }
+
         function setAlgorithmicControlsDisabled(disabled) {
             const convertButton = document.getElementById("algorithmic-convert");
             if (convertButton) {
@@ -9518,6 +9684,7 @@
             initializeComparisonUI();
             initializeComparison2UI();
             initializeDownloadUI();
+            setupSectionVisibilityToggles();
             updateDrawerTogglePositions();
             ensureThumbnailDrawerResizeObserver();
 

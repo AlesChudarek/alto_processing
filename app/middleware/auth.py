@@ -33,6 +33,19 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
         cookie_value = request.cookies.get(self.settings.auth_cookie_name)
         return bool(cookie_value) and cookie_value == self.token_hash
 
+    def _has_valid_header(self, request: Request) -> bool:
+        """Allow Authorization: Bearer <token> as an alternative to the cookie."""
+        if not self.token_hash:
+            return True
+        auth_header = request.headers.get("authorization", "")
+        if not auth_header.lower().startswith("bearer "):
+            return False
+        submitted = auth_header.split(" ", 1)[1].strip()
+        if not submitted:
+            return False
+        submitted_hash = _hash_token(submitted)
+        return submitted_hash == self.token_hash or submitted == self.settings.auth_token
+
     def _wants_html(self, request: Request) -> bool:
         accept_header = request.headers.get("accept", "").lower()
         return "text/html" in accept_header or "*/*" in accept_header
@@ -42,7 +55,7 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         path = request.url.path
-        if self._is_public_path(path) or self._has_valid_cookie(request):
+        if self._is_public_path(path) or self._has_valid_cookie(request) or self._has_valid_header(request):
             return await call_next(request)
 
         if self._wants_html(request):

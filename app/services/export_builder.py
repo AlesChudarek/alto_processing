@@ -15,7 +15,12 @@ from bs4 import BeautifulSoup, Tag
 from ..core.agent_runner import AgentRunnerError, run_agent as run_agent_via_responses
 from ..core.export_jobs import AbortRequested, ExportJob, ExportJobParams
 from ..core.main_processor import AltoProcessor
-from ..core.comparison_legacy import DEFAULT_HEIGHT, DEFAULT_WIDTH
+from ..core.comparison_legacy import (
+    DEFAULT_HEIGHT,
+    DEFAULT_WIDTH,
+    normalize_agent_collection,
+    read_agent_file,
+)
 
 
 BLOCK_TAGS = {
@@ -204,6 +209,12 @@ class ExportBuilder:
         config = options.get("config")
         if isinstance(config, dict) and config:
             return json.loads(json.dumps(config))
+        name = options.get("name")
+        if isinstance(name, str) and name.strip():
+            collection = normalize_agent_collection(options.get("collection") or "correctors")
+            agent = read_agent_file(name.strip(), collection)
+            if agent:
+                return json.loads(json.dumps(agent))
         return None
 
     def _build_agent_payload(self, options: Dict[str, Any], plan: PagePlan, collection: str) -> Dict[str, Any]:
@@ -677,6 +688,8 @@ class ExportBuilder:
         return ordered
 
     def _build_filename(self) -> str:
+        if self.params.output_filename:
+            return self.params.output_filename
         title = (self.params.book_title or "export").strip() or "export"
         safe_title = "_".join(title.split())
         return f"{safe_title}-{self.params.source}.{self.params.export_format}"

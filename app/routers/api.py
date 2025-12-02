@@ -47,9 +47,21 @@ class ExportRequest(BaseModel):
     joiner: dict[str, Any] = Field(default_factory=dict)
     llm_agent: dict[str, Any] = Field(default_factory=dict, alias="llmAgent")
     ocr_agent: dict[str, Any] = Field(default_factory=dict, alias="ocrAgent")
+    output_filename: Optional[str] = Field(None, alias="outputFilename")
     language_hint: str = Field("cs", alias="languageHint")
     strip_small_text: bool = Field(True, alias="stripSmallText")
     strip_note_text: bool = Field(True, alias="stripNoteText")
+
+
+class DownloadRequest(BaseModel):
+    uuid: str = Field(..., description="UUID knihy nebo stránky")
+    export_format: Optional[str] = Field("txt", alias="format", description="html|txt|md")
+    range_value: Optional[str] = Field(None, alias="range")
+    llm_agent: dict[str, Any] = Field(default_factory=dict, alias="llmAgent")
+    drop_small: bool = Field(False, alias="dropSmall")
+    output_filename: Optional[str] = Field(None, alias="outputName")
+    api_base: Optional[str] = Field(None, alias="apiBase")
+    language_hint: str = Field("cs", alias="languageHint")
 
 
 def _build_export_params(request: ExportRequest) -> ExportJobParams:
@@ -77,11 +89,68 @@ def _build_export_params(request: ExportRequest) -> ExportJobParams:
         joiner=request.joiner,
         llm_agent=request.llm_agent,
         ocr_agent=request.ocr_agent,
+        output_filename=request.output_filename,
         language_hint=request.language_hint,
         omit_small_text=request.strip_small_text,
         omit_note_text=request.strip_note_text,
     )
     return params
+
+
+@router.post("/download")
+def start_download(payload: DownloadRequest) -> JSONResponse:
+    fmt = (payload.export_format or "txt").lower()
+    if fmt not in {"html", "txt", "md"}:
+        raise HTTPException(status_code=400, detail="Nepodporovaný formát exportu.")
+
+    processor = AltoProcessor(api_base_url=payload.api_base)
+    context = processor.get_book_context(payload.uuid)
+    if not context:
+        raise HTTPException(status_code=404, detail="Nepodařilo se načíst metadata pro zadané UUID.")
+
+    pages = context.get("pages") or []
+    if not pages:
+        raise HTTPException(status_code=400, detail="Zadaná kniha neobsahuje žádné stránky.")
+
+    normalized_uuid = processor._strip_uuid_prefix(payload.uuid)  # type: ignore[attr-defined]
+    page_uuid = processor._strip_uuid_prefix(context.get("page_uuid") or "")  # type: ignore[attr-defined]
+    is_page_uuid = bool(normalized_uuid) and normalized_uuid == page_uuid
+
+    if payload.range_value:
+        token = str(payload.range_value).strip().lower()
+        if token in {"all", "*", "book", "kniha"}:
+            range_mode = "all"
+            range_value = None
+        else:
+            range_mode = "custom"
+            range_value = payload.range_value
+    else:
+        range_mode = "current" if is_page_uuid else "all"
+        range_value = None
+
+    book_data = context.get("book") or {}
+    params = ExportJobParams(
+        source="llm" if payload.llm_agent else "algorithmic",
+        export_format=fmt,
+        range_mode=range_mode,
+        range_value=range_value,
+        book_uuid=context.get("book_uuid") or "",
+        book_title=book_data.get("title"),
+        current_page_uuid=page_uuid or normalized_uuid,
+        pages=pages,
+        api_base=context.get("api_base") or payload.api_base,
+        joiner={"manual": True},
+        llm_agent=payload.llm_agent or {},
+        ocr_agent={},
+        output_filename=payload.output_filename,
+        language_hint=payload.language_hint or "cs",
+        omit_small_text=bool(payload.drop_small),
+        omit_note_text=True,
+    )
+
+    manager = get_export_manager()
+    job = manager.create_job(params, run_export_job)
+    return JSONResponse(job.to_dict())
 
 
 @router.get("/process")

@@ -90,6 +90,68 @@ Dočasně může HTTP a HTTPS běžet souběžně (např. HTTP jen pro Let’s E
 - Agenti jsou ukládáni jako JSON soubory ve složkách `agents/` (`correctors`, `joiners`, `readers`).  
 - Konfigurace modelů je v `config/models.json` a při běhu se načítá automaticky.
 
+### Jednoduchý download přes API
+
+Endpoint `POST /download` spustí export a vrátí `job_id`. Stav zjistíš přes `GET /exports/{job_id}` a výsledek stáhneš z `GET /exports/{job_id}/download`.
+
+Auth: pošli token v hlavičce `Authorization: Bearer <ALTO_WEB_AUTH_TOKEN>`.
+
+Body (JSON):
+- `uuid` (povinné): UUID knihy nebo stránky.
+- `format` (volitelné): `txt` (default), `html`, `md`.
+- `range` (volitelné): `all` (celá kniha), nebo vlastní výběr např. `"7-11,23"`. Pokud chybí: u stránky se vezme jen ta stránka, u knihy celé.
+- `llmAgent` (volitelné): např. `{ "name": "cleanup-diff-generated-mid" }`. Pokud chybí, použije se čistě algoritmický výstup bez LLM.
+- `dropSmall` (volitelné): `true/false`, default `false`.
+- `outputName` (volitelné): název výsledného souboru.
+
+Praktický příklad (celá kniha, HTML, algoritmus):
+```bash
+TOKEN="..."; BASE="http://localhost:8080"
+curl -X POST "$BASE/download" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "uuid": "49c6424a-c820-4224-9475-4aa0d8a9d844",
+    "format": "html",
+    "range": "all",
+    "outputName": "output.html"
+  }'
+```
+Vlastní rozsah + LLM + dropSmall:
+```bash
+TOKEN="..."; BASE="http://localhost:8080"
+curl -X POST "$BASE/download" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "uuid": "49c6424a-c820-4224-9475-4aa0d8a9d844",
+    "format": "txt",
+    "range": "7-11,23",
+    "llmAgent": { "name": "cleanup-diff-generated-mid" },
+    "dropSmall": true,
+    "outputName": "output.txt"
+  }'
+```
+Polling a download:
+```bash
+curl -H "Authorization: Bearer $TOKEN" "$BASE/exports/<job_id>"
+curl -H "Authorization: Bearer $TOKEN" -o output.txt "$BASE/exports/<job_id>/download"
+```
+
+### CLI helper
+
+Soubor `cli/download.py` dělá totéž: spustí download, sleduje stav a uloží výsledek. Token bere z argumentu `--token` nebo z proměnné `ALTO_TOKEN`.
+```bash
+ALTO_TOKEN=TVŮJ_TOKEN python cli/download.py \
+  --url http://localhost:8080 \
+  --uuid 49c6424a-c820-4224-9475-4aa0d8a9d844 \
+  --format txt \
+  --range "7-11,23" \
+  --llm-agent '{"name":"cleanup-diff-generated-mid"}' \
+  --drop-small \
+  --output output.txt
+```
+
 ## Tipy
 
 - Node.js je pouze kvůli legacy TypeScriptu (`dist/run_original.js`). Jakmile nebude potřeba, lze kroky s NPM z Dockerfile i lokální instalace úplně odstranit.  

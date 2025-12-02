@@ -6,7 +6,9 @@ APP_MODULE="app.main:app"
 APP_DIR="."
 HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-8080}"
-WORKERS="${WEB_CONCURRENCY:-2}"
+# Pro exportní joby musí být shared paměť v rámci jednoho procesu.
+# Ponechte WEB_CONCURRENCY=1, jinak /exports/* neuvidí joby z jiného workeru.
+WORKERS="${WEB_CONCURRENCY:-1}"
 LOG_LEVEL="${LOG_LEVEL:-info}"
 
 cd "$ROOT_DIR"

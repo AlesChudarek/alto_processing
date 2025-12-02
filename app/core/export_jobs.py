@@ -32,6 +32,7 @@ class ExportJobParams:
     joiner: Dict[str, Any] = field(default_factory=dict)
     llm_agent: Dict[str, Any] = field(default_factory=dict)
     ocr_agent: Dict[str, Any] = field(default_factory=dict)
+    output_filename: Optional[str] = None
     language_hint: str = "cs"
     omit_small_text: bool = False
     omit_note_text: bool = False

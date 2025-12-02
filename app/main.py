@@ -5,10 +5,12 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import get_settings
 from .routers import ui, api
+from .middleware.auth import TokenAuthMiddleware
 
 
 settings = get_settings()
 app = FastAPI(title=settings.app_name)
+app.add_middleware(TokenAuthMiddleware, settings=settings)
 app.include_router(ui.router)
 app.include_router(api.router)
 

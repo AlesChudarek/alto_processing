@@ -2,13 +2,13 @@
 
 FastAPI aplikace s UI (šablona `app/templates/compare.html`) a REST endpointy `/process`, `/preview`, `/diff`, `/agents/*`, `/exports/*`. Běží jako jeden proces; UI komunikuje přes REST.
 
-## Co potřebuješ
+## Co potřebujete
 - Python 3.10+
 - Node.js + npm (jen kvůli legacy TypeScript bundlu `dist/run_original.js`)
 - Docker + Docker Compose plugin (pro kontejnerové spuštění)
 
 ## Rychlý start lokálně (bez Dockeru)
-1) `cp .env.example .env` a doplň API klíče (OpenRouter/OpenAI) + další proměnné.  
+1) `cp .env.example .env` a doplňte API klíče (OpenRouter/OpenAI) + další proměnné.  
 2) Virtuální env a závislosti:
 ```bash
 python3 -m venv .webenv
@@ -75,12 +75,12 @@ Nginx vystaví 80/443, předává na `alto-web:8080`, posílá hlavičky Host/X-
 - Token v hlavičce `Authorization: Bearer <ALTO_WEB_AUTH_TOKEN>` (healthz je veřejné, chráněné endpointy vrací 303/401 bez tokenu).
 
 ### Download přes API
-`POST /download` → vrátí `job_id`. Sleduj `GET /exports/{job_id}`, stáhni `GET /exports/{job_id}/download`.
+`POST /download` → vrátí `job_id`. Stav zjistíte přes `GET /exports/{job_id}` (obsahuje `state`, `progress.percent`, `progress.eta_seconds`) a výsledek stáhnete z `GET /exports/{job_id}/download`.
 Tělo (JSON): `uuid` (povinné), `format` (`txt` default/`html`/`md`), `range` (`all` nebo např. `"7-11,23"`), `llmAgent` (např. `{ "name": "cleanup-diff-generated-mid" }`), `dropSmall` (bool), `outputName`.
 
-Příklad (lokálně):
+Příklad (produkce, BASE míří na `/auth`):
 ```bash
-TOKEN="..."; BASE="http://localhost:8080"
+TOKEN="..."; BASE="https://alto-processing.trinera.cloud/auth"
 curl -X POST "$BASE/download" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
@@ -91,10 +91,27 @@ curl -X POST "$BASE/download" \
     "outputName": "output.html"
   }'
 ```
-Polling a stažení:
+Polling (stav + procenta + ETA) a stažení:
 ```bash
 curl -H "Authorization: Bearer $TOKEN" "$BASE/exports/<job_id>"
 curl -H "Authorization: Bearer $TOKEN" -o output.txt "$BASE/exports/<job_id>/download"
+```
+Ukázka odpovědi stavu:
+```json
+{
+  "job_id": "abc123",
+  "state": "running",
+  "progress": {
+    "processed": 3,
+    "total": 10,
+    "message": "Zpracovávám stránku 3/10",
+    "percent": 30.0,
+    "eta_seconds": 42.5
+  },
+  "error": null,
+  "download_url": null,
+  "filename": null
+}
 ```
 
 ### CLI helper

@@ -83,6 +83,17 @@ Aktuální Compose soubor vystavuje FastAPI kontejner přímo na port 80 (host) 
 
 Dočasně může HTTP a HTTPS běžet souběžně (např. HTTP jen pro Let’s Encrypt challenge). Jakmile je reverse proxy stabilní, není nutné vystavovat port 8080/80 přímo z FastAPI kontejneru.
 
+## Nginx reverse proxy (Compose override)
+
+Repo obsahuje `deploy/docker-compose.override.yml` + `deploy/nginx.conf`, které přidají Nginx před `alto-web`:
+
+1. Certy necháváme na hostu v `/etc/letsencrypt` (standardní umístění certbotu). Nginx si je mountuje read-only.
+   - HTTP-01 challenge se servíruje z `/var/www/certbot/.well-known/` (certbot tam ukládá soubory).
+2. Spusť: `docker compose -f docker-compose.yml -f deploy/docker-compose.override.yml up --build -d`
+3. Ověř: `https://alto-processing.trinera.cloud/healthz`
+
+Lokální test bez certů (jen HTTP pass-through): místo override spusť `docker compose up --build -d` (poběží na portu 80 → 8080 bez TLS). Pro HTTPS lokálně bys musel vytvořit self-signed certy a uložit je na stejné cesty, které emulují `/etc/letsencrypt`.
+
 ## Uživatelské API / UI
 
 - Frontend visí na `/` a komunikace probíhá přes REST (`/process`, `/preview`, `/diff`, `/agents/*`, `/exports/*`).  

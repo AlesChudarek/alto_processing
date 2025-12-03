@@ -62,6 +62,11 @@ Nginx vystaví 80/443, předává na `alto-web:8080`, posílá hlavičky Host/X-
 0 3 * * * certbot renew --webroot -w /var/www/certbot --post-hook "docker compose -f /root/alto_processing/docker-compose.yml -f /root/alto_processing/deploy/docker-compose.override.yml exec nginx nginx -s reload"
 ```
 
+Volitelně můžete přidat pravidelný restart aplikačního kontejneru (např. denně kvůli úklidu dočasných exportů):
+```
+0 4 * * * docker compose -f /root/alto_processing/docker-compose.yml -f /root/alto_processing/deploy/docker-compose.override.yml restart alto-web
+```
+
 ## Struktura
 - `app/` FastAPI (`app/main.py`), šablony `app/templates/compare.html`, logika v `app/core/`
 - `static/` statická aktiva UI

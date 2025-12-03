@@ -15,3 +15,7 @@ services:
       # Optional: serve ACME HTTP-01 challenge files from host
       - /var/www/certbot/.well-known:/var/www/certbot/.well-known:ro
     restart: unless-stopped
+
+  # Disable direct host port mapping on alto-web; Nginx terminates traffic.
+  alto-web:
+    ports: []

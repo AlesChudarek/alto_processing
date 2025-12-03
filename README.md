@@ -89,8 +89,10 @@ Repo obsahuje `deploy/docker-compose.override.yml` + `deploy/nginx.conf`, které
 
 1. Certy necháváme na hostu v `/etc/letsencrypt` (standardní umístění certbotu). Nginx si je mountuje read-only.
    - HTTP-01 challenge se servíruje z `/var/www/certbot/.well-known/` (certbot tam ukládá soubory).
-2. Spusť: `docker compose -f docker-compose.yml -f deploy/docker-compose.override.yml up --build -d`
-3. Ověř: `https://alto-processing.trinera.cloud/healthz`
+2. Zastav předchozí běh (pokud jel přímo na portu 80): `docker compose down`
+3. Spusť s override (vypne porty na `alto-web`, otevře 80/443 na Nginx):  
+   `docker compose -f docker-compose.yml -f deploy/docker-compose.override.yml up --build -d`
+4. Ověř: `https://alto-processing.trinera.cloud/healthz`
 
 Lokální test bez certů (jen HTTP pass-through): místo override spusť `docker compose up --build -d` (poběží na portu 80 → 8080 bez TLS). Pro HTTPS lokálně bys musel vytvořit self-signed certy a uložit je na stejné cesty, které emulují `/etc/letsencrypt`.
 

@@ -652,6 +652,7 @@ AGENT_COLLECTIONS = {
     'correctors': AGENTS_DIR / 'correctors',
     'joiners': AGENTS_DIR / 'joiners',
     'readers': AGENTS_DIR / 'readers',
+    'custom_lmm': AGENTS_DIR / 'custom_lmm',
 }
 AGENT_NAME_RE = re.compile(r'^[A-Za-z0-9._-]{1,64}$')
 

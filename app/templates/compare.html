@@ -1945,6 +1945,66 @@
                         </section>
                     </div>
                 </div>
+                <div id="custom-agent-row" class="info-section">
+                    <div class="section-header">
+                        <div class="section-title">
+                            <h2>Custom LMM úprava</h2>
+                            <button class="section-visibility-toggle" type="button" data-section-toggle="custom-agent-row" data-section-label="Custom LMM úprava" aria-pressed="false" aria-label="Skrýt sekci Custom LMM úprava" title="Skrýt sekci Custom LMM úprava"></button>
+                        </div>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:8px;">
+                        <label for="custom-agent-select" style="margin:0;font-weight:600;">Agent:</label>
+                        <select id="custom-agent-select" aria-label="Vyberte custom LMM agenta"></select>
+                        <div id="custom-agent-select-spinner" title="Načítám agenty" style="margin-left:8px;display:none;">
+                            <span class="inline-spinner" aria-hidden="true"></span>
+                        </div>
+                        <div style="margin-left:auto;display:flex;align-items:center;gap:8px;">
+                            <label style="display:inline-flex;align-items:center;gap:6px;">
+                                <input id="custom-agent-auto-run" type="checkbox">
+                                <span style="font-size:13px;">Automaticky upravovat</span>
+                            </label>
+                            <button id="custom-agent-run" type="button" style="height:36px;display:inline-flex;align-items:center;justify-content:center;padding:6px 12px;">Uprav</button>
+                            <button id="custom-agent-expand-toggle" type="button" aria-expanded="false" title="Zobrazit nastavení agenta" style="height:36px;display:inline-flex;align-items:center;justify-content:center;padding:6px 10px;">⚙️</button>
+                        </div>
+                    </div>
+
+                    <div id="custom-agent-settings" style="display:none;margin-top:12px;border-top:1px solid #e6e9ef;padding-top:12px;">
+                        <div class="form-group">
+                            <label for="custom-agent-name">Název agenta</label>
+                            <input type="text" id="custom-agent-name" placeholder="Např. custom-summary">
+                        </div>
+                        <div class="form-group">
+                            <label for="custom-agent-prompt">Prompt</label>
+                            <textarea id="custom-agent-prompt" rows="6" style="width:100%;font-family:monospace;">Zadejte prompt...</textarea>
+                        </div>
+                        <div class="form-group">
+                            <label for="custom-agent-default-model">Model</label>
+                            <select id="custom-agent-default-model" aria-label="Vyberte model pro custom LMM" style="min-width:170px;"></select>
+                        </div>
+                        <div id="custom-agent-parameter-fields" class="form-group" style="margin-top:8px;"></div>
+                        <div style="display:flex;gap:12px;margin-top:12px;flex-wrap:wrap;align-items:center;">
+                            <span class="inline-tooltip-anchor">
+                                <button id="custom-agent-save" type="button">Uložit agenta</button>
+                                <div id="custom-agent-save-tooltip" class="inline-tooltip" role="status" aria-live="polite"></div>
+                            </span>
+                            <button id="custom-agent-delete" type="button" style="background:#e53e3e;">Smazat</button>
+                        </div>
+                    </div>
+                    <div id="custom-agent-output" style="display:none;margin-top:12px;">
+                        <div id="custom-agent-output-status" class="muted" style="margin-bottom:6px;"></div>
+                        <pre id="custom-agent-output-text" style="white-space:pre-wrap;display: none;"></pre>
+                    </div>
+                    <div id="custom-agent-results" class="results" style="display:none;margin-top:16px;">
+                        <div class="result-box">
+                            <h3>Nový přístup zpracování ALTO</h3>
+                            <div id="custom-agent-result-original" class="result-rendered"></div>
+                        </div>
+                        <div class="result-box">
+                            <h3>Custom LMM výsledek</h3>
+                            <div id="custom-agent-result-output" class="result-rendered"></div>
+                        </div>
+                    </div>
+                </div>
                 <div id="loading" class="loading" aria-live="polite" aria-hidden="true">
                     <div class="loading-content">
                         <div class="loading-spinner" role="presentation"></div>
@@ -2056,6 +2116,10 @@
             running: false,
             autoRunScheduled: false,
         };
+        const customAgentState = {
+            originalHtml: '',
+            outputText: '',
+        };
         const comparisonResultWaiters = {
             corrector: [],
             reader: [],
@@ -2157,6 +2221,35 @@
                 supportsDiff: true,
                 requiresPythonHtml: true,
                 runButtonLabel: 'Oprav',
+            }),
+            custom: createAgentContext({
+                collection: 'custom_lmm',
+                selectId: 'custom-agent-select',
+                selectSpinnerId: 'custom-agent-select-spinner',
+                autoCheckboxId: 'custom-agent-auto-run',
+                runButtonId: 'custom-agent-run',
+                expandToggleId: 'custom-agent-expand-toggle',
+                settingsId: 'custom-agent-settings',
+                nameInputId: 'custom-agent-name',
+                promptTextareaId: 'custom-agent-prompt',
+                modelSelectId: 'custom-agent-default-model',
+                parameterFieldsId: 'custom-agent-parameter-fields',
+                saveButtonId: 'custom-agent-save',
+                deleteButtonId: 'custom-agent-delete',
+                saveTooltipId: 'custom-agent-save-tooltip',
+                outputContainerId: 'custom-agent-output',
+                outputStatusId: 'custom-agent-output-status',
+                outputTextId: 'custom-agent-output-text',
+                resultsContainerId: 'custom-agent-results',
+                resultOriginalId: 'custom-agent-result-original',
+                resultCorrectedId: 'custom-agent-result-output',
+                autoStorageKey: 'customLmmAuto_v1',
+                selectedStorageKey: 'customLmmSelected_v1',
+                defaultAgentName: 'custom-summary-blocks',
+                hasOutputPanel: true,
+                supportsDiff: false,
+                requiresPythonHtml: true,
+                runButtonLabel: 'Uprav',
             }),
             readers: createAgentContext({
                 collection: 'readers',
@@ -4342,6 +4435,48 @@
                 }
                 if (spinnerWrapper) spinnerWrapper.style.display = 'none';
                 return renderAgentSelector(ctx, force);
+            } else if (ctx.collection === 'custom_lmm' && !names.length) {
+                const defaults = [
+                    {
+                        name: 'custom-summary-blocks',
+                        display_name: 'Shrnutí po odstavcích',
+                        prompt: 'Dostaneš text stránky s odstavci. Pro každý odstavec napiš jednověté shrnutí. Výstup vrať jako prostý text, jeden odstavec shrnutí na řádku, bez HTML ani JSON.',
+                    },
+                    {
+                        name: 'custom-summary-full',
+                        display_name: 'Shrnutí celé stránky',
+                        prompt: 'Dostaneš text stránky. Stručně shrň celý obsah do 3 vět. Výstup vrať jako prostý text bez formátování a bez HTML.',
+                    },
+                    {
+                        name: 'custom-ner',
+                        display_name: 'NER klíčové pojmy',
+                        prompt: 'Dostaneš text stránky. Najdi důležité osoby, místa, instituce a pojmy. Vrať jen seznam klíčových entit v základním tvaru, oddělený čárkami. Bez vysvětlení, bez HTML.',
+                    },
+                ];
+                for (const cfg of defaults) {
+                    const draftAgent = {
+                        name: cfg.name,
+                        display_name: cfg.display_name || cfg.name,
+                        prompt: cfg.prompt,
+                        model: DEFAULT_AGENT_MODEL,
+                        settings: {
+                            defaults: createDefaultModelSettings(),
+                            per_model: {
+                                [DEFAULT_AGENT_MODEL]: {
+                                    temperature: DEFAULT_TEMPERATURE,
+                                    top_p: DEFAULT_TOP_P,
+                                },
+                            },
+                        },
+                    };
+                    const payload = buildAgentSavePayload(ctx, draftAgent);
+                    await fetch('/agents/save', {
+                        method: 'POST', headers: {'Content-Type':'application/json'},
+                        body: JSON.stringify(buildAgentPayload(ctx, payload)),
+                    });
+                }
+                if (spinnerWrapper) spinnerWrapper.style.display = 'none';
+                return renderAgentSelector(ctx, force);
             }
             if (!names.length) {
                 if (spinnerWrapper) spinnerWrapper.style.display = 'none';
@@ -4896,8 +5031,12 @@
             setContextAgentOutput(agentContexts.correctors, '', '', '');
             setContextAgentOutput(agentContexts.readers, '', '', '');
             setContextAgentOutput(agentContexts.joiners, '', '', '');
+            setContextAgentOutput(agentContexts.custom, '', '', '');
             setAgentResultPanels(null, null, false);
             setReaderResultPanels('', '', { forceVisible: false });
+            setCustomAgentResultPanels('', '');
+            customAgentState.originalHtml = '';
+            customAgentState.outputText = '';
             lastReaderResultHtml = '';
             lastReaderResultIsHtml = false;
             rejectComparisonWaiters('corrector', new Error('Výsledek byl zrušen.'));
@@ -4978,6 +5117,34 @@
 
             const shouldHideDiff = !(originalHtml && correctedContent);
             renderAgentDiff(null, agentDiffMode, { hidden: shouldHideDiff });
+            scheduleThumbnailDrawerHeightSync();
+        }
+
+        function setCustomAgentResultPanels(originalHtml, outputText) {
+            customAgentState.originalHtml = originalHtml || '';
+            customAgentState.outputText = outputText || '';
+            const container = document.getElementById('custom-agent-results');
+            const originalEl = document.getElementById('custom-agent-result-original');
+            const outputEl = document.getElementById('custom-agent-result-output');
+            if (!container || !originalEl || !outputEl) {
+                return;
+            }
+            const hasOriginal = Boolean(originalHtml && String(originalHtml).trim());
+            const hasOutput = Boolean(outputText && String(outputText).trim());
+            if (!hasOriginal && !hasOutput) {
+                container.style.display = 'none';
+                originalEl.innerHTML = '';
+                outputEl.innerHTML = '';
+                scheduleThumbnailDrawerHeightSync();
+                return;
+            }
+            container.style.display = 'grid';
+            originalEl.innerHTML = hasOriginal
+                ? `<pre>${originalHtml}</pre>`
+                : '<div class="muted">Žádná data.</div>';
+            outputEl.innerHTML = hasOutput
+                ? `<pre>${escapeHtml(outputText)}</pre>`
+                : '<div class="muted">Agent nevrátil text.</div>';
             scheduleThumbnailDrawerHeightSync();
         }
 
@@ -5097,6 +5264,15 @@
                 forceVisible: Boolean(scanUrl || finalText),
             });
             return Boolean(scanUrl || finalText);
+        }
+
+        function applyCustomAgentResult(originalHtml, agentResult, rawText) {
+            const normalizedRaw = typeof rawText === 'string' ? rawText : '';
+            const resultText = agentResult && typeof agentResult.text === 'string' ? agentResult.text : '';
+            const formatted = agentResult && typeof agentResult.formatted_text === 'string' ? agentResult.formatted_text : '';
+            const outputText = (resultText || formatted || normalizedRaw || '').trim();
+            setCustomAgentResultPanels(originalHtml || '', outputText);
+            return Boolean(outputText);
         }
 
         function setComparisonStatus(message, state) {
@@ -6334,23 +6510,25 @@
                         });
                     }
 
-                    if (correctedContent && originalPythonHtml) {
-                        await requestAgentDiff(originalPythonHtml, correctedContent, correctedIsHtml, cacheBaseKey);
-                    } else {
-                        renderAgentDiff(null, agentDiffMode, { hidden: true });
-                    }
-                } else if (ctx.collection === 'joiners') {
-                    const applied = applyJoinerAgentResult(ctx, text);
-                    if (!applied) {
-                        ctx.lastJoinerResult = {
-                            result,
-                            rawText: text,
-                            timestamp: Date.now(),
-                        };
-                    }
-                } else if (ctx.collection === 'readers') {
-                    await applyReaderAgentResult(ctx, result, text);
+                if (correctedContent && originalPythonHtml) {
+                    await requestAgentDiff(originalPythonHtml, correctedContent, correctedIsHtml, cacheBaseKey);
+                } else {
+                    renderAgentDiff(null, agentDiffMode, { hidden: true });
                 }
+            } else if (ctx.collection === 'joiners') {
+                const applied = applyJoinerAgentResult(ctx, text);
+                if (!applied) {
+                    ctx.lastJoinerResult = {
+                        result,
+                        rawText: text,
+                        timestamp: Date.now(),
+                    };
+                }
+            } else if (ctx.collection === 'custom_lmm') {
+                applyCustomAgentResult(originalPythonHtml, result, text);
+            } else if (ctx.collection === 'readers') {
+                await applyReaderAgentResult(ctx, result, text);
+            }
 
                 const elapsedMs = performance.now() - startTime;
                 const elapsedLabel = `${(elapsedMs / 1000).toFixed(2)} s`;
@@ -9519,6 +9697,17 @@
                 readerCtx.autoRunScheduled = false;
             }
 
+            const customCtx = agentContexts.custom;
+            const customAuto = getContextElement(customCtx, 'autoCheckboxId');
+            if (customAuto && customAuto.checked) {
+                if (!customCtx.autoRunScheduled) {
+                    customCtx.autoRunScheduled = true;
+                    scheduleAutoAgentRun(customCtx, 5);
+                }
+            } else {
+                customCtx.autoRunScheduled = false;
+            }
+
             const joinerCtx = agentContexts.joiners;
             stitchRefreshPromise.then(() => {
                 const joinerAuto = getContextElement(joinerCtx, 'autoCheckboxId');
@@ -9927,6 +10116,7 @@
             initializePreviewImageModal();
             initializeDiffControls();
             initializeAgentUI(agentContexts.correctors);
+            initializeAgentUI(agentContexts.custom);
             initializeAgentUI(agentContexts.readers);
             initializeAgentUI(agentContexts.joiners);
             initializeStitchingUI();
